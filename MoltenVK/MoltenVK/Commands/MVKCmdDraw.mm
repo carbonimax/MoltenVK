@@ -17,6 +17,7 @@
  */
 
 #include "MVKCmdDraw.h"
+#include "MVKPerVertexReplay.h"
 #include "MVKCommandBuffer.h"
 #include "MVKCommandPool.h"
 #include "MVKBuffer.h"
@@ -257,36 +258,15 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	if (!indexBinding) { [encoder memoryBarrierWithScope: MTLBarrierScopeBuffers afterStages: MTLRenderStageVertex beforeStages: MTLRenderStageVertex | MTLRenderStageFragment]; }
 	auto* pairs = (uint32_t*)occurrences.contents;
 	auto* indices = (uint32_t*)primitiveIndices.contents;
-	for (uint32_t instance = 0; instance < instanceCount; instance++) {
-		for (uint32_t triangle = 0; triangle < triangleCount; triangle++) {
-			uint32_t key = instance * uint32_t(triangleCount) + triangle;
-			uint32_t vertices[] = {triangle * 3, triangle * 3 + 1, triangle * 3 + 2};
-			// Vulkan primsrast-barycentric-order-table and -last-vertex. MoltenVK
-			// advertises triStripVertexOrderIndependentOfProvokingVertex = false.
-			// These orders also preserve winding and the replay triangle's provoking vertex.
-			if (topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP) {
-				vertices[0] = triangle; vertices[1] = triangle + 1; vertices[2] = triangle + 2;
-				if (triangle & 1) { std::swap(vertices[provokingLast ? 0 : 1], vertices[provokingLast ? 1 : 2]); }
-			} else if (topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN) {
-				vertices[0] = provokingLast ? 0 : triangle + 1;
-				vertices[1] = provokingLast ? triangle + 1 : triangle + 2;
-				vertices[2] = provokingLast ? triangle + 2 : 0;
-			}
-			for (uint32_t vertex = 0; vertex < 3; vertex++) {
-				uint32_t occurrence = key * 3 + vertex;
-				uint32_t record = instance * vertexCount + vertices[vertex];
-				pairs[2 * occurrence] = record;
-				pairs[2 * occurrence + 1] = key;
-				indices[occurrence] = record;
-			}
-		}
-	}
+	auto* corners = (uint32_t*)scratch->buffers[4].contents;
+	mvkPopulatePerVertexReplay(vertexCount, instanceCount, topology, provokingLast, pairs, indices, corners);
 	const auto& replay = pipeline->getPerVertexReplayBinding();
 	const auto& fragment = pipeline->getPerVertexInputBinding();
 	uint32_t replayDraw[] = {0, 0, firstInstance, uint32_t(triangleCount * 3)};
 	[encoder setRenderPipelineState: pipeline->getMainPipelineState()];
 	metalState.bindVertexBuffer(encoder, captured, 0, replay.vertex_buffer_index);
 	metalState.bindVertexBuffer(encoder, occurrences, 0, replay.occurrence_buffer_index);
+	if (corners) { metalState.bindVertexBuffer(encoder, scratch->buffers[4], 0, pipeline->getPerVertexReplayBarycentricBinding().corner_buffer_index); }
 	metalState.bindVertexBytes(encoder, replayDraw, sizeof(replayDraw), replay.draw_parameters_buffer_index);
 	metalState.bindFragmentBuffer(encoder, captured, 0, fragment.vertex_buffer_index);
 	metalState.bindFragmentBuffer(encoder, primitiveIndices, 0, fragment.primitive_index_buffer_index);

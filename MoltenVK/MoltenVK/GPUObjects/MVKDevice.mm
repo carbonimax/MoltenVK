@@ -574,7 +574,8 @@ void MVKPhysicalDevice::getFeatures(VkPhysicalDeviceFeatures2* features) {
 			}
 			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR: {
 				auto* barycentricFeatures = (VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR*)next;
-				barycentricFeatures->fragmentShaderBarycentric = _metalFeatures.shaderBarycentricCoordinates;
+				// KHR and NV are aliases; report the same support gate used by extension enumeration.
+				barycentricFeatures->fragmentShaderBarycentric = _supportedExtensions.vk_KHR_fragment_shader_barycentric.enabled || _supportedExtensions.vk_NV_fragment_shader_barycentric.enabled;
 				break;
 			}
 			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_FEATURES_KHR: {
@@ -3309,6 +3310,7 @@ void MVKPhysicalDevice::initPipelineCacheUUID() {
 	uint32_t mtlFeatures = 0;
 	mtlFeatures |= _isUsingMetalArgumentBuffers << 0;
 	mtlFeatures |= 1u << 1; // Shader cache archive includes the portable PerVertex input ABI.
+	mtlFeatures |= 1u << 2; // Portable barycentric opt-in and private varying locations.
 	*(uint32_t*)&_properties.pipelineCacheUUID[uuidComponentOffset] = NSSwapHostIntToBig(mtlFeatures);
 	uuidComponentOffset += sizeof(mtlFeatures);
 }
@@ -3578,7 +3580,9 @@ void MVKPhysicalDevice::initExtensions() {
 		pWritableExtns->vk_EXT_shader_subgroup_ballot.enabled = false;
 		pWritableExtns->vk_EXT_shader_subgroup_vote.enabled = false;
 	}
-	if (!_metalFeatures.shaderBarycentricCoordinates) {
+	// macOS capture/replay still rejects valid shader forms, topologies and draw modes.
+	// Metal barycentric support alone is not the complete Vulkan feature contract.
+	if (MVK_MACOS || !_metalFeatures.shaderBarycentricCoordinates) {
 		pWritableExtns->vk_KHR_fragment_shader_barycentric.enabled = false;
 		pWritableExtns->vk_NV_fragment_shader_barycentric.enabled = false;
 	}
