@@ -168,8 +168,8 @@ id<MTLComputePipelineState> MVKCommandEncodingPool::getAccumulateOcclusionQueryR
 	MVK_ENC_REZ_ACCESS(_mtlAccumOcclusionQueryResultsComputePipelineState, newAccumulateOcclusionQueryResultsMTLComputePipelineState(_commandPool));
 }
 
-id<MTLComputePipelineState> MVKCommandEncodingPool::getConvertUint8IndicesMTLComputePipelineState() {
-	MVK_ENC_REZ_ACCESS(_mtlConvertUint8IndicesComputePipelineState, newConvertUint8IndicesMTLComputePipelineState(_commandPool));
+id<MTLComputePipelineState> MVKCommandEncodingPool::getConvertUint8IndicesMTLComputePipelineState(bool preserveValues) {
+	MVK_ENC_REZ_ACCESS(_mtlConvertUint8IndicesComputePipelineState[preserveValues], newConvertUint8IndicesMTLComputePipelineState(_commandPool, preserveValues));
 }
 
 void MVKCommandEncodingPool::clear() {
@@ -270,6 +270,5 @@ void MVKCommandEncodingPool::destroyMetalResources() {
     [_mtlAccumOcclusionQueryResultsComputePipelineState release];
     _mtlAccumOcclusionQueryResultsComputePipelineState = nil;
 
-    [_mtlConvertUint8IndicesComputePipelineState release];
-    _mtlConvertUint8IndicesComputePipelineState = nil;
+    for (auto& state : _mtlConvertUint8IndicesComputePipelineState) { [state release]; state = nil; }
 }

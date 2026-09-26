@@ -87,6 +87,20 @@ int main() {
 			assert(corners[0]->buffers[4].length == 12 && corners[0]->buffers[4].contents);
 		}
 		assert(liveBuffers == 0);
+		// UINT8 widening is private GPU scratch and participates in the same transaction.
+		for (unsigned mode = 0; mode < 2; ++mode) {
+			device->calls = 0; device->failAt = 6; device->failureMode = mode;
+			MVKPerVertexScratchReservations widened;
+			assert(!mvkReservePerVertexScratch((id<MTLDevice>)device, {{48, 24, 12, 12, 6}}, widened));
+			assert(widened.empty() && liveBuffers == 0 && device->calls == 6);
+		}
+		device->calls = 0; device->failAt = 0;
+		{
+			MVKPerVertexScratchReservations widened;
+			assert(mvkReservePerVertexScratch((id<MTLDevice>)device, {{48, 24, 12, 12, 6}}, widened));
+			assert(widened[0]->buffers[5].length == 6 && !widened[0]->buffers[5].contents);
+		}
+		assert(liveBuffers == 0);
 		// Reject a real-looking shared buffer with no CPU mapping.
 		device->calls = 0; device->failAt = 2; device->failureMode = 2;
 		MVKPerVertexScratchReservations unmapped;

@@ -10,22 +10,24 @@ struct MVKPerVertexScratchRequest {
 	NSUInteger occurrenceSize;
 	NSUInteger primitiveSize;
 	NSUInteger cornerSize = 0;
+	NSUInteger indexSize = 0;
 };
 
 // Individually owned allocations: the shared scratch pool cannot recover from a nil Metal buffer.
 struct MVKPerVertexScratch {
-	id<MTLBuffer> buffers[5] = {};
+	id<MTLBuffer> buffers[6] = {};
 	MVKPerVertexScratch() = default;
 	MVKPerVertexScratch(const MVKPerVertexScratch&) = delete;
 	MVKPerVertexScratch& operator=(const MVKPerVertexScratch&) = delete;
 	~MVKPerVertexScratch() { for (auto buffer : buffers) { [buffer release]; } }
 
 	bool reserve(id<MTLDevice> device, const MVKPerVertexScratchRequest& request) {
-		NSUInteger lengths[] = {request.captureSize, sizeof(uint32_t), request.occurrenceSize, request.primitiveSize, request.cornerSize};
-		for (size_t i = 0; i < 5; ++i) {
+		NSUInteger lengths[] = {request.captureSize, sizeof(uint32_t), request.occurrenceSize, request.primitiveSize, request.cornerSize, request.indexSize};
+		for (size_t i = 0; i < 6; ++i) {
 			if (!lengths[i]) { continue; }
-			id<MTLBuffer> buffer = [device newBufferWithLength:lengths[i] options:i ? MTLResourceStorageModeShared : MTLResourceStorageModePrivate];
-			if (!buffer || buffer.length < lengths[i] || (i && !buffer.contents)) { [buffer release]; return false; }
+			bool shared = i != 0 && i != 5;
+			id<MTLBuffer> buffer = [device newBufferWithLength:lengths[i] options:shared ? MTLResourceStorageModeShared : MTLResourceStorageModePrivate];
+			if (!buffer || buffer.length < lengths[i] || (shared && !buffer.contents)) { [buffer release]; return false; }
 			buffers[i] = buffer;
 		}
 		return true;

@@ -623,7 +623,8 @@ id<MTLComputePipelineState> MVKCommandResourceFactory::newAccumulateOcclusionQue
 	return newMTLComputePipelineState("accumulateOcclusionQueryResults", owner);
 }
 
-id<MTLComputePipelineState> MVKCommandResourceFactory::newConvertUint8IndicesMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner) {
+id<MTLComputePipelineState> MVKCommandResourceFactory::newConvertUint8IndicesMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner, bool preserveValues) {
+	if (preserveValues) { return newMTLComputePipelineState("convertUint8IndicesRaw", owner); }
 #if MVK_USE_METAL_PRIVATE_API
 	if (getMVKConfig().useMetalPrivateAPI) {
 		// Private API allows us to control restart index and enable. Do not convert restart sentinels.

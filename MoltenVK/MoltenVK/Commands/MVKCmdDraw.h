@@ -21,6 +21,7 @@
 #include "MVKCommand.h"
 #include "MVKMTLResourceBindings.h"
 #include "MVKSmallVector.h"
+#include "MVKPerVertexReplay.h"
 
 #import <Metal/Metal.h>
 
@@ -28,14 +29,16 @@ class MVKGraphicsPipeline;
 
 // Preserve the conservative power-of-two scratch ceiling used by recording validation.
 static inline bool mvkCanEncodePerVertexDraw(uint32_t vertexCount, uint32_t instanceCount, uint32_t stride, VkPrimitiveTopology topology, uint64_t maxMTLBufferSize) {
+	if (!mvkPerVertexReplayVertexCount(topology)) { return false; }
 	if (!vertexCount || !instanceCount) { return true; }
+	if (!maxMTLBufferSize) { return false; }
 	uint64_t maxBufferSize = 1;
 	while (maxBufferSize <= maxMTLBufferSize / 2) { maxBufferSize *= 2; }
 	uint64_t recordCount = uint64_t(vertexCount) * instanceCount;
 	if (!stride || recordCount > UINT32_MAX || recordCount > maxBufferSize / stride) { return false; }
-	uint64_t triangleCount = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ? vertexCount / 3 : (vertexCount > 2 ? vertexCount - 2 : 0);
-	uint64_t occurrenceCount = triangleCount * instanceCount * 3;
-	return occurrenceCount <= UINT32_MAX / 2 && occurrenceCount <= maxBufferSize / (2 * sizeof(uint32_t));
+	uint64_t primitiveCount = uint64_t(mvkPerVertexPrimitiveCount(vertexCount, topology)) * instanceCount;
+	uint64_t occurrenceCount = primitiveCount * mvkPerVertexReplayVertexCount(topology);
+	return primitiveCount <= UINT32_MAX / 3 && primitiveCount <= maxBufferSize / (3 * sizeof(uint32_t)) && occurrenceCount <= UINT32_MAX / 2 && occurrenceCount <= maxBufferSize / (2 * sizeof(uint32_t));
 }
 
 

@@ -1198,8 +1198,8 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 	if (!pVertexSS || !_vertexModule || _vertexModule->getSPIRV().empty() || _isTessellationPipeline || pCreateInfo->stageCount != 2) { return unsupported("requires classic SPIR-V vertex and fragment stages."); }
 	if (getMetalFeatures().mslVersion < CompilerMSL::Options::make_msl_version(2, 4)) { return unsupported("requires MSL 2.4."); }
 	const auto* assembly = pCreateInfo->pInputAssemblyState;
-	if (!assembly || (assembly->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST && assembly->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP && assembly->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN) || _dynamicStateFlags.has(MVKRenderStateFlag::PrimitiveTopology)) { return unsupported("requires a static triangle-list, strip, or fan topology."); }
-	if (pCreateInfo->pInputAssemblyState->primitiveRestartEnable || _dynamicStateFlags.has(MVKRenderStateFlag::PrimitiveRestartEnable)) { return unsupported("does not support primitive restart."); }
+	if (!assembly || !mvkPerVertexReplayVertexCount(assembly->topology) || _dynamicStateFlags.has(MVKRenderStateFlag::PrimitiveTopology)) { return unsupported("requires a static point, line-list/strip, or triangle-list/strip/fan topology."); }
+	if (_dynamicStateFlags.has(MVKRenderStateFlag::PrimitiveRestartEnable)) { return unsupported("does not support dynamic primitive restart."); }
 	if (getRenderingCreateInfo(pCreateInfo)->viewMask || mvkIsAnyFlagEnabled(_flags, VK_PIPELINE_CREATE_2_VIEW_INDEX_FROM_DEVICE_INDEX_BIT)) { return unsupported("does not support multiview or device-index views."); }
 	if (pCreateInfo->pRasterizationState->polygonMode != VK_POLYGON_MODE_FILL || _dynamicStateFlags.has(MVKRenderStateFlag::PolygonMode) || _dynamicStateFlags.has(MVKRenderStateFlag::RasterizerDiscardEnable)) { return unsupported("requires static filled rasterization."); }
 	if (_dynamicStateFlags.has(MVKRenderStateFlag::ProvokingVertexMode)) { return unsupported("does not support dynamic provoking-vertex mode."); }
@@ -1275,6 +1275,10 @@ bool MVKGraphicsPipeline::addPerVertexReplayShaderToPipeline(MTLRenderPipelineDe
 		setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to reflect PerVertexKHR fragment interface: %s", errorLog.c_str()));
 		return false;
 	}
+	if (isRenderingPoints() && !std::any_of(vertexOutputs.begin(), vertexOutputs.end(), [](const auto& output) { return output.builtin == spv::BuiltInPointSize && output.isUsed; })) {
+		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable point replay requires an explicit PointSize output with the pinned compiler."));
+		return false;
+	}
 	std::unordered_set<uint32_t> locations;
 	for (const auto& output : vertexOutputs) { if (output.builtin == spv::BuiltInMax) { locations.insert(output.location); } }
 	for (const auto& input : fragmentInputs) { if (input.builtin == spv::BuiltInMax) { locations.insert(input.location); } }
@@ -1302,6 +1306,8 @@ bool MVKGraphicsPipeline::addPerVertexReplayShaderToPipeline(MTLRenderPipelineDe
 		auto options = shaderConfig.options.mslOptions;
 		options.capture_output_to_buffer = false;
 		options.disable_rasterization = false;
+		// PointSize is captured from the producer; the pinned replay API cannot synthesize it.
+		options.enable_point_size_default = false;
 		options.emulate_reversed_depth_viewport = getPhysicalDevice()->shouldEmulateReversedDepthViewport();
 		options.reversed_depth_viewport_buffer_index = getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::EmulatedReversedDepthViewport];
 		replay.set_msl_options(options);
@@ -1334,10 +1340,10 @@ bool MVKGraphicsPipeline::addPerVertexReplayShaderToPipeline(MTLRenderPipelineDe
 	plDesc.rasterizationEnabled = NO;
 	plDesc.alphaToCoverageEnabled = NO;
 	plDesc.alphaToOneEnabled = NO;
-	// Capture every strip/fan vertex, including a final incomplete triangle-list group.
+	// Capture point/line and strip/fan vertices individually.
 	if (pCreateInfo->pInputAssemblyState->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) { plDesc.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint; }
 	bool captured = !!getOrCompilePipeline(plDesc, _mtlPerVertexCapturePipelineState);
-	plDesc.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+	plDesc.inputPrimitiveTopology = getPrimitiveTopologyClass();
 	plDesc.vertexFunction = function;
 	[function release];
 	plDesc.vertexDescriptor = nil;
