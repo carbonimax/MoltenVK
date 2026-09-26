@@ -666,7 +666,12 @@ template <size_t N>
 void MVKQueueFullCommandBufferSubmission<N>::submitCommandBuffers() {
 	uint64_t startTime = getPerformanceTimestamp();
 
-	for (auto& cbInfo : _cmdBuffers) { cbInfo.commandBuffer->submit(this, &_encodingContext); }
+	for (auto& cbInfo : _cmdBuffers) {
+		cbInfo.commandBuffer->submit(this, &_encodingContext);
+		// Preserve encode-time failures for synchronous submissions. Async submit has
+		// already returned; allocation pressure must not be promoted to device loss.
+		setConfigurationResult(cbInfo.commandBuffer->getConfigurationResult());
+	}
 
 	addPerformanceInterval(getPerformanceStats().queue.submitCommandBuffers, startTime);
 }
@@ -850,4 +855,3 @@ MVKQueuePresentSurfaceSubmission::MVKQueuePresentSurfaceSubmission(MVKQueue* que
 		setConfigurationResult(scRslt);
 	}
 }
-

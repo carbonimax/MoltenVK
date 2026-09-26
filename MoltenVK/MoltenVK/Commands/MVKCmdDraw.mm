@@ -130,7 +130,7 @@ VkResult MVKCmdDraw::setContent(MVKCommandBuffer* cmdBuff,
         return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCmdDraw(): The current device does not support drawing with a non-zero base instance.");
     }
 
-	return VK_SUCCESS;
+	return cmdBuff->recordPerVertexDraw(_vertexCount, _instanceCount);
 }
 
 // Populates and encodes a MVKCmdDrawIndexedIndirect command, after populating indexed indirect buffers.
@@ -164,11 +164,8 @@ void MVKCmdDraw::encodeIndexedIndirect(MVKCommandEncoder* cmdEncoder) {
 	ibb.size = vtxIdxBuff->_length;
 
 	MVKCmdDrawIndexedIndirect diiCmd;
-	diiCmd.setContent(cmdEncoder->_cmdBuffer,
-					  indirectIdxBuff->_mtlBuffer,
-					  indirectIdxBuff->_offset,
-					  1,
-					  indirectIdxBuffStride);
+	VkResult result = diiCmd.setContent(cmdEncoder->_cmdBuffer, indirectIdxBuff->_mtlBuffer, indirectIdxBuff->_offset, 1, indirectIdxBuffStride);
+	if (result != VK_SUCCESS) { cmdEncoder->_cmdBuffer->setConfigurationResult(result); return; }
 	diiCmd.encode(cmdEncoder, ibb);
 }
 
@@ -209,10 +206,7 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	uint64_t triangleCount = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ? vertexCount / 3 : (vertexCount > 2 ? vertexCount - 2 : 0);
 	uint64_t primitiveCount = triangleCount * instanceCount;
 	uint64_t occurrenceCount = primitiveCount * 3;
-	// The allocator rounds requests up to a power of two.
-	uint64_t maxBufferSize = 1;
-	while (maxBufferSize <= cmdEncoder->getMetalFeatures().maxMTLBufferSize / 2) { maxBufferSize *= 2; }
-	if (!layout.stride || recordCount > UINT32_MAX || primitiveCount > UINT32_MAX || occurrenceCount > UINT32_MAX / 2 || recordCount > maxBufferSize / layout.stride || occurrenceCount > maxBufferSize / (2 * sizeof(uint32_t))) {
+	if (!mvkCanEncodePerVertexDraw(vertexCount, instanceCount, layout.stride, topology, cmdEncoder->getMetalFeatures().maxMTLBufferSize)) {
 		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR draw exceeds its capture or replay buffer limits."));
 		return;
 	}
@@ -535,7 +529,7 @@ VkResult MVKCmdDrawIndexed::setContent(MVKCommandBuffer* cmdBuff,
         return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCmdDrawIndexed(): The current device does not support drawing with a non-zero base vertex.");
     }
 
-	return _indexCount && _instanceCount ? cmdBuff->recordIndexedPerVertexDraw() : VK_SUCCESS;
+	return cmdBuff->recordPerVertexDraw(_indexCount, _instanceCount, true);
 }
 
 // Populates and encodes a MVKCmdDrawIndexedIndirect command, after populating an indexed indirect buffer.
@@ -552,11 +546,8 @@ void MVKCmdDrawIndexed::encodeIndexedIndirect(MVKCommandEncoder* cmdEncoder) {
 	pIndArg->baseInstance = _firstInstance;
 
 	MVKCmdDrawIndexedIndirect diiCmd;
-	diiCmd.setContent(cmdEncoder->_cmdBuffer,
-					  indirectIdxBuff->_mtlBuffer,
-					  indirectIdxBuff->_offset,
-					  1,
-					  indirectIdxBuffStride);
+	VkResult result = diiCmd.setContent(cmdEncoder->_cmdBuffer, indirectIdxBuff->_mtlBuffer, indirectIdxBuff->_offset, 1, indirectIdxBuffStride);
+	if (result != VK_SUCCESS) { cmdEncoder->_cmdBuffer->setConfigurationResult(result); return; }
 	diiCmd.encode(cmdEncoder);
 }
 
@@ -1019,11 +1010,8 @@ void MVKCmdDrawIndirect::encodeIndexedIndirect(MVKCommandEncoder* cmdEncoder,
 	cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass);
 
 	MVKCmdDrawIndexedIndirect diiCmd;
-	diiCmd.setContent(cmdEncoder->_cmdBuffer,
-					  indirectIdxBuff->_mtlBuffer,
-					  indirectIdxBuff->_offset,
-					  _drawCount,
-					  indirectIdxBuffStride);
+	VkResult result = diiCmd.setContent(cmdEncoder->_cmdBuffer, indirectIdxBuff->_mtlBuffer, indirectIdxBuff->_offset, _drawCount, indirectIdxBuffStride);
+	if (result != VK_SUCCESS) { cmdEncoder->_cmdBuffer->setConfigurationResult(result); return; }
 	diiCmd.encode(cmdEncoder, ibb);
 }
 
@@ -1331,6 +1319,10 @@ VkResult MVKCmdDrawIndexedIndirect::setContent(MVKCommandBuffer* cmdBuff,
 											   VkDeviceSize offset,
 											   uint32_t drawCount,
 											   uint32_t stride) {
+	if (cmdBuff->recordedGraphicsPipelineUsesPerVertexInput()) { return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed indirect draws require GPU-sized occurrence capture."); }
+	if (cmdBuff->_lastTessellationPipeline && !cmdBuff->getMetalFeatures().indirectTessellationDrawing) {
+		return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCmdDrawIndexedIndirect(): The current device does not support indirect tessellated drawing.");
+	}
 	auto* mvkBuff = (MVKBuffer*)buffer;
 	return setContent(cmdBuff,
 					  mvkBuff->getMTLBuffer(),
@@ -1344,7 +1336,7 @@ VkResult MVKCmdDrawIndexedIndirect::setContent(MVKCommandBuffer* cmdBuff,
 										   VkDeviceSize indirectMTLBuffOffset,
 										   uint32_t drawCount,
 										   uint32_t stride) {
-	if (cmdBuff->recordedGraphicsPipelineUsesPerVertexInput()) { return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed indirect draws require GPU-sized occurrence capture."); }
+	// Also used during fan encoding: recording state may describe a later pipeline.
 	_mtlIndirectBuffer = indirectMTLBuff;
 	_mtlIndirectBufferOffset = indirectMTLBuffOffset;
 	_mtlIndirectBufferStride = stride;
@@ -1356,9 +1348,6 @@ VkResult MVKCmdDrawIndexedIndirect::setContent(MVKCommandBuffer* cmdBuff,
 	auto& mtlFeats = cmdBuff->getMetalFeatures();
 	if ( !mtlFeats.indirectDrawing ) {
 		return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCmdDrawIndexedIndirect(): The current device does not support indirect drawing.");
-	}
-	if (cmdBuff->_lastTessellationPipeline && !mtlFeats.indirectTessellationDrawing) {
-		return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCmdDrawIndexedIndirect(): The current device does not support indirect tessellated drawing.");
 	}
 
 	return VK_SUCCESS;

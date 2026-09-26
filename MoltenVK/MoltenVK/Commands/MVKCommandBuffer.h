@@ -154,7 +154,7 @@ public:
 	void recordRenderPass(MVKFramebuffer* framebuffer) { _recordedFramebuffer = framebuffer; _recordedRenderingError = nullptr; }
 	void recordRendering(const VkRenderingInfo* renderingInfo);
 	void recordIndexType(VkIndexType indexType) { _recordedIndexType = indexType; }
-	VkResult recordIndexedPerVertexDraw();
+	VkResult recordPerVertexDraw(uint32_t vertexCount, uint32_t instanceCount, bool indexed = false);
 
 	/** Called when a timestamp command is added. */
 	void recordTimestampCommand();
@@ -167,8 +167,7 @@ public:
 
 	/** The most recent recorded tessellation pipeline */
 	MVKCmdBindPipeline* _lastTessellationPipeline;
-	bool _recordedGraphicsPipelineUsesPerVertexInput = false;
-	bool recordedGraphicsPipelineUsesPerVertexInput() const { return _recordedGraphicsPipelineUsesPerVertexInput; }
+	bool recordedGraphicsPipelineUsesPerVertexInput() const { return _recordedPerVertexPipeline != nullptr; }
 
 
 #pragma mark Construction
@@ -205,6 +204,7 @@ protected:
 	void checkDeferredEncoding();
 	void beginSecondaryEncoding(MVKCommandEncoder* cmdEncoder);
 	VkResult validateIndexedPerVertexAttachments();
+	MVKGraphicsPipeline* _recordedPerVertexPipeline = nullptr;
 
 	MVKFramebuffer* _recordedFramebuffer = nullptr;
 	const char* _recordedRenderingError = nullptr;

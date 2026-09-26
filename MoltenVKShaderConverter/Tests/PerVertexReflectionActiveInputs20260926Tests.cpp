@@ -103,6 +103,14 @@ int main(int argc, char** argv) {
 				expect(words, "", active);
 				expect(words, "other", true);
 				expect(words, "missing", false, false);
+				for (const std::string entry : {"main", "other"}) {
+					std::vector<mvk::SPIRVShaderInterfaceVariable> inputs;
+					std::string error;
+					check(mvk::getShaderInputs(words, spv::ExecutionModelFragment, entry, inputs, error), error.c_str());
+					bool used = active || entry == "other";
+					check(inputs.size() == (used ? 1u : 0u), "Inactive input or PerVertex vertex dimension consumed a location");
+					if (used) { check(inputs[0].perVertex && inputs[0].location == 0, "Variable/member PerVertex leaf metadata lost"); }
+				}
 			}
 		}
 		auto vertex = fixture(false, false);
