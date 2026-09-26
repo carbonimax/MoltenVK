@@ -547,54 +547,91 @@ kernel void convertUint8IndicesRaw(device uint8_t* src [[ buffer(0) ]],
 	uint8_t idx = src[pos];
 	dst[pos] = idx;
 }
-// One invocation per draw. Counts are CPU-bounded before queue submission; index data stays on GPU.
-// p: indexCount, instanceCount, indexBytes, VkPrimitiveTopology, provokingLast, firstInstance, corners.
-// args: dispatch at byte 0, draw arguments at byte 16, replay parameters at byte 256 (constant-buffer alignment).
-kernel void perVertexRestart(const device uint8_t* source [[buffer(0)]], device uint* compact [[buffer(1)]], device uint* pairs [[buffer(2)]], device uint* triplets [[buffer(3)]], device uint* corners [[buffer(4)]], device uint* args [[buffer(5)]], constant uint* p [[buffer(6)]]) {
-    uint captured = 0, primitives = 0, segmentCount = 0, segmentStart = 0;
+uint perVertexRestartPrimitiveCount(uint count, uint topology) {
+    return topology == 0 ? count : topology == 1 ? count / 2 : topology == 2 ? (count > 1 ? count - 1 : 0) : topology == 3 ? count / 3 : (count > 2 ? count - 2 : 0);
+}
+// Parallel prefix over contiguous segments: (valid indices, leading run, trailing run, primitives).
+// Merging adjacent intervals only changes primitives where their boundary runs join.
+// p: indexCount, instances, indexBytes, topology, provokingLast, firstInstance, corners, phase, scanStep, scanSource.
+// Phases: initialize, ping-pong prefix, compact/base triplets, expand instances. Barrier between every dispatch.
+// args: capture dispatch at byte 0, replay draw at byte 16, replay constants at byte 256.
+kernel void perVertexRestart(const device uint8_t* source [[buffer(0)]], device uint* compact [[buffer(1)]], device uint* pairs [[buffer(2)]], device uint* triplets [[buffer(3)]], device uint* corners [[buffer(4)]], device uint* args [[buffer(5)]], constant uint* p [[buffer(6)]], uint i [[thread_position_in_grid]]) {
     uint topology = p[3], rasterVertices = topology == 0 ? 1 : topology <= 2 ? 2 : 3;
-    uint sentinel = p[2] == 1 ? 255u : p[2] == 2 ? 65535u : 0xffffffffu;
-    for (uint i = 0; i < p[0]; ++i) {
+    if (!p[0]) {
+        if (i) { return; }
+        args[0] = 0; args[1] = 0; args[2] = 1; args[3] = 0;
+        args[4] = 0; args[5] = 0; args[6] = 0; args[7] = p[5];
+        args[64] = 0; args[65] = 0; args[66] = p[5]; args[67] = 0;
+        return;
+    }
+    if (p[7] == 3) {
+        uint captured = args[0], primitives = args[4] / rasterVertices;
+        if (i >= primitives * p[1]) { return; }
+        uint instance = i / primitives, primitive = i % primitives;
+        for (uint corner = 0; corner < 3; ++corner) {
+            uint record = instance * captured + triplets[3 * primitive + corner];
+            // Keep the base triplets read-only while other instances read them.
+            if (instance) { triplets[3 * i + corner] = record; }
+            if (corner >= rasterVertices) { continue; }
+            uint occurrence = i * rasterVertices + corner;
+            pairs[2 * occurrence] = record;
+            pairs[2 * occurrence + 1] = i;
+            if (p[6]) { corners[occurrence] = corner; }
+        }
+        return;
+    }
+    if (i >= p[0]) { return; }
+    uint64_t offset = uint64_t(p[0]) + uint64_t(p[9]) * p[0] * 4 + uint64_t(i) * 4;
+    if (p[7] == 0) {
         uint index = 0;
-        for (uint b = 0; b < p[2]; ++b) { index |= uint(source[i * p[2] + b]) << (8 * b); }
-        if (index == sentinel) { segmentCount = 0; segmentStart = captured; continue; }
-        compact[captured++] = index;
-        ++segmentCount;
-        bool emit = topology == 0 || (topology == 1 && segmentCount % 2 == 0) || (topology == 2 && segmentCount >= 2) || (topology == 3 && segmentCount % 3 == 0) || (topology >= 4 && segmentCount >= 3);
-        if (!emit) { continue; }
-        uint a = captured - 1, b = a, c = a;
-        if (rasterVertices == 2) { a = captured - 2; }
-        if (rasterVertices == 3) { a = captured - 3; b = captured - 2; }
-        if (topology == 4 && ((segmentCount - 3) & 1)) {
-            if (p[4]) { uint tmp = a; a = b; b = tmp; }
-            else { uint tmp = b; b = c; c = tmp; }
-        }
-        if (topology == 5) {
-            a = p[4] ? segmentStart : captured - 2;
-            b = p[4] ? captured - 2 : captured - 1;
-            c = p[4] ? captured - 1 : segmentStart;
-        }
-        triplets[3 * primitives] = a;
-        triplets[3 * primitives + 1] = b;
-        triplets[3 * primitives + 2] = c;
-        ++primitives;
+        for (uint b = 0; b < p[2]; ++b) { index |= uint(source[uint64_t(i) * p[2] + b]) << (8 * b); }
+        uint sentinel = p[2] == 1 ? 255u : p[2] == 2 ? 65535u : 0xffffffffu;
+        uint valid = uint(index != sentinel);
+        compact[offset] = valid; compact[offset + 1] = valid; compact[offset + 2] = valid;
+        compact[offset + 3] = perVertexRestartPrimitiveCount(valid, topology);
+        return;
     }
-    for (uint instance = 0; instance < p[1]; ++instance) {
-        for (uint primitive = 0; primitive < primitives; ++primitive) {
-            uint key = instance * primitives + primitive;
-            for (uint corner = 0; corner < 3; ++corner) {
-                uint record = instance * captured + triplets[3 * primitive + corner];
-                triplets[3 * key + corner] = record;
-                if (corner >= rasterVertices) { continue; }
-                uint occurrence = key * rasterVertices + corner;
-                pairs[2 * occurrence] = record;
-                pairs[2 * occurrence + 1] = key;
-                if (p[6]) { corners[occurrence] = corner; }
-            }
+    uint captured = compact[offset], head = compact[offset + 1], tail = compact[offset + 2], primitives = compact[offset + 3];
+    if (p[7] == 1) {
+        uint step = p[8];
+        if (i >= step) {
+            uint64_t left = offset - uint64_t(step) * 4;
+            uint leftCaptured = compact[left], leftHead = compact[left + 1], leftTail = compact[left + 2];
+            primitives += compact[left + 3] - perVertexRestartPrimitiveCount(leftTail, topology);
+            primitives -= perVertexRestartPrimitiveCount(head, topology);
+            primitives += perVertexRestartPrimitiveCount(leftTail + head, topology);
+            tail = captured == step ? leftTail + tail : tail;
+            head = leftCaptured == min(step, i - step + 1) ? leftHead + head : leftHead;
+            captured += leftCaptured;
         }
+        uint64_t destination = uint64_t(p[0]) + uint64_t(p[9] ^ 1) * p[0] * 4 + uint64_t(i) * 4;
+        compact[destination] = captured; compact[destination + 1] = head; compact[destination + 2] = tail; compact[destination + 3] = primitives;
+        return;
     }
-    args[0] = captured; args[1] = captured ? p[1] : 0; args[2] = 1; args[3] = 0;
-    args[4] = primitives * rasterVertices; args[5] = primitives ? p[1] : 0; args[6] = 0; args[7] = p[5];
-    args[64] = 0; args[65] = 0; args[66] = p[5]; args[67] = primitives * rasterVertices;
+    if (i == p[0] - 1) {
+        args[0] = captured; args[1] = captured ? p[1] : 0; args[2] = 1; args[3] = 0;
+        args[4] = primitives * rasterVertices; args[5] = primitives ? p[1] : 0; args[6] = 0; args[7] = p[5];
+        args[64] = 0; args[65] = 0; args[66] = p[5]; args[67] = primitives * rasterVertices;
+    }
+    if (!tail) { return; } // Restart marker: never invoke the application's vertex shader for it.
+    uint index = 0;
+    for (uint b = 0; b < p[2]; ++b) { index |= uint(source[uint64_t(i) * p[2] + b]) << (8 * b); }
+    compact[captured - 1] = index;
+    if (perVertexRestartPrimitiveCount(tail, topology) == perVertexRestartPrimitiveCount(tail - 1, topology)) { return; }
+    uint a = captured - 1, b = a, c = a;
+    if (rasterVertices == 2) { a = captured - 2; }
+    if (rasterVertices == 3) { a = captured - 3; b = captured - 2; }
+    if (topology == 4 && ((tail - 3) & 1)) {
+        if (p[4]) { uint tmp = a; a = b; b = tmp; }
+        else { uint tmp = b; b = c; c = tmp; }
+    }
+    if (topology == 5) {
+        a = p[4] ? captured - tail : captured - 2;
+        b = p[4] ? captured - 2 : captured - 1;
+        c = p[4] ? captured - 1 : captured - tail;
+    }
+    triplets[3 * (primitives - 1)] = a;
+    triplets[3 * (primitives - 1) + 1] = b;
+    triplets[3 * (primitives - 1) + 2] = c;
 }
 )";
