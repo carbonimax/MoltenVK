@@ -2,6 +2,7 @@
 #include "SPIRVToMSLConverter.h"
 #include "SPIRVReflection.h"
 #include "MVKPerVertexReplay.h"
+#include "MVKPerVertexCapacity.h"
 #include <cereal/archives/binary.hpp>
 #include <cereal/types/map.hpp>
 #include <cereal/types/string.hpp>
@@ -24,6 +25,93 @@ static std::vector<uint32_t> readSPIRV(const std::string& path) {
 	stream.read(reinterpret_cast<char*>(result.data()), size);
 	check(bool(stream), "Failed fixture read");
 	return result;
+}
+static unsigned pipelineBarycentricMask(const std::vector<SPIRVShaderInterfaceVariable>& inputs) {
+	bool _usesPerspectiveBarycentrics = false, _usesNoPerspectiveBarycentrics = false;
+#include "PipelineBarycentricSelection.inc"
+	return unsigned(_usesPerspectiveBarycentrics) | (unsigned(_usesNoPerspectiveBarycentrics) << 1);
+}
+static void checkActiveBarycentrics(const std::string& directory) {
+	struct Case { const char* fixture; const char* entry; unsigned mask; };
+	const Case cases[] = {
+		{"active-block", "perspective", 1}, {"active-block", "linear", 2},
+		{"active-block", "ordinary", 0}, {"active-block", "both", 3}, {"active-block", "unused", 0},
+		{"active-block", "explicit_perspective", 1}, {"active-block", "explicit_linear", 2},
+		{"explicit-only", "main", 3}, {"copied-pointer", "main", 3},
+		{"copied-pointer", "direct_helper", 3}, {"copied-pointer", "block_helper", 3},
+		{"copied-pointer", "array_helper", 1}, {"copied-pointer", "component_alias", 2}
+	};
+	unsigned failures = 0;
+	for (const auto& c : cases) {
+		try {
+			auto words = readSPIRV(directory + "/" + c.fixture + ".spv");
+			const auto original = words;
+			std::vector<SPIRVShaderInterfaceVariable> inputs;
+			std::string error;
+			check(getShaderInputs(words, spv::ExecutionModelFragment, c.entry, inputs, error), error.c_str());
+			check(words == original, "Reflection modified the input module");
+			unsigned mask = pipelineBarycentricMask(inputs);
+			unsigned reflectedMask = 0;
+			for (const auto& input : inputs) {
+				if (input.isUsed && input.builtin == spv::BuiltInBaryCoordKHR) { reflectedMask |= 1; }
+				if (input.isUsed && input.builtin == spv::BuiltInBaryCoordNoPerspKHR) { reflectedMask |= 2; }
+			}
+			check(mask == c.mask, "Pipeline selected an inactive basis or omitted an active basis");
+			check(reflectedMask == c.mask, "Reflection omitted explicit interpolation or included an inactive member");
+			bool perVertex = true;
+			check(getFragmentShaderUsesPerVertexInput(words, c.entry, perVertex, error) && !perVertex, "Unexpected PerVertex input");
+			check((perVertex || mask) == bool(c.mask), "Wrong portable path selection");
+			if (!mask) {
+				// Selection-only: native MSL lowering of mixed builtin blocks is outside this regression.
+				std::cout << "PASS activity (selection only): " << c.fixture << "/" << c.entry << " mask=0\n";
+				continue;
+			}
+			SPIRVToMSLConverter converter;
+			SPIRVToMSLConversionConfiguration cfg;
+			cfg.options.entryPointName = c.entry;
+			cfg.options.entryPointStage = spv::ExecutionModelFragment;
+			cfg.options.mslOptions.set_msl_version(2, 4);
+			if (mask) { cfg.setFragmentBarycentricInput({mask & 1 ? 8u : ~0u, mask & 2 ? 9u : ~0u}); }
+			converter.setSPIRV(words.data(), words.size());
+			SPIRVToMSLConversionResult result;
+			check(converter.convert(cfg, result), result.resultLog.c_str());
+			check((result.msl.find("user(locn8)") != std::string::npos) == bool(mask & 1), "Wrong perspective varying");
+			check((result.msl.find("user(locn9)") != std::string::npos) == bool(mask & 2), "Wrong linear varying");
+			auto contains = [&](const char* text) { return result.msl.find(text) != std::string::npos; };
+			if (std::string(c.entry).find("explicit_") == 0) {
+				check(contains(".interpolate_at_centroid()") && contains(".interpolate_at_sample(1u).y") && contains(" + 0.4375).y"), "Copied block/scalar pointers lost their explicit interpolation or component");
+			}
+			if (std::string(c.fixture) == "copied-pointer") {
+				std::string entry = c.entry;
+				check(!contains("_m4294967295"), "Copied pointer lost its interface member");
+				if (entry == "component_alias") { check(contains("in.gl_BaryCoordNoPerspEXT.interpolate_at_centroid().y"), "Empty access chain lost its scalar component"); }
+				if (entry == "main") { check(contains("in.gl_BaryCoordNoPerspEXT.interpolate_at_centroid()"), "Copied vector lost explicit interpolation"); }
+				if (entry == "array_helper") { check(contains(" + 0.4375).z"), "Copied array pointer lost its scalar component"); }
+				if (entry == "direct_helper" || entry == "block_helper") {
+					check(contains("in.gl_BaryCoordEXT.interpolate_at_centroid().y") && contains("in.gl_BaryCoordNoPerspEXT.interpolate_at_sample(1u)") && contains(" + 0.4375)[") && contains(".interpolate_at_sample(1u)["), "Copied helper pointer lost its source, interpolation or dynamic component");
+				}
+			}
+			std::ofstream(directory + "/activity-" + c.fixture + "-" + c.entry + ".metal") << result.msl;
+			if (mask == 1 || mask == 2) {
+				for (uint32_t limit : {60u, 124u}) {
+					auto producer = readSPIRV(directory + "/dense-" + std::to_string(limit / 4) + ".spv");
+					SPIRVToMSLConversionConfiguration capture;
+					capture.options.entryPointName = "main";
+					capture.options.entryPointStage = spv::ExecutionModelVertex;
+					capture.options.mslOptions.set_msl_version(2, 4);
+					capture.options.mslOptions.capture_output_to_buffer = true;
+					capture.exportCapturedVertexLayout = true;
+					converter.setSPIRV(producer.data(), producer.size());
+					check(converter.convert(capture, result), result.resultLog.c_str());
+					const auto& layout = result.resultInfo.capturedVertexLayout;
+					check(mvkPerVertexReplayVaryingComponents(layout, mask & 1, mask & 2) == limit - 2, "Dense producer charged an inactive basis");
+					check(mvkPerVertexReplayVaryingComponents(layout, true, true) == limit + 1, "Dense fixture does not reproduce F1 capacity rejection");
+				}
+			}
+			std::cout << "PASS activity: " << c.fixture << "/" << c.entry << " mask=" << mask << '\n';
+		} catch (const std::exception& e) { ++failures; std::cerr << "FAIL activity: " << c.fixture << "/" << c.entry << ": " << e.what() << '\n'; }
+	}
+	check(!failures, "Barycentric activity regression failed");
 }
 static void checkDraws() {
 	struct Case { VkPrimitiveTopology topology; bool last; uint32_t count; std::vector<uint32_t> records; };
@@ -62,6 +150,7 @@ int main(int argc, char** argv) {
 	try {
 		check(argc == 2, "Usage: portable-barycentric-test output-directory");
 		std::string directory = argv[1];
+		checkActiveBarycentrics(directory);
 		checkDraws();
 		auto producer = readSPIRV(directory + "/producer.spv");
 		SPIRVToMSLConverter converter;
