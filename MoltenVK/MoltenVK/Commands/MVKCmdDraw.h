@@ -24,6 +24,8 @@
 
 #import <Metal/Metal.h>
 
+class MVKGraphicsPipeline;
+
 
 #pragma mark -
 #pragma mark MVKCmdBindVertexBuffers
@@ -99,6 +101,7 @@ public:
 						uint32_t drawIndex = 0);
 
     void encode(MVKCommandEncoder* cmdEncoder) override;
+	void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline);
 	void encodeIndexedIndirect(MVKCommandEncoder* cmdEncoder);
 
 protected:
@@ -127,6 +130,7 @@ public:
 						uint32_t drawIndex = 0);
 
 	void encode(MVKCommandEncoder* cmdEncoder) override;
+	void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline);
 
 protected:
 	MVKCommandTypePool<MVKCommand>* getTypePool(MVKCommandPool* cmdPool) override;

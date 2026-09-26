@@ -3308,6 +3308,7 @@ void MVKPhysicalDevice::initPipelineCacheUUID() {
 	// might affect the contents of the pipeline cache (mostly MSL content).
 	uint32_t mtlFeatures = 0;
 	mtlFeatures |= _isUsingMetalArgumentBuffers << 0;
+	mtlFeatures |= 1u << 1; // Shader cache archive includes the portable PerVertex input ABI.
 	*(uint32_t*)&_properties.pipelineCacheUUID[uuidComponentOffset] = NSSwapHostIntToBig(mtlFeatures);
 	uuidComponentOffset += sizeof(mtlFeatures);
 }

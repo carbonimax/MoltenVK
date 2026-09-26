@@ -149,7 +149,12 @@ public:
     bool _needsVisibilityResultMTLBuffer;
 
 	/** Called when a MVKCmdExecuteCommands is added to this command buffer. */
-	void recordExecuteCommands(MVKArrayRef<MVKCommandBuffer*const> secondaryCommandBuffers);
+	VkResult recordExecuteCommands(MVKArrayRef<MVKCommandBuffer*const> secondaryCommandBuffers);
+
+	void recordRenderPass(MVKFramebuffer* framebuffer) { _recordedFramebuffer = framebuffer; _recordedRenderingError = nullptr; }
+	void recordRendering(const VkRenderingInfo* renderingInfo);
+	void recordIndexType(VkIndexType indexType) { _recordedIndexType = indexType; }
+	VkResult recordIndexedPerVertexDraw();
 
 	/** Called when a timestamp command is added. */
 	void recordTimestampCommand();
@@ -162,6 +167,8 @@ public:
 
 	/** The most recent recorded tessellation pipeline */
 	MVKCmdBindPipeline* _lastTessellationPipeline;
+	bool _recordedGraphicsPipelineUsesPerVertexInput = false;
+	bool recordedGraphicsPipelineUsesPerVertexInput() const { return _recordedGraphicsPipelineUsesPerVertexInput; }
 
 
 #pragma mark Construction
@@ -197,6 +204,12 @@ protected:
 	void flushImmediateCmdEncoder();
 	void checkDeferredEncoding();
 	void beginSecondaryEncoding(MVKCommandEncoder* cmdEncoder);
+	VkResult validateIndexedPerVertexAttachments();
+
+	MVKFramebuffer* _recordedFramebuffer = nullptr;
+	const char* _recordedRenderingError = nullptr;
+	VkIndexType _recordedIndexType = VK_INDEX_TYPE_MAX_ENUM;
+	bool _needsInheritedPerVertexAttachments = false;
 
 	MVKCommand* _head = nullptr;
 	MVKCommand* _tail = nullptr;

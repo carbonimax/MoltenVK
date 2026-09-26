@@ -143,6 +143,15 @@ VkResult MVKCommandBuffer::begin(const VkCommandBufferBeginInfo* pBeginInfo) {
 		_secondaryInheritanceRenderingInfo.pColorAttachmentFormats = _secondaryInheritanceColorAttachmentFormats.data();
 	}
 
+	if (_doesContinueRenderPass) {
+		_currentSubpassInfo.renderpass = (MVKRenderPass*)_secondaryInheritanceInfo.renderPass;
+		_currentSubpassInfo.subpassIndex = _secondaryInheritanceInfo.subpass;
+		_recordedFramebuffer = (MVKFramebuffer*)_secondaryInheritanceInfo.framebuffer;
+		if (!_currentSubpassInfo.renderpass && _hasSecondaryInheritanceRenderingInfo && _secondaryInheritanceRenderingInfo.rasterizationSamples != VK_SAMPLE_COUNT_1_BIT) {
+			_recordedRenderingError = "indexed compute capture requires single-sample attachments.";
+		}
+	}
+
 	if (pInheritAttLocInfo) {
 		_secondaryInheritanceColorAttachmentLocations.assign(pInheritAttLocInfo->pColorAttachmentLocations,
 															 pInheritAttLocInfo->pColorAttachmentLocations + pInheritAttLocInfo->colorAttachmentCount);
@@ -244,6 +253,11 @@ VkResult MVKCommandBuffer::reset(VkCommandBufferResetFlags flags) {
 	_needsVisibilityResultMTLBuffer = false;
 	_hasStageCounterTimestampCommand = false;
 	_lastTessellationPipeline = nullptr;
+	_recordedGraphicsPipelineUsesPerVertexInput = false;
+	_recordedFramebuffer = nullptr;
+	_recordedRenderingError = nullptr;
+	_recordedIndexType = VK_INDEX_TYPE_MAX_ENUM;
+	_needsInheritedPerVertexAttachments = false;
 	setConfigurationResult(VK_NOT_READY);
 
 	if (mvkAreAllFlagsEnabled(flags, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT)) {
@@ -263,7 +277,7 @@ VkResult MVKCommandBuffer::end() {
 }
 
 void MVKCommandBuffer::checkDeferredEncoding() {
-	if (getMVKConfig().prefillMetalCommandBuffers == MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS_STYLE_DEFERRED_ENCODING) {
+	if (_prefilledMTLCmdBuffer && getMVKConfig().prefillMetalCommandBuffers == MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS_STYLE_DEFERRED_ENCODING) {
 		@autoreleasepool {
 			MVKCommandEncodingContext encodingContext;
 			MVKCommandEncoder encoder(this);
@@ -383,11 +397,50 @@ MVKCommandBuffer::~MVKCommandBuffer() {
 }
 
 // Promote the initial visibility buffer and indication of timestamp use from the secondary buffers.
-void MVKCommandBuffer::recordExecuteCommands(MVKArrayRef<MVKCommandBuffer*const> secondaryCommandBuffers) {
+VkResult MVKCommandBuffer::recordExecuteCommands(MVKArrayRef<MVKCommandBuffer*const> secondaryCommandBuffers) {
 	for (MVKCommandBuffer* cmdBuff : secondaryCommandBuffers) {
 		if (cmdBuff->_needsVisibilityResultMTLBuffer) { _needsVisibilityResultMTLBuffer = true; }
 		if (cmdBuff->_hasStageCounterTimestampCommand) { _hasStageCounterTimestampCommand = true; }
+		if (cmdBuff->getConfigurationResult() != VK_SUCCESS) { return cmdBuff->getConfigurationResult(); }
+		if (cmdBuff->_needsInheritedPerVertexAttachments) {
+			VkResult result = validateIndexedPerVertexAttachments();
+			if (result != VK_SUCCESS) { return result; }
+		}
 	}
+	return VK_SUCCESS;
+}
+
+void MVKCommandBuffer::recordRendering(const VkRenderingInfo* renderingInfo) {
+	recordRenderPass(nullptr);
+	if (!renderingInfo->colorAttachmentCount && !renderingInfo->pDepthAttachment && !renderingInfo->pStencilAttachment) { _recordedRenderingError = "indexed compute capture requires explicit framebuffer attachments."; }
+	MVKRenderingAttachmentIterator attachments(renderingInfo);
+	attachments.iterate([&](const VkRenderingAttachmentInfo*, VkImageAspectFlagBits, MVKImageView* attachment, bool isResolveAttachment) {
+		if (!attachment) { return; }
+		if (!isResolveAttachment && attachment->getSampleCount() != VK_SAMPLE_COUNT_1_BIT) { _recordedRenderingError = "indexed compute capture requires single-sample attachments."; }
+		if (attachment->getImage()->getMTLStorageMode() == MTLStorageModeMemoryless) { _recordedRenderingError = "indexed compute capture cannot preserve memoryless attachments."; }
+	});
+}
+
+VkResult MVKCommandBuffer::validateIndexedPerVertexAttachments() {
+	const char* error = _recordedRenderingError;
+	if (_currentSubpassInfo.renderpass && _currentSubpassInfo.renderpass->getSubpass(_currentSubpassInfo.subpassIndex)->getSampleCount() != VK_SAMPLE_COUNT_1_BIT) { error = "indexed compute capture requires single-sample attachments."; }
+	if (_recordedFramebuffer) {
+		if (_recordedFramebuffer->getAttachments().size() == 0) { error = "indexed compute capture requires explicit framebuffer attachments."; }
+		for (auto* attachment : _recordedFramebuffer->getAttachments()) {
+			if (attachment && attachment->getImage()->getMTLStorageMode() == MTLStorageModeMemoryless) { error = "indexed compute capture cannot preserve memoryless attachments."; }
+		}
+	}
+	return error ? reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR %s", error) : VK_SUCCESS;
+}
+
+VkResult MVKCommandBuffer::recordIndexedPerVertexDraw() {
+	if (!_recordedGraphicsPipelineUsesPerVertexInput) { return VK_SUCCESS; }
+	if (_recordedIndexType != VK_INDEX_TYPE_UINT16 && _recordedIndexType != VK_INDEX_TYPE_UINT32) {
+		return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed capture requires uint16 or uint32 indices.");
+	}
+	// A secondary may omit its framebuffer. Validate the actual attachments again in the primary.
+	if (_doesContinueRenderPass) { _needsInheritedPerVertexAttachments = true; }
+	return validateIndexedPerVertexAttachments();
 }
 
 // Track whether a stage-based timestamp command has been added, so we know
@@ -402,6 +455,7 @@ void MVKCommandBuffer::recordTimestampCommand() {
 
 void MVKCommandBuffer::recordBindPipeline(MVKCmdBindPipeline* mvkBindPipeline) {
 	_lastTessellationPipeline = mvkBindPipeline->isTessellationPipeline() ? mvkBindPipeline : nullptr;
+	if (auto* graphics = mvkBindPipeline->getGraphicsPipeline()) { _recordedGraphicsPipelineUsesPerVertexInput = graphics->usesPerVertexInputBuffer(); }
 }
 
 

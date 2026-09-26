@@ -21,6 +21,8 @@
 #include "MVKCommandPool.h"
 #include "MVKBuffer.h"
 #include "MVKPipeline.h"
+#include "MVKFramebuffer.h"
+#include "MVKImage.h"
 #include "MVKFoundation.h"
 #include "mvk_datatypes.hpp"
 
@@ -77,6 +79,7 @@ VkResult MVKCmdBindIndexBuffer::setContent(MVKCommandBuffer* cmdBuff,
 										   VkDeviceSize size,
 										   VkIndexType indexType) {
 	_binding.vkIndexType = indexType;
+	cmdBuff->recordIndexType(indexType);
 	_binding.mtlIndexType = mvkMTLIndexTypeFromVkIndexType(indexType);
 
 	MVKBuffer* mvkBuffer = (MVKBuffer*)buffer;
@@ -169,6 +172,164 @@ void MVKCmdDraw::encodeIndexedIndirect(MVKCommandEncoder* cmdEncoder) {
 	diiCmd.encode(cmdEncoder, ibb);
 }
 
+// A pooled wrapper can exist even if Metal failed to allocate its underlying buffer.
+// Check raw contents before getContents(), which adds the suballocation offset.
+static bool isPerVertexAllocationValid(const MVKMTLBufferAllocation* allocation, NSUInteger length, bool hostVisible) {
+	return allocation && allocation->_mtlBuffer && allocation->_length >= length && allocation->_offset <= allocation->_mtlBuffer.length && length <= allocation->_mtlBuffer.length - allocation->_offset && (!hostVisible || allocation->_mtlBuffer.contents);
+}
+
+static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance, uint32_t drawIndex, const MVKIndexMTLBufferBinding* indexBinding = nullptr, uint32_t firstIndex = 0, int32_t baseVertex = 0) {
+	auto reject = [&](VkResult result, const char* message) {
+		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(result, "Portable PerVertexKHR %s", message));
+	};
+	id<MTLComputePipelineState> captureState = nil;
+	VkDeviceSize indexOffset = 0;
+	if (indexBinding) {
+		if (indexBinding->vkIndexType != VK_INDEX_TYPE_UINT16 && indexBinding->vkIndexType != VK_INDEX_TYPE_UINT32) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "indexed capture requires uint16 or uint32 indices."); return; }
+		uint64_t indexSize = indexBinding->vkIndexType == VK_INDEX_TYPE_UINT16 ? 2 : 4;
+		uint64_t indexStart = uint64_t(firstIndex) * indexSize;
+		uint64_t indexBytes = uint64_t(vertexCount) * indexSize;
+		if (!indexBinding->mtlBuffer || indexStart > indexBinding->size || indexBytes > indexBinding->size - indexStart || indexBinding->offset > indexBinding->mtlBuffer.length || indexStart > indexBinding->mtlBuffer.length - indexBinding->offset || indexBytes > indexBinding->mtlBuffer.length - indexBinding->offset - indexStart) { reject(VK_ERROR_UNKNOWN, "indexed capture exceeds the bound index buffer range."); return; }
+		indexOffset = indexBinding->offset + indexStart;
+		captureState = indexBinding->vkIndexType == VK_INDEX_TYPE_UINT16 ? pipeline->getTessVertexStageIndex16State() : pipeline->getTessVertexStageIndex32State();
+		if (!captureState) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "indexed compute capture pipeline is unavailable."); return; }
+		// Restrict encoder splitting to inspectable, single-sample attachments.
+		// Imageless framebuffer attachments live only in the encoder's private state.
+		auto* framebuffer = cmdEncoder->_pEncodingContext->getFramebuffer();
+		if (!framebuffer || framebuffer->getAttachments().size() == 0 || cmdEncoder->getSubpass()->getSampleCount() != VK_SAMPLE_COUNT_1_BIT) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "indexed compute capture requires explicit single-sample framebuffer attachments."); return; }
+		// Compute capture interrupts rendering; memoryless attachments cannot survive it.
+		for (auto* attachment : framebuffer->getAttachments()) {
+			if (attachment && attachment->getImage()->getMTLStorageMode() == MTLStorageModeMemoryless) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "indexed compute capture cannot preserve memoryless attachments."); return; }
+		}
+	}
+	const auto& layout = pipeline->getPerVertexCapturedLayout();
+	uint64_t recordCount = uint64_t(vertexCount) * instanceCount;
+	auto topology = pipeline->getVkPrimitiveTopology();
+	bool provokingLast = cmdEncoder->getVkGraphics().getProvokingVertexMode();
+	uint64_t triangleCount = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ? vertexCount / 3 : (vertexCount > 2 ? vertexCount - 2 : 0);
+	uint64_t primitiveCount = triangleCount * instanceCount;
+	uint64_t occurrenceCount = primitiveCount * 3;
+	// The allocator rounds requests up to a power of two.
+	uint64_t maxBufferSize = 1;
+	while (maxBufferSize <= cmdEncoder->getMetalFeatures().maxMTLBufferSize / 2) { maxBufferSize *= 2; }
+	if (!layout.stride || recordCount > UINT32_MAX || primitiveCount > UINT32_MAX || occurrenceCount > UINT32_MAX / 2 || recordCount > maxBufferSize / layout.stride || occurrenceCount > maxBufferSize / (2 * sizeof(uint32_t))) {
+		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR draw exceeds its capture or replay buffer limits."));
+		return;
+	}
+	NSUInteger captureSize = NSUInteger(recordCount * layout.stride);
+	NSUInteger occurrenceSize = NSUInteger(occurrenceCount * 2 * sizeof(uint32_t));
+	NSUInteger primitiveSize = NSUInteger(occurrenceCount * sizeof(uint32_t));
+	const auto* captured = cmdEncoder->getTempMTLBuffer(captureSize, true);
+	const auto* captureParams = cmdEncoder->getTempMTLBuffer(sizeof(uint32_t));
+	const auto* occurrences = primitiveCount ? cmdEncoder->getTempMTLBuffer(occurrenceSize) : nullptr;
+	const auto* primitiveIndices = primitiveCount ? cmdEncoder->getTempMTLBuffer(primitiveSize) : nullptr;
+	if (!isPerVertexAllocationValid(captured, captureSize, false) || !isPerVertexAllocationValid(captureParams, sizeof(uint32_t), true) || (primitiveCount && (!isPerVertexAllocationValid(occurrences, occurrenceSize, true) || !isPerVertexAllocationValid(primitiveIndices, primitiveSize, true)))) {
+		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR capture or replay allocation failed."));
+		return;
+	}
+	*(uint32_t*)captureParams->getContents() = vertexCount;
+	cmdEncoder->_isIndexedDraw = indexBinding != nullptr;
+	if (indexBinding) {
+		// The compiler writes dense (instance, index occurrence) records and reads
+		// indices on the GPU, including writes earlier in this command buffer.
+		cmdEncoder->finalizeDrawState(kMVKGraphicsStageVertex);
+		if (!pipeline->hasValidMTLPipelineStates()) { return; }
+		id<MTLComputeCommandEncoder> captureEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
+		auto& computeState = cmdEncoder->getMtlCompute();
+		computeState.bindBuffer(captureEncoder, captured->_mtlBuffer, captured->_offset, pipeline->getPerVertexCaptureBufferIndex());
+		computeState.bindBuffer(captureEncoder, indexBinding->mtlBuffer, indexOffset, pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::Index]);
+		if (pipeline->needsDrawIdBuffer()) { computeState.bindStructBytes(captureEncoder, &drawIndex, pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::DrawId]); }
+		// Preserve the signed base vertex as the uint32 bit pattern used by SPIR-V.
+		[captureEncoder setStageInRegion: MTLRegionMake2D(uint32_t(baseVertex), firstInstance, vertexCount, instanceCount)];
+		cmdEncoder->getState().offsetZeroDivisorVertexBuffers(*cmdEncoder, kMVKGraphicsStageVertex, pipeline, firstInstance);
+		NSUInteger width = std::min(captureState.threadExecutionWidth, captureState.maxTotalThreadsPerThreadgroup);
+		if (cmdEncoder->getMetalFeatures().nonUniformThreadgroups) {
+			[captureEncoder dispatchThreads: MTLSizeMake(vertexCount, instanceCount, 1) threadsPerThreadgroup: MTLSizeMake(width, 1, 1)];
+		} else {
+			[captureEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(vertexCount, width), instanceCount, 1) threadsPerThreadgroup: MTLSizeMake(width, 1, 1)];
+		}
+		cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass);
+	}
+	cmdEncoder->_isIndexedDraw = false;
+	cmdEncoder->finalizeDrawState(kMVKGraphicsStageRasterization);
+	if (!pipeline->hasValidMTLPipelineStates()) { return; }
+	id<MTLRenderCommandEncoder> encoder = cmdEncoder->_mtlRenderEncoder;
+	auto& metalState = cmdEncoder->getMtlGraphics();
+	if (!indexBinding) {
+		[encoder setRenderPipelineState: pipeline->getPerVertexCapturePipelineState()];
+		MTLPrimitiveType captureType = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ? MTLPrimitiveTypeTriangle : MTLPrimitiveTypePoint;
+		metalState.bindVertexBuffer(encoder, captured->_mtlBuffer, captured->_offset, pipeline->getPerVertexCaptureBufferIndex());
+		metalState.bindVertexBuffer(encoder, captureParams->_mtlBuffer, captureParams->_offset, pipeline->getPerVertexCaptureParamsBufferIndex());
+		cmdEncoder->getState().offsetZeroDivisorVertexBuffers(*cmdEncoder, kMVKGraphicsStageRasterization, pipeline, firstInstance);
+		if (pipeline->needsDrawIdBuffer()) { metalState.bindVertexBytes(encoder, &drawIndex, sizeof(drawIndex), pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::DrawId]); }
+		if (cmdEncoder->getMetalFeatures().baseVertexInstanceDrawing) {
+			[encoder drawPrimitives: captureType vertexStart: firstVertex vertexCount: vertexCount instanceCount: instanceCount baseInstance: firstInstance];
+		} else {
+			[encoder drawPrimitives: captureType vertexStart: firstVertex vertexCount: vertexCount instanceCount: instanceCount];
+		}
+	}
+	if (!primitiveCount) {
+		[encoder setRenderPipelineState: pipeline->getMainPipelineState()];
+		metalState._exists.vertex().descriptorSetData.reset();
+		return;
+	}
+	if (!indexBinding) { [encoder memoryBarrierWithScope: MTLBarrierScopeBuffers afterStages: MTLRenderStageVertex beforeStages: MTLRenderStageVertex | MTLRenderStageFragment]; }
+	auto* pairs = (uint32_t*)occurrences->getContents();
+	auto* indices = (uint32_t*)primitiveIndices->getContents();
+	for (uint32_t instance = 0; instance < instanceCount; instance++) {
+		for (uint32_t triangle = 0; triangle < triangleCount; triangle++) {
+			uint32_t key = instance * uint32_t(triangleCount) + triangle;
+			uint32_t vertices[] = {triangle * 3, triangle * 3 + 1, triangle * 3 + 2};
+			// Vulkan primsrast-barycentric-order-table and -last-vertex. MoltenVK
+			// advertises triStripVertexOrderIndependentOfProvokingVertex = false.
+			// These orders also preserve winding and the replay triangle's provoking vertex.
+			if (topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP) {
+				vertices[0] = triangle; vertices[1] = triangle + 1; vertices[2] = triangle + 2;
+				if (triangle & 1) { std::swap(vertices[provokingLast ? 0 : 1], vertices[provokingLast ? 1 : 2]); }
+			} else if (topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN) {
+				vertices[0] = provokingLast ? 0 : triangle + 1;
+				vertices[1] = provokingLast ? triangle + 1 : triangle + 2;
+				vertices[2] = provokingLast ? triangle + 2 : 0;
+			}
+			for (uint32_t vertex = 0; vertex < 3; vertex++) {
+				uint32_t occurrence = key * 3 + vertex;
+				uint32_t record = instance * vertexCount + vertices[vertex];
+				pairs[2 * occurrence] = record;
+				pairs[2 * occurrence + 1] = key;
+				indices[occurrence] = record;
+			}
+		}
+	}
+	const auto& replay = pipeline->getPerVertexReplayBinding();
+	const auto& fragment = pipeline->getPerVertexInputBinding();
+	uint32_t replayDraw[] = {0, 0, firstInstance, uint32_t(triangleCount * 3)};
+	[encoder setRenderPipelineState: pipeline->getMainPipelineState()];
+	metalState.bindVertexBuffer(encoder, captured->_mtlBuffer, captured->_offset, replay.vertex_buffer_index);
+	metalState.bindVertexBuffer(encoder, occurrences->_mtlBuffer, occurrences->_offset, replay.occurrence_buffer_index);
+	metalState.bindVertexBytes(encoder, replayDraw, sizeof(replayDraw), replay.draw_parameters_buffer_index);
+	metalState.bindFragmentBuffer(encoder, captured->_mtlBuffer, captured->_offset, fragment.vertex_buffer_index);
+	metalState.bindFragmentBuffer(encoder, primitiveIndices->_mtlBuffer, primitiveIndices->_offset, fragment.primitive_index_buffer_index);
+	if (cmdEncoder->getPhysicalDevice()->shouldEmulateReversedDepthViewport()) {
+		uint32_t viewportMask = cmdEncoder->getVkGraphics()._implicitBufferData[kMVKShaderStageVertex].emulatedReversedDepthViewportMask;
+		metalState.bindVertexBytes(encoder, &viewportMask, sizeof(viewportMask), pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::EmulatedReversedDepthViewport]);
+	}
+	if (cmdEncoder->getMetalFeatures().baseVertexInstanceDrawing) {
+		[encoder drawPrimitives: MTLPrimitiveTypeTriangle vertexStart: 0 vertexCount: triangleCount * 3 instanceCount: instanceCount baseInstance: firstInstance];
+	} else {
+		[encoder drawPrimitives: MTLPrimitiveTypeTriangle vertexStart: 0 vertexCount: triangleCount * 3 instanceCount: instanceCount];
+	}
+	metalState._exists.vertex().descriptorSetData.reset();
+	metalState._exists.fragment().descriptorSetData.reset();
+}
+
+void MVKCmdDraw::encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline) {
+	::encodePerVertexInput(cmdEncoder, pipeline, _vertexCount, _instanceCount, _firstVertex, _firstInstance, _drawIndex);
+}
+
+void MVKCmdDrawIndexed::encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline) {
+	::encodePerVertexInput(cmdEncoder, pipeline, _indexCount, _instanceCount, 0, _firstInstance, _drawIndex, &cmdEncoder->getVkGraphics()._indexBuffer, _firstIndex, _vertexOffset);
+}
+
 void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
 
 	if (_vertexCount == 0 || _instanceCount == 0) { return; }	// Nothing to do.
@@ -176,6 +337,7 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
 	cmdEncoder->restartMetalRenderPassIfNeeded();
 
 	auto* pipeline = cmdEncoder->getGraphicsPipeline();
+	if (pipeline->usesPerVertexInputBuffer()) { encodePerVertexInput(cmdEncoder, pipeline); return; }
 	auto& mtlFeats = cmdEncoder->getMetalFeatures();
 	auto& dvcLimits = cmdEncoder->getDeviceProperties().limits;
 
@@ -373,7 +535,7 @@ VkResult MVKCmdDrawIndexed::setContent(MVKCommandBuffer* cmdBuff,
         return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCmdDrawIndexed(): The current device does not support drawing with a non-zero base vertex.");
     }
 
-	return VK_SUCCESS;
+	return _indexCount && _instanceCount ? cmdBuff->recordIndexedPerVertexDraw() : VK_SUCCESS;
 }
 
 // Populates and encodes a MVKCmdDrawIndexedIndirect command, after populating an indexed indirect buffer.
@@ -446,8 +608,8 @@ static const MVKMTLBufferAllocation* convertUint8IndexBuffer(MVKCommandEncoder* 
 void MVKCmdDrawIndexed::encode(MVKCommandEncoder* cmdEncoder) {
 
 	if (_indexCount == 0 || _instanceCount == 0) { return; }	// Nothing to do.
-
 	cmdEncoder->restartMetalRenderPassIfNeeded();
+	if (cmdEncoder->getGraphicsPipeline()->usesPerVertexInputBuffer()) { encodePerVertexInput(cmdEncoder, cmdEncoder->getGraphicsPipeline()); return; }
 
 	auto* pipeline = cmdEncoder->getGraphicsPipeline();
 	auto& mtlFeats = cmdEncoder->getMetalFeatures();
@@ -778,6 +940,7 @@ VkResult MVKCmdDrawIndirect::setContent(MVKCommandBuffer* cmdBuff,
 										VkDeviceSize offset,
 										uint32_t drawCount,
 										uint32_t stride) {
+	if (cmdBuff->recordedGraphicsPipelineUsesPerVertexInput()) { return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indirect draws require GPU-sized occurrence capture."); }
 	MVKBuffer* mvkBuffer = (MVKBuffer*)buffer;
 	_mtlIndirectBuffer = mvkBuffer->getMTLBuffer();
 	_mtlIndirectBufferOffset = mvkBuffer->getMTLBufferOffset() + offset;
@@ -865,6 +1028,10 @@ void MVKCmdDrawIndirect::encodeIndexedIndirect(MVKCommandEncoder* cmdEncoder,
 }
 
 void MVKCmdDrawIndirect::encode(MVKCommandEncoder* cmdEncoder) {
+	if (cmdEncoder->getGraphicsPipeline()->usesPerVertexInputBuffer()) {
+		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indirect draws require GPU-sized occurrence capture."));
+		return;
+	}
 
 	cmdEncoder->restartMetalRenderPassIfNeeded();
 	id<MTLBuffer> indirectBuffer = _mtlIndirectBuffer;
@@ -1177,6 +1344,7 @@ VkResult MVKCmdDrawIndexedIndirect::setContent(MVKCommandBuffer* cmdBuff,
 										   VkDeviceSize indirectMTLBuffOffset,
 										   uint32_t drawCount,
 										   uint32_t stride) {
+	if (cmdBuff->recordedGraphicsPipelineUsesPerVertexInput()) { return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed indirect draws require GPU-sized occurrence capture."); }
 	_mtlIndirectBuffer = indirectMTLBuff;
 	_mtlIndirectBufferOffset = indirectMTLBuffOffset;
 	_mtlIndirectBufferStride = stride;
@@ -1219,6 +1387,10 @@ void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder) {
 }
 
 void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder, const MVKIndexMTLBufferBinding& ibbOrig) {
+	if (cmdEncoder->getGraphicsPipeline()->usesPerVertexInputBuffer()) {
+		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed indirect draws require GPU-sized occurrence capture."));
+		return;
+	}
 
 	id<MTLBuffer> indirectBuffer = _mtlIndirectBuffer;
 	VkDeviceSize indirectBufferOffset = _mtlIndirectBufferOffset;

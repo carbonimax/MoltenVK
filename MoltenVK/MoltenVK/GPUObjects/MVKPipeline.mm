@@ -858,6 +858,10 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
 	}
 
 	// Render pipeline state. Do this as early as possible, to fail fast if pipeline requires a fail on cache-miss.
+	if (!initPerVertexInputPipeline(pCreateInfo, pVertexSS, pFragmentSS)) {
+		_hasValidMTLPipelineStates = false;
+		return;
+	}
 	initMTLRenderPipelineState(pCreateInfo, reflectData, pPipelineFB, pVertexSS, pVertexFB, pTessCtlSS, pTessCtlFB, pTessEvalSS, pTessEvalFB, pFragmentSS, pFragmentFB);
 	if ( !_hasValidMTLPipelineStates ) { return; }
 
@@ -1165,6 +1169,167 @@ void MVKGraphicsPipeline::initMTLRenderPipelineState(const VkGraphicsPipelineCre
 	}
 }
 
+bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCreateInfo* pCreateInfo, const VkPipelineShaderStageCreateInfo* pVertexSS, const VkPipelineShaderStageCreateInfo* pFragmentSS) {
+	if (!_isRasterizing || !pFragmentSS || !_fragmentModule || _fragmentModule->getSPIRV().empty()) { return true; }
+	bool usesPerVertex = false;
+	std::string errorLog;
+	if (!mvk::getFragmentShaderUsesPerVertexInput(_fragmentModule->getSPIRV(), pFragmentSS->pName, usesPerVertex, errorLog)) {
+		setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to reflect PerVertexKHR inputs: %s", errorLog.c_str()));
+		return false;
+	}
+	if (!usesPerVertex) { return true; }
+	if (getPhysicalDevice()->getMTLDeviceCapabilities().supportsApple10 && getMetalFeatures().mslVersion >= CompilerMSL::Options::make_msl_version(4, 0) && getPrimitiveTopologyClass() == MTLPrimitiveTopologyClassTriangle) { return true; }
+	auto unsupported = [&](const char* reason) {
+		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR %s", reason));
+		return false;
+	};
+	if (!pVertexSS || !_vertexModule || _vertexModule->getSPIRV().empty() || _isTessellationPipeline || pCreateInfo->stageCount != 2) { return unsupported("requires classic SPIR-V vertex and fragment stages."); }
+	if (getMetalFeatures().mslVersion < CompilerMSL::Options::make_msl_version(2, 4)) { return unsupported("requires MSL 2.4."); }
+	const auto* assembly = pCreateInfo->pInputAssemblyState;
+	if (!assembly || (assembly->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST && assembly->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP && assembly->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN) || _dynamicStateFlags.has(MVKRenderStateFlag::PrimitiveTopology)) { return unsupported("requires a static triangle-list, strip, or fan topology."); }
+	if (pCreateInfo->pInputAssemblyState->primitiveRestartEnable || _dynamicStateFlags.has(MVKRenderStateFlag::PrimitiveRestartEnable)) { return unsupported("does not support primitive restart."); }
+	if (getRenderingCreateInfo(pCreateInfo)->viewMask || mvkIsAnyFlagEnabled(_flags, VK_PIPELINE_CREATE_2_VIEW_INDEX_FROM_DEVICE_INDEX_BIT)) { return unsupported("does not support multiview or device-index views."); }
+	if (pCreateInfo->pRasterizationState->polygonMode != VK_POLYGON_MODE_FILL || _dynamicStateFlags.has(MVKRenderStateFlag::PolygonMode) || _dynamicStateFlags.has(MVKRenderStateFlag::RasterizerDiscardEnable)) { return unsupported("requires static filled rasterization."); }
+	if (_dynamicStateFlags.has(MVKRenderStateFlag::ProvokingVertexMode)) { return unsupported("does not support dynamic provoking-vertex mode."); }
+	initReservedVertexAttributeBufferCount(pCreateInfo);
+	uint32_t captureParams = getImplicitBufferIndex(kMVKShaderStageVertex, 6);
+	if (captureParams >= getMetalFeatures().maxPerStageBufferCount || captureParams < _descriptorBufferCounts.stages[kMVKShaderStageVertex]) { return unsupported("has no free vertex capture parameter buffer slot."); }
+	_perVertexInputBinding.vertex_buffer_index = getImplicitBufferIndex(kMVKShaderStageFragment, 4);
+	_perVertexInputBinding.primitive_index_buffer_index = getImplicitBufferIndex(kMVKShaderStageFragment, 5);
+	if (_perVertexInputBinding.primitive_index_buffer_index >= getMetalFeatures().maxPerStageBufferCount || _perVertexInputBinding.primitive_index_buffer_index < _descriptorBufferCounts.stages[kMVKShaderStageFragment]) { return unsupported("has no free fragment capture buffer slots."); }
+	// Replay is generated directly from the capture ABI and is not yet a shader-library cache entry.
+	if (shouldFailOnPipelineCompileRequired()) {
+		setConfigurationResult(VK_PIPELINE_COMPILE_REQUIRED);
+		return false;
+	}
+	_usesPerVertexInputBuffer = true;
+	return true;
+}
+
+bool MVKGraphicsPipeline::addPerVertexIndexedCapturePipelines(MTLVertexDescriptor* vertexDesc, const SPIRVToMSLConversionConfiguration& shaderConfig, const VkPipelineShaderStageCreateInfo* pVertexSS) {
+	auto captureConfig = shaderConfig;
+	const auto& implicit = getImplicitBuffers(kMVKShaderStageVertex).ids;
+	captureConfig.options.mslOptions.vertex_for_tessellation = true;
+	captureConfig.options.mslOptions.shader_index_buffer_index = implicit[MVKImplicitBuffer::Index];
+	captureConfig.options.shouldFlipVertexY = false;
+	captureConfig.options.shouldFixupClipSpace = false;
+	MTLComputePipelineDescriptor* plDesc = [MTLComputePipelineDescriptor new];
+	plDesc.stageInputDescriptor = [MTLStageInputOutputDescriptor stageInputOutputDescriptor];
+	plDesc.stageInputDescriptor.indexBufferIndex = implicit[MVKImplicitBuffer::Index];
+	// Reuse the translated vertex bindings without registering translations or zero divisors twice.
+	for (uint32_t i = 0; i < 31; i++) {
+		auto srcAttr = vertexDesc.attributes[i];
+		auto dstAttr = plDesc.stageInputDescriptor.attributes[i];
+		dstAttr.format = (MTLAttributeFormat)srcAttr.format;
+		dstAttr.offset = srcAttr.offset;
+		dstAttr.bufferIndex = srcAttr.bufferIndex;
+		auto srcLayout = vertexDesc.layouts[i];
+		auto dstLayout = plDesc.stageInputDescriptor.layouts[i];
+		dstLayout.stride = srcLayout.stride;
+		dstLayout.stepRate = srcLayout.stepRate;
+		switch (srcLayout.stepFunction) {
+			case MTLVertexStepFunctionPerVertex: dstLayout.stepFunction = MTLStepFunctionThreadPositionInGridXIndexed; break;
+			case MTLVertexStepFunctionPerInstance: dstLayout.stepFunction = MTLStepFunctionThreadPositionInGridY; break;
+			default: dstLayout.stepFunction = (MTLStepFunction)srcLayout.stepFunction; break;
+		}
+	}
+	MSLPerVertexInputBuffer expectedLayout = {true, _perVertexCapturedLayout, {}};
+	bool success = true;
+	for (uint32_t i = 0; i < 2 && success; i++) {
+		captureConfig.options.mslOptions.vertex_index_type = i ? CompilerMSL::Options::IndexType::UInt32 : CompilerMSL::Options::IndexType::UInt16;
+		MVKMTLFunction func = getMTLFunction(captureConfig, pVertexSS, nullptr, _vertexModule, "Indexed PerVertexKHR capture");
+		plDesc.computeFunction = func.getMTLFunction();
+		if (!plDesc.computeFunction) { success = false; break; }
+		auto& results = func.shaderConversionResults;
+		MSLPerVertexInputBuffer actualLayout = {true, results.capturedVertexLayout, {}};
+		if (!results.needsOutputBuffer || !expectedLayout.matches(actualLayout)) {
+			setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed capture does not match the replay vertex layout."));
+			success = false;
+			break;
+		}
+		populateResourceUsage(_stageResources[kMVKShaderStageVertex], captureConfig, results, spv::ExecutionModelVertex);
+		plDesc.stageInputDescriptor.indexType = i ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
+		success = !!getOrCompilePipeline(plDesc, i ? _mtlTessVertexStageIndex32State : _mtlTessVertexStageIndex16State, "Indexed PerVertexKHR capture");
+	}
+	[plDesc release];
+	_stageResources[kMVKShaderStageVertex].implicitBuffers.needed.add(MVKImplicitBuffer::Index);
+	return success && verifyImplicitBuffers(kMVKShaderStageVertex);
+}
+
+bool MVKGraphicsPipeline::addPerVertexReplayShaderToPipeline(MTLRenderPipelineDescriptor* plDesc, const VkGraphicsPipelineCreateInfo* pCreateInfo, const SPIRVToMSLConversionConfiguration& shaderConfig, const VkPipelineShaderStageCreateInfo* pVertexSS, const VkPipelineShaderStageCreateInfo* pFragmentSS, SPIRVShaderOutputs& vertexOutputs) {
+	SPIRVShaderInputs fragmentInputs;
+	std::string errorLog;
+	if (!getShaderInputs(_fragmentModule->getSPIRV(), spv::ExecutionModelFragment, pFragmentSS->pName, fragmentInputs, errorLog)) {
+		setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to reflect PerVertexKHR fragment interface: %s", errorLog.c_str()));
+		return false;
+	}
+	std::unordered_set<uint32_t> locations;
+	for (const auto& output : vertexOutputs) { if (output.builtin == spv::BuiltInMax) { locations.insert(output.location); } }
+	for (const auto& input : fragmentInputs) { if (input.builtin == spv::BuiltInMax) { locations.insert(input.location); } }
+	for (const auto& component : _perVertexCapturedLayout.components) { locations.insert(component.location); }
+	uint32_t location = 0;
+	uint32_t maxLocations = getDeviceProperties().limits.maxFragmentInputComponents / 4;
+	while (location < maxLocations && locations.count(location)) { location++; }
+	if (location == maxLocations) {
+		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR has no free varying location for its primitive key."));
+		return false;
+	}
+	_perVertexInputBinding.primitive_index_location = location;
+	// Replay uses three capture buffers plus the implicit reversed-depth mask when emulated.
+	_perVertexReplayBinding = {0, 1, 2, location};
+	std::string replayMSL;
+	SPIRVToMSLConversionResultInfo replayResults = {};
+#ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
+	try {
+#endif
+		CompilerMSL replay(_vertexModule->getSPIRV());
+		replay.set_entry_point(pVertexSS->pName, spv::ExecutionModelVertex);
+		auto options = shaderConfig.options.mslOptions;
+		options.capture_output_to_buffer = false;
+		options.disable_rasterization = false;
+		options.emulate_reversed_depth_viewport = getPhysicalDevice()->shouldEmulateReversedDepthViewport();
+		options.reversed_depth_viewport_buffer_index = getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::EmulatedReversedDepthViewport];
+		replay.set_msl_options(options);
+		auto common = replay.get_common_options();
+		common.vertex.flip_vert_y = shaderConfig.options.shouldFlipVertexY;
+		common.vertex.fixup_clipspace = shaderConfig.options.shouldFixupClipSpace;
+		replay.set_common_options(common);
+		for (const auto& output : shaderConfig.shaderOutputs) { replay.add_msl_shader_output(output.shaderVar); }
+		replayMSL = replay.compile_captured_output_replay(_perVertexCapturedLayout, _perVertexReplayBinding);
+		replayResults.entryPoint.mtlFunctionName = replay.get_cleansed_entry_point_name(pVertexSS->pName, spv::ExecutionModelVertex);
+		replayResults.isPositionInvariant = replay.is_position_invariant();
+#ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
+	} catch (const CompilerError& error) {
+		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR replay is unsupported: %s", error.what()));
+		return false;
+	}
+#endif
+	MVKShaderLibraryCompiler* compiler = new MVKShaderLibraryCompiler(this);
+	id<MTLLibrary> library = compiler->newMTLLibrary(@(replayMSL.c_str()), replayResults, {});
+	compiler->destroy();
+	id<MTLFunction> function = [library newFunctionWithName:@(replayResults.entryPoint.mtlFunctionName.c_str())];
+	[library release];
+	if (!function) {
+		setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Portable PerVertexKHR replay function could not be compiled."));
+		return false;
+	}
+	// Match the active render pass, including sample count and attachment formats.
+	addFragmentOutputToPipeline(plDesc, pCreateInfo);
+	plDesc.fragmentFunction = nil;
+	plDesc.rasterizationEnabled = NO;
+	plDesc.alphaToCoverageEnabled = NO;
+	plDesc.alphaToOneEnabled = NO;
+	// Capture every strip/fan vertex, including a final incomplete triangle-list group.
+	if (pCreateInfo->pInputAssemblyState->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) { plDesc.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint; }
+	bool captured = !!getOrCompilePipeline(plDesc, _mtlPerVertexCapturePipelineState);
+	plDesc.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+	plDesc.vertexFunction = function;
+	[function release];
+	plDesc.vertexDescriptor = nil;
+	plDesc.rasterizationEnabled = YES;
+	return captured;
+}
+
 // Returns a retained MTLRenderPipelineDescriptor constructed from this instance, or nil if an error occurs.
 // It is the responsibility of the caller to release the returned descriptor.
 MTLRenderPipelineDescriptor* MVKGraphicsPipeline::newMTLRenderPipelineDescriptor(const VkGraphicsPipelineCreateInfo* pCreateInfo,
@@ -1182,18 +1347,24 @@ MTLRenderPipelineDescriptor* MVKGraphicsPipeline::newMTLRenderPipelineDescriptor
 	std::string errorLog;
 	if (!getShaderOutputs(_vertexModule->getSPIRV(), spv::ExecutionModelVertex, pVertexSS->pName, vtxOutputs, errorLog) ) {
 		setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to get vertex outputs: %s", errorLog.c_str()));
+		[plDesc release];
 		return nil;
 	}
 
 	// Add shader stages. Compile vertex shader before others just in case conversion changes anything...like rasterizaion disable.
-	if (!addVertexShaderToPipeline(plDesc, pCreateInfo, shaderConfig, pVertexSS, pVertexFB, pFragmentSS)) { return nil; }
+	if (!addVertexShaderToPipeline(plDesc, pCreateInfo, shaderConfig, pVertexSS, pVertexFB, pFragmentSS)) { [plDesc release]; return nil; }
 
 	// Vertex input
 	// This needs to happen before compiling the fragment shader, or we'll lose information on vertex attributes.
-	if (!addVertexInputToPipeline(plDesc.vertexDescriptor, pCreateInfo->pVertexInputState, shaderConfig)) { return nil; }
+	if (!addVertexInputToPipeline(plDesc.vertexDescriptor, pCreateInfo->pVertexInputState, shaderConfig)) { [plDesc release]; return nil; }
+
+	if (_usesPerVertexInputBuffer && (!addPerVertexIndexedCapturePipelines(plDesc.vertexDescriptor, shaderConfig, pVertexSS) || !addPerVertexReplayShaderToPipeline(plDesc, pCreateInfo, shaderConfig, pVertexSS, pFragmentSS, vtxOutputs))) {
+		[plDesc release];
+		return nil;
+	}
 
 	// Fragment shader - only add if rasterization is enabled
-	if (!addFragmentShaderToPipeline(plDesc, pCreateInfo, shaderConfig, vtxOutputs, pFragmentSS, pFragmentFB)) { return nil; }
+	if (!addFragmentShaderToPipeline(plDesc, pCreateInfo, shaderConfig, vtxOutputs, pFragmentSS, pFragmentFB)) { [plDesc release]; return nil; }
 
 	// Output
 	addFragmentOutputToPipeline(plDesc, pCreateInfo);
@@ -1449,12 +1620,25 @@ bool MVKGraphicsPipeline::addVertexShaderToPipeline(MTLRenderPipelineDescriptor*
 	shaderConfig.options.mslOptions.shader_output_buffer_index = implicit[MVKImplicitBuffer::Output];
 	shaderConfig.options.mslOptions.view_mask_buffer_index = implicit[MVKImplicitBuffer::ViewRange];
 	shaderConfig.options.mslOptions.draw_id_buffer_index = implicit[MVKImplicitBuffer::DrawId];
-	shaderConfig.options.mslOptions.capture_output_to_buffer = false;
-	shaderConfig.options.mslOptions.disable_rasterization = !_isRasterizing;
-	setEmulatedReversedDepthViewportConfig(shaderConfig, implicit, getPhysicalDevice()->shouldEmulateReversedDepthViewport());
+	shaderConfig.options.mslOptions.capture_output_to_buffer = _usesPerVertexInputBuffer;
+	shaderConfig.options.mslOptions.disable_rasterization = _usesPerVertexInputBuffer || !_isRasterizing;
+	shaderConfig.exportCapturedVertexLayout = _usesPerVertexInputBuffer;
+	if (_usesPerVertexInputBuffer) {
+		shaderConfig.options.mslOptions.indirect_params_buffer_index = implicit[MVKImplicitBuffer::IndirectParams];
+	}
+	setEmulatedReversedDepthViewportConfig(shaderConfig, implicit, !_usesPerVertexInputBuffer && getPhysicalDevice()->shouldEmulateReversedDepthViewport());
 	addVertexInputToShaderConversionConfig(shaderConfig, pCreateInfo);
 
+	// Capture raw Vulkan outputs; replay applies reversed-depth, clip-space and Y fixups exactly once.
+	bool flipVertexY = shaderConfig.options.shouldFlipVertexY;
+	bool fixupClipSpace = shaderConfig.options.shouldFixupClipSpace;
+	if (_usesPerVertexInputBuffer) {
+		shaderConfig.options.shouldFlipVertexY = false;
+		shaderConfig.options.shouldFixupClipSpace = false;
+	}
 	MVKMTLFunction func = getMTLFunction(shaderConfig, pVertexSS, pVertexFB, _vertexModule, "Vertex");
+	shaderConfig.options.shouldFlipVertexY = flipVertexY;
+	shaderConfig.options.shouldFixupClipSpace = fixupClipSpace;
 	id<MTLFunction> mtlFunc = func.getMTLFunction();
 	plDesc.vertexFunction = mtlFunc;
 	if ( !mtlFunc ) { return false; }
@@ -1462,10 +1646,18 @@ bool MVKGraphicsPipeline::addVertexShaderToPipeline(MTLRenderPipelineDescriptor*
 	auto& funcRslts = func.shaderConversionResults;
 	plDesc.rasterizationEnabled = !funcRslts.isRasterizationDisabled;
 	populateResourceUsage(_stageResources[kMVKShaderStageVertex], shaderConfig, funcRslts, spv::ExecutionModelVertex);
-	_stageResources[kMVKShaderStageVertex].implicitBuffers.needed.set(MVKImplicitBuffer::EmulatedReversedDepthViewport, shaderConfig.options.mslOptions.emulate_reversed_depth_viewport);
+	// The reversed-depth mask is needed by replay even when capture leaves depth unmodified.
+	_stageResources[kMVKShaderStageVertex].implicitBuffers.needed.set(MVKImplicitBuffer::EmulatedReversedDepthViewport, getPhysicalDevice()->shouldEmulateReversedDepthViewport());
 	_layout->populateBindOperations(_stageResources[kMVKShaderStageVertex].bindScript, shaderConfig, spv::ExecutionModelVertex);
 
-	if (funcRslts.isRasterizationDisabled) {
+	if (_usesPerVertexInputBuffer) {
+		_perVertexCapturedLayout = funcRslts.capturedVertexLayout;
+		_stageResources[kMVKShaderStageVertex].implicitBuffers.needed.add(MVKImplicitBuffer::IndirectParams);
+		if (!_perVertexCapturedLayout.stride || !funcRslts.needsOutputBuffer) {
+			setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR requires an exported vertex capture layout."));
+			return false;
+		}
+	} else if (funcRslts.isRasterizationDisabled) {
 		pFragmentSS = nullptr;
 	}
 
@@ -1607,6 +1799,11 @@ bool MVKGraphicsPipeline::addFragmentShaderToPipeline(MTLRenderPipelineDescripto
 		shaderConfig.options.entryPointStage = spv::ExecutionModelFragment;
 		// vertex_value requires triangle input and Apple10 hardware, not just a recent OS/MSL version.
 		shaderConfig.options.mslOptions.supports_per_vertex_fragment_input = getPhysicalDevice()->getMTLDeviceCapabilities().supportsApple10 && shaderConfig.options.mslOptions.supports_msl_version(4, 0) && getPrimitiveTopologyClass() == MTLPrimitiveTopologyClassTriangle;
+		if (_usesPerVertexInputBuffer) {
+			shaderConfig.options.mslOptions.supports_per_vertex_fragment_input = false;
+			shaderConfig.options.mslOptions.disable_rasterization = false;
+			shaderConfig.setPerVertexInputBuffer(_perVertexCapturedLayout, _perVertexInputBinding);
+		}
 		addCommonImplicitBuffersToShaderConfig(shaderConfig, implicit);
 		shaderConfig.options.mslOptions.view_mask_buffer_index = implicit[MVKImplicitBuffer::ViewRange];
 		shaderConfig.options.entryPointName = pFragmentSS->pName;
@@ -1640,6 +1837,28 @@ bool MVKGraphicsPipeline::addFragmentShaderToPipeline(MTLRenderPipelineDescripto
 			shaderConfig.options.mslOptions.arrayed_subpass_input = true;
 		}
 		addPrevStageOutputToShaderConversionConfig(shaderConfig, shaderOutputs);
+		if (_usesPerVertexInputBuffer) {
+#ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
+			try {
+#endif
+				CompilerReflection reflect(_fragmentModule->getSPIRV());
+				reflect.set_entry_point(pFragmentSS->pName, spv::ExecutionModelFragment);
+				reflect.compile();
+				for (auto varID : reflect.get_active_interface_variables()) {
+					if (reflect.get_storage_class(varID) != spv::StorageClassInput || !reflect.has_decoration(varID, spv::DecorationPerVertexKHR)) { continue; }
+					uint32_t location = reflect.get_decoration(varID, spv::DecorationLocation);
+					uint32_t component = reflect.get_decoration(varID, spv::DecorationComponent);
+					// Captured inputs use their physical producer layout. Ordinary components keep their remaps.
+					auto& inputs = shaderConfig.shaderInputs;
+					inputs.erase(std::remove_if(inputs.begin(), inputs.end(), [&](const mvk::MSLShaderInput& input) { return input.shaderVar.builtin == spv::BuiltInMax && input.shaderVar.location == location && input.shaderVar.component == component; }), inputs.end());
+				}
+#ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
+			} catch (const CompilerError& error) {
+				setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to reflect portable PerVertexKHR input remaps: %s", error.what()));
+				return false;
+			}
+#endif
+		}
 
 		MVKMTLFunction func = getMTLFunction(shaderConfig, pFragmentSS, pFragmentFB, _fragmentModule, "Fragment");
 		id<MTLFunction> mtlFunc = func.getMTLFunction();
@@ -1647,6 +1866,10 @@ bool MVKGraphicsPipeline::addFragmentShaderToPipeline(MTLRenderPipelineDescripto
 		if ( !mtlFunc ) { return false; }
 
 		auto& funcRslts = func.shaderConversionResults;
+		if (_usesPerVertexInputBuffer && !funcRslts.needsPerVertexInputBuffer) {
+			setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Portable PerVertexKHR fragment shader did not consume its captured input buffer."));
+			return false;
+		}
 		populateResourceUsage(_stageResources[kMVKShaderStageFragment], shaderConfig, funcRslts, spv::ExecutionModelFragment);
 		_layout->populateBindOperations(_stageResources[kMVKShaderStageFragment].bindScript, shaderConfig, spv::ExecutionModelFragment);
 	}
@@ -2039,6 +2262,9 @@ void MVKGraphicsPipeline::initShaderConversionConfig(SPIRVToMSLConversionConfigu
 				_stageResources[stage].implicitBuffers.ids[MVKImplicitBuffer::ViewRange] = extra;
 				_stageResources[stage].implicitBuffers.ids[MVKImplicitBuffer::Index]     = extra;
 				_stageResources[stage].implicitBuffers.ids[MVKImplicitBuffer::DrawId]    = getImplicitBufferIndex(stage, 5);
+				if (_usesPerVertexInputBuffer) {
+					_stageResources[stage].implicitBuffers.ids[MVKImplicitBuffer::IndirectParams] = getImplicitBufferIndex(stage, 6);
+				}
 				break;
 			case kMVKShaderStageFragment:
 				_stageResources[stage].implicitBuffers.ids[MVKImplicitBuffer::ViewRange] = extra;
@@ -2300,6 +2526,7 @@ MVKGraphicsPipeline::~MVKGraphicsPipeline() {
 		[_mtlTessVertexStageIndex16State release];
 		[_mtlTessVertexStageIndex32State release];
 		[_mtlTessControlStageState release];
+		[_mtlPerVertexCapturePipelineState release];
 		[_mtlPipelineState release];
 		if (_ownsVertexModule) delete _vertexModule;
 		if (_ownsTessCtlModule) delete _tessCtlModule;
@@ -2933,7 +3160,9 @@ namespace mvk {
 				cfg.shaderOutputs,
 				cfg.resourceBindings,
 				cfg.discreteDescriptorSets,
-				cfg.dynamicBufferDescriptors);
+				cfg.dynamicBufferDescriptors,
+				cfg.perVertexInputBuffer,
+				cfg.exportCapturedVertexLayout);
 	}
 
 	template<class Archive>
@@ -2951,7 +3180,9 @@ namespace mvk {
 				scr.needsDispatchBaseBuffer,
 				scr.needsViewRangeBuffer,
 				scr.needsDrawId,
-				scr.usesPhysicalStorageBufferAddressesCapability);
+				scr.usesPhysicalStorageBufferAddressesCapability,
+				scr.needsPerVertexInputBuffer,
+				scr.capturedVertexLayout);
 	}
 
 	template<class Archive>
@@ -3107,8 +3338,8 @@ void mvkValidateCeralArchiveDefinitions() {
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLShaderInterfaceVariable>(3);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLResourceBinding>(2);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::DescriptorBinding>();
-	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(103);	// Contains collection
-	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionResultInfo>(40);		// Contains collection
+	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(157);	// Contains collection
+	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionResultInfo>(75);		// Contains collection
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLSpecializationMacroInfo>(22);			// Contains string
 	missingBytes += mvkValidateCerealArchiveSize<MVKShaderModuleKey>();
 	missingBytes += mvkValidateCerealArchiveSize<MVKCompressor<std::string>>(20);				// Contains collection
