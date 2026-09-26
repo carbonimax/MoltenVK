@@ -8,9 +8,11 @@
 // Vulkan ignores restart for nonindexed draws; indexed restart needs GPU primitive assembly.
 static inline bool mvkPerVertexRequiresRestartAssembly(bool indexed, bool primitiveRestart) { return indexed && primitiveRestart; }
 
-// ponytail: serial GPU assembly is bounded to 64K input occurrences across instances.
-// Larger draws need parallel compaction/assembly, never truncation of GPU-produced counts.
-static inline bool mvkCanAssemblePerVertexRestart(uint32_t count, uint32_t instances, bool indirectDrawing) { return indirectDrawing && uint64_t(count) * instances <= 65536; }
+// Dense capture record IDs are uint32. Buffer sizes are checked separately before reservation.
+static inline bool mvkCanAssemblePerVertexRestart(uint32_t count, uint32_t instances, bool indirectDrawing) { return indirectDrawing && uint64_t(count) * instances <= UINT32_MAX; }
+
+// Compact UINT32 indices followed by two ping-pong scans of four uints per input index.
+static inline uint64_t mvkPerVertexRestartIndexScratchSize(uint32_t count) { return uint64_t(count) * 9 * sizeof(uint32_t); }
 
 // Zero also identifies topologies outside the portable capture/replay contract.
 static inline uint32_t mvkPerVertexReplayVertexCount(VkPrimitiveTopology topology) {
@@ -31,6 +33,21 @@ static inline uint32_t mvkPerVertexPrimitiveCount(uint32_t vertexCount, VkPrimit
 		case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN: return vertexCount > 2 ? vertexCount - 2 : 0;
 		default: return 0;
 	}
+}
+
+// Each callback is a separate dispatch followed by a buffer barrier. No invocation scans a draw.
+template<typename Dispatch>
+static inline void mvkDispatchPerVertexRestart(uint32_t count, uint32_t instances, VkPrimitiveTopology topology, Dispatch&& dispatch) {
+	dispatch(0, 0, 0, std::max(count, 1u));
+	if (!count) { return; }
+	uint32_t source = 0;
+	for (uint64_t step = 1; step < count; step *= 2) {
+		dispatch(1, uint32_t(step), source, count);
+		source ^= 1;
+	}
+	dispatch(2, 0, source, count);
+	uint64_t primitives = uint64_t(mvkPerVertexPrimitiveCount(count, topology)) * instances;
+	if (primitives) { dispatch(3, 0, source, primitives); }
 }
 
 static inline uint32_t mvkPerVertexIndexSize(VkIndexType type) {

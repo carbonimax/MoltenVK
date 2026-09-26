@@ -449,7 +449,7 @@ VkResult MVKCommandBuffer::validateIndexedPerVertexAttachments() {
 VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t instanceCount, bool indexed) {
 	if (!_recordedPerVertexPipeline || !vertexCount || !instanceCount) { return VK_SUCCESS; }
 	bool restart = mvkPerVertexRequiresRestartAssembly(indexed, _recordedPerVertexPipeline->getStaticStateData().enable.has(MVKRenderStateEnableFlag::PrimitiveRestart));
-	if (restart && !mvkCanAssemblePerVertexRestart(vertexCount, instanceCount, getMetalFeatures().indirectDrawing)) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR restart requires indirect drawing and at most 65536 index occurrences across instances."); }
+	if (restart && !mvkCanAssemblePerVertexRestart(vertexCount, instanceCount, getMetalFeatures().indirectDrawing)) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR restart requires indirect drawing and uint32 dense capture record IDs."); }
 	if (!mvkCanEncodePerVertexDraw(vertexCount, instanceCount, _recordedPerVertexPipeline->getPerVertexCapturedLayout().stride, _recordedPerVertexPipeline->getVkPrimitiveTopology(), getMetalFeatures().maxMTLBufferSize)) {
 		return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR draw exceeds its capture or replay buffer limits.");
 	}
@@ -465,7 +465,7 @@ VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t in
 	auto topology = _recordedPerVertexPipeline->getVkPrimitiveTopology();
 	uint64_t primitiveCount = uint64_t(mvkPerVertexPrimitiveCount(vertexCount, topology)) * instanceCount;
 	uint64_t occurrences = primitiveCount * mvkPerVertexReplayVertexCount(topology);
-	uint64_t indexScratchBytes = restart ? uint64_t(vertexCount) * sizeof(uint32_t) : indexed && _recordedIndexType == VK_INDEX_TYPE_UINT8 ? uint64_t(vertexCount) * sizeof(uint16_t) : 0;
+	uint64_t indexScratchBytes = restart ? mvkPerVertexRestartIndexScratchSize(vertexCount) : indexed && _recordedIndexType == VK_INDEX_TYPE_UINT8 ? uint64_t(vertexCount) * sizeof(uint16_t) : 0;
 	if (indexScratchBytes > getMetalFeatures().maxMTLBufferSize) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR index scratch buffer exceeds Metal limits."); }
 	try {
 		_perVertexScratchRequests.push_back({NSUInteger(uint64_t(vertexCount) * instanceCount * _recordedPerVertexPipeline->getPerVertexCapturedLayout().stride), NSUInteger(occurrences * 2 * sizeof(uint32_t)), NSUInteger(primitiveCount * 3 * sizeof(uint32_t)), _recordedPerVertexPipeline->usesPortableBarycentrics() ? NSUInteger(occurrences * sizeof(uint32_t)) : 0, NSUInteger(indexScratchBytes), restart});

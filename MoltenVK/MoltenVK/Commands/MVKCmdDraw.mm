@@ -176,7 +176,7 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	};
 	// Vulkan ignores primitiveRestartEnable for nonindexed draws.
 	bool restart = mvkPerVertexRequiresRestartAssembly(indexBinding != nullptr, cmdEncoder->getVkGraphics().isPrimitiveRestartEnabled());
-	if (restart && !mvkCanAssemblePerVertexRestart(vertexCount, instanceCount, cmdEncoder->getMetalFeatures().indirectDrawing)) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "restart requires indirect drawing and at most 65536 index occurrences across instances."); return; }
+	if (restart && !mvkCanAssemblePerVertexRestart(vertexCount, instanceCount, cmdEncoder->getMetalFeatures().indirectDrawing)) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "restart requires indirect drawing and uint32 dense capture record IDs."); return; }
 	auto* scratch = cmdEncoder->nextPerVertexScratch();
 	if (!scratch) { return; }
 	id<MTLComputePipelineState> captureState = nil;
@@ -191,9 +191,9 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 		indexOffset = indexBinding->offset + uint64_t(firstIndex) * indexSize;
 		captureState = restart || indexSize == 4 ? pipeline->getTessVertexStageIndex32State() : pipeline->getTessVertexStageIndex16State();
 		if (restart) {
-			if (!scratch->buffers[5] || scratch->buffers[5].length < uint64_t(vertexCount) * sizeof(uint32_t) || !scratch->buffers[6] || scratch->buffers[6].length < 68 * sizeof(uint32_t)) { reject(VK_ERROR_OUT_OF_DEVICE_MEMORY, "restart assembly scratch is unavailable."); return; }
+			if (!scratch->buffers[5] || scratch->buffers[5].length < mvkPerVertexRestartIndexScratchSize(vertexCount) || !scratch->buffers[6] || scratch->buffers[6].length < 68 * sizeof(uint32_t)) { reject(VK_ERROR_OUT_OF_DEVICE_MEMORY, "restart assembly scratch is unavailable."); return; }
 			restartState = scratch->indexPipeline;
-			if (!restartState) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "restart assembly pipeline is unavailable."); return; }
+			if (!restartState || !restartState.threadExecutionWidth || !restartState.maxTotalThreadsPerThreadgroup) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "restart assembly pipeline is unavailable."); return; }
 		} else if (indexSize == 1) {
 			if (!scratch->buffers[5] || scratch->buffers[5].length < uint64_t(vertexCount) * sizeof(uint16_t)) { reject(VK_ERROR_OUT_OF_DEVICE_MEMORY, "widened index scratch is unavailable."); return; }
 			// Restart is disabled: 255 is a vertex index, not a sentinel. Read on GPU.
@@ -242,10 +242,14 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 			computeState.bindBuffer(captureEncoder, primitiveIndices ?: scratch->buffers[5], 0, 3);
 			computeState.bindBuffer(captureEncoder, scratch->buffers[4] ?: scratch->buffers[5], 0, 4);
 			computeState.bindBuffer(captureEncoder, scratch->buffers[6], 0, 5);
-			uint32_t params[] = {vertexCount, instanceCount, mvkPerVertexIndexSize(indexBinding->vkIndexType), uint32_t(topology), uint32_t(provokingLast), firstInstance, uint32_t(pipeline->usesPortableBarycentrics())};
-			computeState.bindBytes(captureEncoder, params, sizeof(params), 6);
-			[captureEncoder dispatchThreadgroups: MTLSizeMake(1, 1, 1) threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
-			[captureEncoder memoryBarrierWithScope: MTLBarrierScopeBuffers];
+			uint32_t params[] = {vertexCount, instanceCount, mvkPerVertexIndexSize(indexBinding->vkIndexType), uint32_t(topology), uint32_t(provokingLast), firstInstance, uint32_t(pipeline->usesPortableBarycentrics()), 0, 0, 0};
+			NSUInteger width = std::min(restartState.threadExecutionWidth, restartState.maxTotalThreadsPerThreadgroup);
+			mvkDispatchPerVertexRestart(vertexCount, instanceCount, topology, [&](uint32_t phase, uint32_t step, uint32_t source, uint64_t count) {
+				params[7] = phase; params[8] = step; params[9] = source;
+				computeState.bindBytes(captureEncoder, params, sizeof(params), 6);
+				[captureEncoder dispatchThreadgroups: MTLSizeMake((count + width - 1) / width, 1, 1) threadsPerThreadgroup: MTLSizeMake(width, 1, 1)];
+				[captureEncoder memoryBarrierWithScope: MTLBarrierScopeBuffers];
+			});
 			indexBuffer = scratch->buffers[5];
 			indexOffset = 0;
 			// Restore application resources after the assembly kernel occupied slots 0..6.
