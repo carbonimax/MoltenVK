@@ -477,13 +477,15 @@ VkResult MVKCommandBuffer::reservePrefilledPerVertexScratch(size_t firstRequest)
 	try {
 		std::vector<MVKPerVertexScratchRequest> requests(_perVertexScratchRequests.begin() + firstRequest, _perVertexScratchRequests.end());
 		MVKPerVertexScratchReservations scratch;
-		if (!mvkReservePerVertexScratch(getMTLDevice(), requests, scratch)) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR scratch reservation failed."); }
+		VkResult result = reservePerVertexScratch(requests, scratch);
+		if (result != VK_SUCCESS) { return result; }
 		_prefilledPerVertexScratch.insert(_prefilledPerVertexScratch.end(), scratch.begin(), scratch.end());
 		return VK_SUCCESS;
 	} catch (const std::bad_alloc&) { return VK_ERROR_OUT_OF_HOST_MEMORY; }
 }
 
 VkResult MVKCommandBuffer::reservePerVertexScratch(MVKPerVertexScratchReservations& scratch, std::unordered_set<MVKCommandBuffer*>& prefilledExecutions) {
+	if (_device->getConfigurationResult() != VK_SUCCESS) { return _device->getConfigurationResult(); }
 	if (!wasConfigurationSuccessful()) { return getConfigurationResult(); }
 	if (_perVertexScratchRequests.empty()) { return VK_SUCCESS; }
 	// Prefilled buffers are consumed once. Do not consume them during preflight: a later
@@ -492,7 +494,31 @@ VkResult MVKCommandBuffer::reservePerVertexScratch(MVKPerVertexScratchReservatio
 		scratch = _prefilledPerVertexScratch;
 		return VK_SUCCESS;
 	}
-	return mvkReservePerVertexScratch(getMTLDevice(), _perVertexScratchRequests, scratch) ? VK_SUCCESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+	return reservePerVertexScratch(_perVertexScratchRequests, scratch);
+}
+
+VkResult MVKCommandBuffer::reservePerVertexScratch(const std::vector<MVKPerVertexScratchRequest>& requests, MVKPerVertexScratchReservations& scratch) {
+	if (_device->getConfigurationResult() != VK_SUCCESS) { return _device->getConfigurationResult(); }
+	MVKPerVertexScratchReservations pending;
+	if (!mvkReservePerVertexScratch(getMTLDevice(), requests, pending)) {
+		VkResult result = _device->getConfigurationResult();
+		return result != VK_SUCCESS ? result : reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR scratch reservation failed.");
+	}
+	auto* pool = _commandPool->getCommandEncodingPool();
+	for (size_t i = 0; i < requests.size(); ++i) {
+		if (!requests[i].indexSize) { continue; }
+		// Secondary requests are flattened into the primary. Prepare in its pool
+		// and retain with scratch so encoding never compiles a helper after success.
+		id<MTLComputePipelineState> state = requests[i].restart ? pool->getPerVertexRestartMTLComputePipelineState() : pool->getConvertUint8IndicesMTLComputePipelineState(true);
+		VkResult result = _device->getConfigurationResult();
+		if (result != VK_SUCCESS) { return result; }
+		if (!state || !state.maxTotalThreadsPerThreadgroup || !state.threadExecutionWidth) { return reportError(VK_ERROR_INITIALIZATION_FAILED, "Portable PerVertexKHR index helper pipeline is unavailable or has invalid dispatch limits."); }
+		pending[i]->indexPipeline = [state retain];
+	}
+	VkResult result = _device->getConfigurationResult();
+	if (result != VK_SUCCESS) { return result; }
+	scratch = std::move(pending);
+	return VK_SUCCESS;
 }
 
 // Track whether a stage-based timestamp command has been added, so we know

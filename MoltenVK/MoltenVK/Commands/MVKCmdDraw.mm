@@ -192,12 +192,12 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 		captureState = restart || indexSize == 4 ? pipeline->getTessVertexStageIndex32State() : pipeline->getTessVertexStageIndex16State();
 		if (restart) {
 			if (!scratch->buffers[5] || scratch->buffers[5].length < uint64_t(vertexCount) * sizeof(uint32_t) || !scratch->buffers[6] || scratch->buffers[6].length < 68 * sizeof(uint32_t)) { reject(VK_ERROR_OUT_OF_DEVICE_MEMORY, "restart assembly scratch is unavailable."); return; }
-			restartState = cmdEncoder->getCommandEncodingPool()->getPerVertexRestartMTLComputePipelineState();
+			restartState = scratch->indexPipeline;
 			if (!restartState) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "restart assembly pipeline is unavailable."); return; }
 		} else if (indexSize == 1) {
 			if (!scratch->buffers[5] || scratch->buffers[5].length < uint64_t(vertexCount) * sizeof(uint16_t)) { reject(VK_ERROR_OUT_OF_DEVICE_MEMORY, "widened index scratch is unavailable."); return; }
 			// Restart is disabled: 255 is a vertex index, not a sentinel. Read on GPU.
-			widenState = cmdEncoder->getCommandEncodingPool()->getConvertUint8IndicesMTLComputePipelineState(true);
+			widenState = scratch->indexPipeline;
 			if (!widenState || !widenState.maxTotalThreadsPerThreadgroup || !widenState.threadExecutionWidth) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "raw uint8 index conversion is unavailable."); return; }
 		}
 		if (!captureState || !captureState.maxTotalThreadsPerThreadgroup || !captureState.threadExecutionWidth) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "indexed compute capture pipeline is unavailable."); return; }

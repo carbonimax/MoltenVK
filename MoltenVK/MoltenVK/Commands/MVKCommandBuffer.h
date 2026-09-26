@@ -210,6 +210,7 @@ protected:
 	void beginSecondaryEncoding(MVKCommandEncoder* cmdEncoder);
 	VkResult validateIndexedPerVertexAttachments();
 	VkResult reservePrefilledPerVertexScratch(size_t firstRequest);
+	VkResult reservePerVertexScratch(const std::vector<MVKPerVertexScratchRequest>& requests, MVKPerVertexScratchReservations& scratch);
 	std::vector<MVKPerVertexScratchRequest> _perVertexScratchRequests;
 	MVKPerVertexScratchReservations _prefilledPerVertexScratch;
 	MVKGraphicsPipeline* _recordedPerVertexPipeline = nullptr;
