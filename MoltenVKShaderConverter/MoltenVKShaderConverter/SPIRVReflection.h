@@ -95,6 +95,62 @@ namespace mvk {
 #pragma mark -
 #pragma mark Functions
 
+	/** Returns whether a type has a PerVertexKHR-decorated member, including nested structs and arrays. */
+	static inline bool hasPerVertexInputMember(const SPIRV_CROSS_NAMESPACE::CompilerReflection& reflect, const SPIRV_CROSS_NAMESPACE::SPIRType& type) {
+		for (uint32_t member = 0; member < type.member_types.size(); member++) {
+			if (reflect.has_member_decoration(type.self, member, spv::DecorationPerVertexKHR) || hasPerVertexInputMember(reflect, reflect.get_type(type.member_types[member]))) { return true; }
+		}
+		return false;
+	}
+
+	/**
+	 * Reports PerVertexKHR decorations on statically active fragment input variables or their members.
+	 * Activity is per interface variable (including whole blocks), as in SPIRV-Cross reflection.
+	 * An empty entryName selects the module's default entry point, which must be a fragment entry point.
+	 * Returns success separately from usesPerVertexInput; on failure the latter is false and errorLog is set.
+	 * Like the other reflection helpers, parser errors are recoverable when SPIRV-Cross exceptions are enabled.
+	 */
+	template<typename Vs>
+	static inline bool getFragmentShaderUsesPerVertexInput(const Vs& spirv, const std::string& entryName, bool& usesPerVertexInput, std::string& errorLog) {
+		usesPerVertexInput = false;
+		errorLog.clear();
+#ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
+		try {
+#endif
+			SPIRV_CROSS_NAMESPACE::Parser parser(spirv);
+			parser.parse();
+			SPIRV_CROSS_NAMESPACE::CompilerReflection reflect(parser.get_parsed_ir());
+			if (!entryName.empty()) {
+				bool found = false;
+				for (const auto& entry : reflect.get_entry_points_and_stages()) {
+					if (entry.name == entryName && entry.execution_model == spv::ExecutionModelFragment) { found = true; break; }
+				}
+				if (!found) {
+					errorLog = "Fragment entry point not found: " + entryName;
+					return false;
+				}
+				reflect.set_entry_point(entryName, spv::ExecutionModelFragment);
+			}
+			if (reflect.get_execution_model() != spv::ExecutionModelFragment) {
+				errorLog = "PerVertexKHR input reflection requires a fragment entry point.";
+				return false;
+			}
+			for (auto varID : reflect.get_active_interface_variables()) {
+				if (reflect.get_storage_class(varID) != spv::StorageClassInput) { continue; }
+				if (reflect.has_decoration(varID, spv::DecorationPerVertexKHR) || hasPerVertexInputMember(reflect, reflect.get_type_from_variable(varID))) {
+					usesPerVertexInput = true;
+					break;
+				}
+			}
+			return true;
+#ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
+		} catch (SPIRV_CROSS_NAMESPACE::CompilerError& ex) {
+			errorLog = ex.what();
+			return false;
+		}
+#endif
+	}
+
 	/**
 	 * Given a tessellation control shader and a tessellation evaluation shader,
 	 * both in SPIR-V format, returns tessellation reflection data.

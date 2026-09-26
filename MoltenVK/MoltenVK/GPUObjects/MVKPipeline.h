@@ -250,6 +250,17 @@ public:
 	/** Returns whether this pipeline has tessellation shaders. */
 	bool isTessellationPipeline() { return _isTessellationPipeline; }
 
+	/** Portable PerVertexKHR uses render capture for direct draws and compute capture for indexed draws, followed by replay.
+	 * Vertex stage resources describe capture; replay uses getPerVertexReplayBinding() and the optional implicit reversed-depth mask. */
+	bool usesPerVertexInputBuffer() const { return _usesPerVertexInputBuffer; }
+	id<MTLRenderPipelineState> getPerVertexCapturePipelineState() const { return _mtlPerVertexCapturePipelineState; }
+	const SPIRV_CROSS_NAMESPACE::MSLCapturedVertexLayout& getPerVertexCapturedLayout() const { return _perVertexCapturedLayout; }
+	const SPIRV_CROSS_NAMESPACE::MSLCapturedOutputReplayBinding& getPerVertexReplayBinding() const { return _perVertexReplayBinding; }
+	const SPIRV_CROSS_NAMESPACE::MSLPerVertexInputBinding& getPerVertexInputBinding() const { return _perVertexInputBinding; }
+	uint32_t getPerVertexCaptureBufferIndex() const { return getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::Output]; }
+	/** Capture parameters start with the record count per instance (uint32). */
+	uint32_t getPerVertexCaptureParamsBufferIndex() const { return getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::IndirectParams]; }
+
 	/** Returns the number of output tessellation patch control points. */
 	uint32_t getOutputControlPointCount() { return _outputControlPointCount; }
 
@@ -339,6 +350,9 @@ protected:
 	bool compileTessControlStageState(MTLComputePipelineDescriptor* tcPLDesc, VkPipelineCreationFeedback* pTessCtlFB);
 	void initDynamicState(const VkGraphicsPipelineCreateInfo* pCreateInfo);
 	void initSampleLocations(const VkGraphicsPipelineCreateInfo* pCreateInfo);
+	bool initPerVertexInputPipeline(const VkGraphicsPipelineCreateInfo* pCreateInfo, const VkPipelineShaderStageCreateInfo* pVertexSS, const VkPipelineShaderStageCreateInfo* pFragmentSS);
+	bool addPerVertexIndexedCapturePipelines(MTLVertexDescriptor* vertexDesc, const mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkPipelineShaderStageCreateInfo* pVertexSS);
+	bool addPerVertexReplayShaderToPipeline(MTLRenderPipelineDescriptor* plDesc, const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkPipelineShaderStageCreateInfo* pVertexSS, const VkPipelineShaderStageCreateInfo* pFragmentSS, SPIRVShaderOutputs& vertexOutputs);
     void initMTLRenderPipelineState(const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVTessReflectionData& reflectData, VkPipelineCreationFeedback* pPipelineFB, const VkPipelineShaderStageCreateInfo* pVertexSS, VkPipelineCreationFeedback* pVertexFB, const VkPipelineShaderStageCreateInfo* pTessCtlSS, VkPipelineCreationFeedback* pTessCtlFB, const VkPipelineShaderStageCreateInfo* pTessEvalSS, VkPipelineCreationFeedback* pTessEvalFB, const VkPipelineShaderStageCreateInfo* pFragmentSS, VkPipelineCreationFeedback* pFragmentFB);
     void initShaderConversionConfig(mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVTessReflectionData& reflectData);
 	void initReservedVertexAttributeBufferCount(const VkGraphicsPipelineCreateInfo* pCreateInfo);
@@ -393,6 +407,11 @@ protected:
 	id<MTLComputePipelineState> _mtlTessVertexStageIndex32State = nil;
 	id<MTLComputePipelineState> _mtlTessControlStageState = nil;
 	id<MTLRenderPipelineState> _mtlPipelineState = nil;
+	id<MTLRenderPipelineState> _mtlPerVertexCapturePipelineState = nil;
+	SPIRV_CROSS_NAMESPACE::MSLCapturedVertexLayout _perVertexCapturedLayout;
+	SPIRV_CROSS_NAMESPACE::MSLCapturedOutputReplayBinding _perVertexReplayBinding;
+	SPIRV_CROSS_NAMESPACE::MSLPerVertexInputBinding _perVertexInputBinding;
+	bool _usesPerVertexInputBuffer = false;
 
 	MVKShaderImplicitRezBinding _reservedVertexAttributeBufferCount;
 	VkPrimitiveTopology _vkPrimitiveTopology;
