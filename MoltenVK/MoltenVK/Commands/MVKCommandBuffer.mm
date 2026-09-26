@@ -253,7 +253,7 @@ VkResult MVKCommandBuffer::reset(VkCommandBufferResetFlags flags) {
 	_needsVisibilityResultMTLBuffer = false;
 	_hasStageCounterTimestampCommand = false;
 	_lastTessellationPipeline = nullptr;
-	_recordedGraphicsPipelineUsesPerVertexInput = false;
+	_recordedPerVertexPipeline = nullptr;
 	_recordedFramebuffer = nullptr;
 	_recordedRenderingError = nullptr;
 	_recordedIndexType = VK_INDEX_TYPE_MAX_ENUM;
@@ -435,8 +435,12 @@ VkResult MVKCommandBuffer::validateIndexedPerVertexAttachments() {
 	return error ? reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR %s", error) : VK_SUCCESS;
 }
 
-VkResult MVKCommandBuffer::recordIndexedPerVertexDraw() {
-	if (!_recordedGraphicsPipelineUsesPerVertexInput) { return VK_SUCCESS; }
+VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t instanceCount, bool indexed) {
+	if (!_recordedPerVertexPipeline || !vertexCount || !instanceCount) { return VK_SUCCESS; }
+	if (!mvkCanEncodePerVertexDraw(vertexCount, instanceCount, _recordedPerVertexPipeline->getPerVertexCapturedLayout().stride, _recordedPerVertexPipeline->getVkPrimitiveTopology(), getMetalFeatures().maxMTLBufferSize)) {
+		return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR draw exceeds its capture or replay buffer limits.");
+	}
+	if (!indexed) { return VK_SUCCESS; }
 	if (_recordedIndexType != VK_INDEX_TYPE_UINT16 && _recordedIndexType != VK_INDEX_TYPE_UINT32) {
 		return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed capture requires uint16 or uint32 indices.");
 	}
@@ -457,7 +461,7 @@ void MVKCommandBuffer::recordTimestampCommand() {
 
 void MVKCommandBuffer::recordBindPipeline(MVKCmdBindPipeline* mvkBindPipeline) {
 	_lastTessellationPipeline = mvkBindPipeline->isTessellationPipeline() ? mvkBindPipeline : nullptr;
-	if (auto* graphics = mvkBindPipeline->getGraphicsPipeline()) { _recordedGraphicsPipelineUsesPerVertexInput = graphics->usesPerVertexInputBuffer(); }
+	if (auto* graphics = mvkBindPipeline->getGraphicsPipeline()) { _recordedPerVertexPipeline = graphics->usesPerVertexInputBuffer() ? graphics : nullptr; }
 }
 
 

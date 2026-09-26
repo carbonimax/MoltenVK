@@ -1866,26 +1866,18 @@ bool MVKGraphicsPipeline::addFragmentShaderToPipeline(MTLRenderPipelineDescripto
 		}
 		addPrevStageOutputToShaderConversionConfig(shaderConfig, shaderOutputs);
 		if (_usesPerVertexInputBuffer) {
-#ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
-			try {
-#endif
-				CompilerReflection reflect(_fragmentModule->getSPIRV());
-				reflect.set_entry_point(pFragmentSS->pName, spv::ExecutionModelFragment);
-				reflect.compile();
-				for (auto varID : reflect.get_active_interface_variables()) {
-					if (reflect.get_storage_class(varID) != spv::StorageClassInput || !reflect.has_decoration(varID, spv::DecorationPerVertexKHR)) { continue; }
-					uint32_t location = reflect.get_decoration(varID, spv::DecorationLocation);
-					uint32_t component = reflect.get_decoration(varID, spv::DecorationComponent);
-					// Captured inputs use their physical producer layout. Ordinary components keep their remaps.
-					auto& inputs = shaderConfig.shaderInputs;
-					inputs.erase(std::remove_if(inputs.begin(), inputs.end(), [&](const mvk::MSLShaderInput& input) { return input.shaderVar.builtin == spv::BuiltInMax && input.shaderVar.location == location && input.shaderVar.component == component; }), inputs.end());
-				}
-#ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
-			} catch (const CompilerError& error) {
-				setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to reflect portable PerVertexKHR input remaps: %s", error.what()));
+			SPIRVShaderInputs fragmentInputs;
+			std::string errorLog;
+			if (!getShaderInputs(_fragmentModule->getSPIRV(), spv::ExecutionModelFragment, pFragmentSS->pName, fragmentInputs, errorLog)) {
+				setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to reflect portable PerVertexKHR input remaps: %s", errorLog.c_str()));
 				return false;
 			}
-#endif
+			for (const auto& fragmentInput : fragmentInputs) {
+				if (!fragmentInput.perVertex) { continue; }
+				// Captured leaves use their physical producer layout. Ordinary components keep their remaps.
+				auto& inputs = shaderConfig.shaderInputs;
+				inputs.erase(std::remove_if(inputs.begin(), inputs.end(), [&](const mvk::MSLShaderInput& input) { return input.shaderVar.builtin == spv::BuiltInMax && input.shaderVar.location == fragmentInput.location && input.shaderVar.component == fragmentInput.component; }), inputs.end());
+			}
 		}
 
 		MVKMTLFunction func = getMTLFunction(shaderConfig, pFragmentSS, pFragmentFB, _fragmentModule, "Fragment");

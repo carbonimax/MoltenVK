@@ -88,6 +88,9 @@ namespace mvk {
 
 		/** Whether this variable is actually used (read or written) by the shader. */
 		bool isUsed;
+
+		/** Whether this fragment input is read per vertex, including leaves of a PerVertexKHR block. */
+		bool perVertex = false;
 	};
 	typedef SPIRVShaderInterfaceVariable SPIRVShaderOutput;
 
@@ -293,7 +296,7 @@ namespace mvk {
 	static inline uint32_t getShaderInterfaceStructMembers(const SPIRV_CROSS_NAMESPACE::CompilerReflection& reflect,
 														   Vi& vars, SPIRVShaderInterfaceVariable* pParentFirstMember,
 														   const SPIRV_CROSS_NAMESPACE::SPIRType* structType, spv::StorageClass storage,
-														   bool patch, uint32_t loc) {
+														   bool patch, uint32_t loc, bool perVertex = false) {
 		bool isUsed = true;
 		auto biType = spv::BuiltInMax;
 		SPIRVShaderInterfaceVariable* pFirstMember = nullptr;
@@ -312,14 +315,17 @@ namespace mvk {
 				isUsed = reflect.has_active_builtin(biType, storage);
 			}
 			const SPIRV_CROSS_NAMESPACE::SPIRType* type = &reflect.get_type(structType->member_types[mbrIdx]);
-			uint32_t elemCnt = (type->array.empty() ? 1 : type->array[0]) * type->columns;
+			bool memberPerVertex = storage == spv::StorageClassInput && reflect.get_execution_model() == spv::ExecutionModelFragment && reflect.has_member_decoration(structType->self, mbrIdx, spv::DecorationPerVertexKHR);
+			if (memberPerVertex && !type->array.empty()) { type = &reflect.get_type(type->parent_type); }
+			uint32_t elemCnt = type->columns;
+			for (uint32_t count : type->array) { elemCnt *= count; }
 			for (uint32_t elemIdx = 0; elemIdx < elemCnt; elemIdx++) {
 				if (type->basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Struct)
-					loc = getShaderInterfaceStructMembers(reflect, vars, pFirstMember, type, storage, patch, loc);
+					loc = getShaderInterfaceStructMembers(reflect, vars, pFirstMember, type, storage, patch, loc, perVertex || memberPerVertex);
 				else {
 					// The alignment of a structure is the same as the largest member of the structure.
 					// Consequently, the first flattened member of a structure should align with structure itself.
-					vars.push_back({type->basetype, type->vecsize, loc, cmp, 0, biType, patch, isUsed});
+					vars.push_back({type->basetype, type->vecsize, loc, cmp, 0, biType, patch, isUsed, perVertex || memberPerVertex});
 					auto& currOutput = vars.back();
 					if ( !pFirstMember ) { pFirstMember = &currOutput; }
 					pFirstMember->firstStructMemberAlignment = std::max(pFirstMember->firstStructMemberAlignment, getShaderOutputSize(currOutput));
@@ -395,13 +401,17 @@ namespace mvk {
 					 biType == spv::BuiltInClipDistance || biType == spv::BuiltInCullDistance))
 					type = &reflect.get_type(type->parent_type);
 
-				uint32_t elemCnt = (type->array.empty() ? 1 : type->array[0]) * type->columns;
+				// PerVertexKHR's outer array selects a vertex, not additional varying locations.
+				bool perVertex = model == spv::ExecutionModelFragment && storage == spv::StorageClassInput && reflect.has_decoration(varID, spv::DecorationPerVertexKHR);
+				if (perVertex && !type->array.empty()) { type = &reflect.get_type(type->parent_type); }
+				uint32_t elemCnt = type->columns;
+				for (uint32_t count : type->array) { elemCnt *= count; }
 				for (uint32_t i = 0; i < elemCnt; i++) {
 					if (type->basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Struct) {
 						SPIRVShaderInterfaceVariable* pFirstMember = nullptr;
-						loc = getShaderInterfaceStructMembers(reflect, vars, pFirstMember, type, storage, patch, loc);
+						loc = getShaderInterfaceStructMembers(reflect, vars, pFirstMember, type, storage, patch, loc, perVertex);
 					} else {
-						vars.push_back({type->basetype, type->vecsize, loc, cmp, 0, biType, patch, isUsed});
+						vars.push_back({type->basetype, type->vecsize, loc, cmp, 0, biType, patch, isUsed, perVertex});
 						loc = addSat(loc, 1);
 					}
 				}
