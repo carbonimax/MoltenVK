@@ -18,6 +18,7 @@
 
 #include "MVKInstance.h"
 #include "MVKQueue.h"
+#include "MVKSubmissionTransaction.h"
 #include "MVKSurface.h"
 #include "MVKSwapchain.h"
 #include "MVKSync.h"
@@ -76,7 +77,10 @@ static inline VkResult execute(MVKQueueSubmission* qSubmit) { @autoreleasepool {
 // Relying on the dispatch queue to find time to drain the autoreleasepool can
 // result in significant memory creep under heavy workloads.
 VkResult MVKQueue::submit(MVKQueueSubmission* qSubmit) {
-	if (_device->getConfigurationResult() != VK_SUCCESS) { return _device->getConfigurationResult(); }
+	if (_device->getConfigurationResult() != VK_SUCCESS) {
+		if (qSubmit) { qSubmit->destroy(); }
+		return _device->getConfigurationResult();
+	}
 
 	if ( !qSubmit ) { return VK_SUCCESS; }     // Ignore nils
 
@@ -106,16 +110,19 @@ static inline uint32_t getCommandBufferCount(const VkSubmitInfo* pSubmitInfo) { 
 
 template <typename S>
 VkResult MVKQueue::submit(uint32_t submitCount, const S* pSubmits, VkFence fence, MVKCommandUse cmdUse) {
+	if (_device->getConfigurationResult() != VK_SUCCESS) { return _device->getConfigurationResult(); }
 
     // Fence-only submission
     if (submitCount == 0 && fence) {
         return submit(new MVKQueueCommandBufferSubmission(this, (S*)nullptr, fence, cmdUse));
     }
 
-    VkResult rslt = VK_SUCCESS;
-    for (uint32_t sIdx = 0; sIdx < submitCount; sIdx++) {
-        VkFence fenceOrNil = (sIdx == (submitCount - 1)) ? fence : VK_NULL_HANDLE; // last one gets the fence
-
+	// Prepare the entire API call before dispatching even its first batch. Destruction
+	// on failure only releases retained objects and scratch; execute()/finish() have
+	// not run, so no waits, signals, fences, or Metal submissions have been touched.
+	std::unordered_set<MVKCommandBuffer*> prefilledExecutions;
+	return mvkSubmitTransaction<MVKQueueCommandBufferSubmission>(submitCount, [&](uint32_t sIdx) {
+		VkFence fenceOrNil = sIdx == submitCount - 1 ? fence : VK_NULL_HANDLE;
 		const S* pVkSub = &pSubmits[sIdx];
 		MVKQueueCommandBufferSubmission* mvkSub;
 		uint32_t cbCnt = getCommandBufferCount(pVkSub);
@@ -135,10 +142,12 @@ VkResult MVKQueue::submit(uint32_t submitCount, const S* pSubmits, VkFence fence
 			mvkSub = new MVKQueueFullCommandBufferSubmission<512>(this, pVkSub, fenceOrNil, cmdUse);
 		}
 
-        VkResult subRslt = submit(mvkSub);
-        if (rslt == VK_SUCCESS) { rslt = subRslt; }
-    }
-    return rslt;
+		return mvkSub;
+	}, [&](MVKQueueCommandBufferSubmission& submission) {
+		return submission.reservePerVertexScratch(prefilledExecutions);
+	}, [&](MVKQueueCommandBufferSubmission* submission) {
+		return submit(submission);
+	});
 }
 
 // Concrete implementations of templated MVKQueue::submit().
@@ -428,13 +437,13 @@ MVKQueueSubmission::MVKQueueSubmission(MVKQueue* queue,
 	MVKBaseDeviceObject(queue->getDevice()),
 	_queue(queue) {
 
-	_queue->retain();	// Retain here and release in destructor. See note for MVKQueueCommandBufferSubmission::finish().
 	_creationTime = getPerformanceTimestamp();
 
 	_waitSemaphores.reserve(waitSemaphoreInfoCount);
 	for (uint32_t i = 0; i < waitSemaphoreInfoCount; i++) {
 		_waitSemaphores.emplace_back(pWaitSemaphoreSubmitInfos[i]);
 	}
+	_queue->retain();	// Retain after allocations succeed; release in the destructor.
 }
 
 MVKQueueSubmission::MVKQueueSubmission(MVKQueue* queue,
@@ -444,13 +453,13 @@ MVKQueueSubmission::MVKQueueSubmission(MVKQueue* queue,
 	MVKBaseDeviceObject(queue->getDevice()),
 	_queue(queue) {
 
-	_queue->retain();	// Retain here and release in destructor. See note for MVKQueueCommandBufferSubmission::finish().
 	_creationTime = getPerformanceTimestamp();
 
 	_waitSemaphores.reserve(waitSemaphoreCount);
 	for (uint32_t i = 0; i < waitSemaphoreCount; i++) {
 		_waitSemaphores.emplace_back(pWaitSemaphores[i], pWaitDstStageMask ? pWaitDstStageMask[i] : 0);
 	}
+	_queue->retain();	// Retain after allocations succeed; release in the destructor.
 }
 
 MVKQueueSubmission::~MVKQueueSubmission() {
@@ -596,7 +605,6 @@ MVKQueueCommandBufferSubmission::MVKQueueCommandBufferSubmission(MVKQueue* queue
 	_fence((MVKFence*)fence),
 	_commandUse(cmdUse) {
 	
-	if (_fence) { _fence->retain(); }
 
 	// pSubmit can be null if just tracking the fence alone
 	if (pSubmit) {
@@ -606,6 +614,7 @@ MVKQueueCommandBufferSubmission::MVKQueueCommandBufferSubmission(MVKQueue* queue
 			_signalSemaphores.emplace_back(pSubmit->pSignalSemaphoreInfos[i]);
 		}
 	}
+	if (_fence) { _fence->retain(); } // No throwing allocations after this retain.
 }
 
 // On device loss, the fence and signal semaphores may be signalled early, and they might then
@@ -623,7 +632,6 @@ MVKQueueCommandBufferSubmission::MVKQueueCommandBufferSubmission(MVKQueue* queue
 	_fence((MVKFence*)fence),
 	_commandUse(cmdUse) {
 	
-	if (_fence) { _fence->retain(); }
 
     // pSubmit can be null if just tracking the fence alone
     if (pSubmit) {
@@ -655,6 +663,7 @@ MVKQueueCommandBufferSubmission::MVKQueueCommandBufferSubmission(MVKQueue* queue
 			}
         }
     }
+	if (_fence) { _fence->retain(); } // No throwing allocations after this retain.
 }
 
 MVKQueueCommandBufferSubmission::~MVKQueueCommandBufferSubmission() {
@@ -663,11 +672,21 @@ MVKQueueCommandBufferSubmission::~MVKQueueCommandBufferSubmission() {
 
 
 template <size_t N>
+VkResult MVKQueueFullCommandBufferSubmission<N>::reservePerVertexScratch(std::unordered_set<MVKCommandBuffer*>& prefilledExecutions) {
+	if (!wasConfigurationSuccessful()) { return getConfigurationResult(); }
+	for (auto& cbInfo : _cmdBuffers) {
+		VkResult result = cbInfo.commandBuffer->reservePerVertexScratch(cbInfo.perVertexScratch, prefilledExecutions);
+		if (result != VK_SUCCESS) { return result; }
+	}
+	return VK_SUCCESS;
+}
+
+template <size_t N>
 void MVKQueueFullCommandBufferSubmission<N>::submitCommandBuffers() {
 	uint64_t startTime = getPerformanceTimestamp();
 
 	for (auto& cbInfo : _cmdBuffers) {
-		cbInfo.commandBuffer->submit(this, &_encodingContext);
+		cbInfo.commandBuffer->submit(this, &_encodingContext, cbInfo.perVertexScratch);
 		// Preserve encode-time failures for synchronous submissions. Async submit has
 		// already returned; allocation pressure must not be promoted to device loss.
 		setConfigurationResult(cbInfo.commandBuffer->getConfigurationResult());

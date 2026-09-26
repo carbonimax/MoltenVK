@@ -232,6 +232,7 @@ protected:
 typedef struct MVKCommandBufferSubmitInfo {
 	MVKCommandBuffer* commandBuffer;
 	uint32_t deviceMask;
+	MVKPerVertexScratchReservations perVertexScratch;
 
 	MVKCommandBufferSubmitInfo(const VkCommandBufferSubmitInfo& commandBufferInfo);
 	MVKCommandBufferSubmitInfo(VkCommandBuffer commandBuffer);
@@ -246,6 +247,7 @@ class MVKQueueCommandBufferSubmission : public MVKQueueSubmission {
 
 public:
 	VkResult execute() override;
+	virtual VkResult reservePerVertexScratch(std::unordered_set<MVKCommandBuffer*>& prefilledExecutions) { return getConfigurationResult(); }
 
 	MVKQueueCommandBufferSubmission(MVKQueue* queue, 
 									const VkSubmitInfo2* pSubmit,
@@ -285,6 +287,7 @@ template <size_t N>
 class MVKQueueFullCommandBufferSubmission : public MVKQueueCommandBufferSubmission {
 
 public:
+	VkResult reservePerVertexScratch(std::unordered_set<MVKCommandBuffer*>& prefilledExecutions) override;
 	MVKQueueFullCommandBufferSubmission(MVKQueue* queue, 
 										const VkSubmitInfo2* pSubmit,
 										VkFence fence,

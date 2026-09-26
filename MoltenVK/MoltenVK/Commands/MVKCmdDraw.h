@@ -26,7 +26,7 @@
 
 class MVKGraphicsPipeline;
 
-// Match the scratch allocator's power-of-two rounding before allocating any buffers.
+// Preserve the conservative power-of-two scratch ceiling used by recording validation.
 static inline bool mvkCanEncodePerVertexDraw(uint32_t vertexCount, uint32_t instanceCount, uint32_t stride, VkPrimitiveTopology topology, uint64_t maxMTLBufferSize) {
 	if (!vertexCount || !instanceCount) { return true; }
 	uint64_t maxBufferSize = 1;
