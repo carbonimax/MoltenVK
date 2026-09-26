@@ -8,6 +8,10 @@
 // Vulkan ignores restart for nonindexed draws; indexed restart needs GPU primitive assembly.
 static inline bool mvkPerVertexRequiresRestartAssembly(bool indexed, bool primitiveRestart) { return indexed && primitiveRestart; }
 
+// ponytail: serial GPU assembly is bounded to 64K input occurrences across instances.
+// Larger draws need parallel compaction/assembly, never truncation of GPU-produced counts.
+static inline bool mvkCanAssemblePerVertexRestart(uint32_t count, uint32_t instances, bool indirectDrawing) { return indirectDrawing && uint64_t(count) * instances <= 65536; }
+
 // Zero also identifies topologies outside the portable capture/replay contract.
 static inline uint32_t mvkPerVertexReplayVertexCount(VkPrimitiveTopology topology) {
 	switch (topology) {

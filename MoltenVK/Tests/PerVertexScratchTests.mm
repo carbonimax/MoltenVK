@@ -2,6 +2,13 @@
 #include "MVKSubmissionTransaction.h"
 #include <cassert>
 #include <cstdio>
+#include <cstddef>
+
+static_assert(sizeof(MTLDispatchThreadgroupsIndirectArguments) == 12);
+static_assert(sizeof(MTLDrawPrimitivesIndirectArguments) == 16);
+static_assert(offsetof(MTLDrawPrimitivesIndirectArguments, instanceCount) == 4);
+static_assert(offsetof(MTLDrawPrimitivesIndirectArguments, vertexStart) == 8);
+static_assert(offsetof(MTLDrawPrimitivesIndirectArguments, baseInstance) == 12);
 
 static unsigned liveBuffers;
 
@@ -101,6 +108,23 @@ int main() {
 			assert(widened[0]->buffers[5].length == 6 && !widened[0]->buffers[5].contents);
 		}
 		assert(liveBuffers == 0);
+		// Restart's compact index and indirect argument buffers are reserved before any submission.
+		for (unsigned mode = 0; mode < 2; ++mode) {
+			for (unsigned fail = 1; fail <= 7; ++fail) {
+				device->calls = 0; device->failAt = fail; device->failureMode = mode;
+				MVKPerVertexScratchReservations restart;
+				assert(!mvkReservePerVertexScratch((id<MTLDevice>)device, {{48, 24, 12, 12, 16, true}}, restart));
+				assert(restart.empty() && liveBuffers == 0 && device->calls == fail);
+			}
+		}
+		device->calls = 0; device->failAt = 0;
+		{
+			MVKPerVertexScratchReservations restart;
+			assert(mvkReservePerVertexScratch((id<MTLDevice>)device, {{48, 24, 12, 12, 16, true}, {48, 24, 12, 12, 16, true}}, restart));
+			assert(restart[0]->buffers[6].length == 272 && !restart[0]->buffers[6].contents);
+			for (unsigned i = 0; i < 7; ++i) { assert(restart[0]->buffers[i] != restart[1]->buffers[i]); }
+		}
+		assert(liveBuffers == 0);
 		// Reject a real-looking shared buffer with no CPU mapping.
 		device->calls = 0; device->failAt = 2; device->failureMode = 2;
 		MVKPerVertexScratchReservations unmapped;
@@ -158,5 +182,5 @@ int main() {
 		assert(liveBuffers == 0);
 		[device release];
 	}
-	std::puts("PASS: 120 allocation failures, optional corner allocation failures/success, unmapped buffer, whole-call rollback, prefill retry, independent executions, completion ownership, host OOM (CPU only)");
+	std::puts("PASS: 120 allocation failures, optional corner/restart allocation failures/success, unmapped buffer, whole-call rollback, prefill retry, independent executions, completion ownership, host OOM (CPU only)");
 }

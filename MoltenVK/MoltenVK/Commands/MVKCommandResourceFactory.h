@@ -383,6 +383,8 @@ public:
 	id<MTLComputePipelineState> newAccumulateOcclusionQueryResultsMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
 
 	/** Returns a new MTLComputePipelineState for converting a Uint8 index buffer to Uint16. */
+	id<MTLComputePipelineState> newPerVertexRestartMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
+
 	id<MTLComputePipelineState> newConvertUint8IndicesMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner, bool preserveValues = false);
 
 

@@ -547,4 +547,54 @@ kernel void convertUint8IndicesRaw(device uint8_t* src [[ buffer(0) ]],
 	uint8_t idx = src[pos];
 	dst[pos] = idx;
 }
+// One invocation per draw. Counts are CPU-bounded before queue submission; index data stays on GPU.
+// p: indexCount, instanceCount, indexBytes, VkPrimitiveTopology, provokingLast, firstInstance, corners.
+// args: dispatch at byte 0, draw arguments at byte 16, replay parameters at byte 256 (constant-buffer alignment).
+kernel void perVertexRestart(const device uint8_t* source [[buffer(0)]], device uint* compact [[buffer(1)]], device uint* pairs [[buffer(2)]], device uint* triplets [[buffer(3)]], device uint* corners [[buffer(4)]], device uint* args [[buffer(5)]], constant uint* p [[buffer(6)]]) {
+    uint captured = 0, primitives = 0, segmentCount = 0, segmentStart = 0;
+    uint topology = p[3], rasterVertices = topology == 0 ? 1 : topology <= 2 ? 2 : 3;
+    uint sentinel = p[2] == 1 ? 255u : p[2] == 2 ? 65535u : 0xffffffffu;
+    for (uint i = 0; i < p[0]; ++i) {
+        uint index = 0;
+        for (uint b = 0; b < p[2]; ++b) { index |= uint(source[i * p[2] + b]) << (8 * b); }
+        if (index == sentinel) { segmentCount = 0; segmentStart = captured; continue; }
+        compact[captured++] = index;
+        ++segmentCount;
+        bool emit = topology == 0 || (topology == 1 && segmentCount % 2 == 0) || (topology == 2 && segmentCount >= 2) || (topology == 3 && segmentCount % 3 == 0) || (topology >= 4 && segmentCount >= 3);
+        if (!emit) { continue; }
+        uint a = captured - 1, b = a, c = a;
+        if (rasterVertices == 2) { a = captured - 2; }
+        if (rasterVertices == 3) { a = captured - 3; b = captured - 2; }
+        if (topology == 4 && ((segmentCount - 3) & 1)) {
+            if (p[4]) { uint tmp = a; a = b; b = tmp; }
+            else { uint tmp = b; b = c; c = tmp; }
+        }
+        if (topology == 5) {
+            a = p[4] ? segmentStart : captured - 2;
+            b = p[4] ? captured - 2 : captured - 1;
+            c = p[4] ? captured - 1 : segmentStart;
+        }
+        triplets[3 * primitives] = a;
+        triplets[3 * primitives + 1] = b;
+        triplets[3 * primitives + 2] = c;
+        ++primitives;
+    }
+    for (uint instance = 0; instance < p[1]; ++instance) {
+        for (uint primitive = 0; primitive < primitives; ++primitive) {
+            uint key = instance * primitives + primitive;
+            for (uint corner = 0; corner < 3; ++corner) {
+                uint record = instance * captured + triplets[3 * primitive + corner];
+                triplets[3 * key + corner] = record;
+                if (corner >= rasterVertices) { continue; }
+                uint occurrence = key * rasterVertices + corner;
+                pairs[2 * occurrence] = record;
+                pairs[2 * occurrence + 1] = key;
+                if (p[6]) { corners[occurrence] = corner; }
+            }
+        }
+    }
+    args[0] = captured; args[1] = captured ? p[1] : 0; args[2] = 1; args[3] = 0;
+    args[4] = primitives * rasterVertices; args[5] = primitives ? p[1] : 0; args[6] = 0; args[7] = p[5];
+    args[64] = 0; args[65] = 0; args[66] = p[5]; args[67] = primitives * rasterVertices;
+}
 )";

@@ -142,6 +142,8 @@ public:
 	/** Returns a MTLComputePipelineState for converting a Uint8 index buffer to Uint16. */
 	id<MTLComputePipelineState> getConvertUint8IndicesMTLComputePipelineState(bool preserveValues = false);
 
+	id<MTLComputePipelineState> getPerVertexRestartMTLComputePipelineState();
+
 	/** Deletes all the internal resources. */
 	void clear();
 
@@ -183,5 +185,6 @@ protected:
 	id<MTLComputePipelineState> _mtlDrawIndexedCopyIndexBufferComputePipelineState[2] = {nil, nil};
 	id<MTLComputePipelineState> _mtlCopyQueryPoolResultsComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlAccumOcclusionQueryResultsComputePipelineState = nil;
+	id<MTLComputePipelineState> _mtlPerVertexRestartComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlConvertUint8IndicesComputePipelineState[2] = {nil, nil};
 };

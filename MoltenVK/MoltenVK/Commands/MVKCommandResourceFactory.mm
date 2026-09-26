@@ -623,6 +623,10 @@ id<MTLComputePipelineState> MVKCommandResourceFactory::newAccumulateOcclusionQue
 	return newMTLComputePipelineState("accumulateOcclusionQueryResults", owner);
 }
 
+id<MTLComputePipelineState> MVKCommandResourceFactory::newPerVertexRestartMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner) {
+	return newMTLComputePipelineState("perVertexRestart", owner);
+}
+
 id<MTLComputePipelineState> MVKCommandResourceFactory::newConvertUint8IndicesMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner, bool preserveValues) {
 	if (preserveValues) { return newMTLComputePipelineState("convertUint8IndicesRaw", owner); }
 #if MVK_USE_METAL_PRIVATE_API
