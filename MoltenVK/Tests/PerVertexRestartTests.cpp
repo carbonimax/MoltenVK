@@ -157,6 +157,7 @@ int main(int argc, char** argv) {
         queue = [gpu newCommandQueue];
         NSError* error = nil;
         NSString* source = [NSString stringWithContentsOfFile:[NSString stringWithUTF8String:argv[1]] encoding:NSUTF8StringEncoding error:&error];
+        if (!source || serialBaseline != [source containsString:@"for (uint i = 0; i < p[0]; ++i)"]) { std::fputs("FAIL: serial mode requires the pre-parallel restart kernel; parallel mode requires the current kernel\n", stderr); return 1; }
         MTLCompileOptions* options = [MTLCompileOptions new];
         options.languageVersion = MTLLanguageVersion2_4;
         id<MTLLibrary> library = [gpu newLibraryWithSource:source options:options error:&error];
