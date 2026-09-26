@@ -17,6 +17,7 @@
  */
 
 #include "MVKPipeline.h"
+#include "MVKPerVertexReplay.h"
 #include "MVKCommandBuffer.h"
 #include "MVKInlineObjectConstructor.h"
 #include "MVKImage.h"
@@ -1181,8 +1182,19 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 		setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to reflect PerVertexKHR inputs: %s", errorLog.c_str()));
 		return false;
 	}
-	if (!usesPerVertex) { return true; }
-	if (getPhysicalDevice()->getMTLDeviceCapabilities().supportsApple10 && getMetalFeatures().mslVersion >= CompilerMSL::Options::make_msl_version(4, 0) && getPrimitiveTopologyClass() == MTLPrimitiveTopologyClassTriangle) { return true; }
+	_hasPerVertexInputs = usesPerVertex;
+	SPIRVShaderInputs inputs;
+	if (!getShaderInputs(_fragmentModule->getSPIRV(), spv::ExecutionModelFragment, pFragmentSS->pName, inputs, errorLog)) {
+		setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to reflect barycentric inputs: %s", errorLog.c_str()));
+		return false;
+	}
+	// Include explicit-interpolation-only inputs, even when generic reflection does not mark an OpLoad.
+	for (const auto& input : inputs) {
+		_usesPerspectiveBarycentrics |= input.builtin == spv::BuiltInBaryCoordKHR;
+		_usesNoPerspectiveBarycentrics |= input.builtin == spv::BuiltInBaryCoordNoPerspKHR;
+	}
+	if (!usesPerVertex && !usesPortableBarycentrics()) { return true; }
+	if (!usesPortableBarycentrics() && getPhysicalDevice()->getMTLDeviceCapabilities().supportsApple10 && getMetalFeatures().mslVersion >= CompilerMSL::Options::make_msl_version(4, 0) && getPrimitiveTopologyClass() == MTLPrimitiveTopologyClassTriangle) { return true; }
 	auto unsupported = [&](const char* reason) {
 		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR %s", reason));
 		return false;
@@ -1271,16 +1283,19 @@ bool MVKGraphicsPipeline::addPerVertexReplayShaderToPipeline(MTLRenderPipelineDe
 	for (const auto& output : vertexOutputs) { if (output.builtin == spv::BuiltInMax) { locations.insert(output.location); } }
 	for (const auto& input : fragmentInputs) { if (input.builtin == spv::BuiltInMax) { locations.insert(input.location); } }
 	for (const auto& component : _perVertexCapturedLayout.components) { locations.insert(component.location); }
-	uint32_t location = 0;
-	uint32_t maxLocations = getDeviceProperties().limits.maxFragmentInputComponents / 4;
-	while (location < maxLocations && locations.count(location)) { location++; }
-	if (location == maxLocations) {
-		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR has no free varying location for its primitive key."));
+	uint32_t maxLocations = std::min(getDeviceProperties().limits.maxFragmentInputComponents, getDeviceProperties().limits.maxVertexOutputComponents) / 4;
+	auto allocateLocation = [&]() -> uint32_t {
+		return mvkAllocatePerVertexVaryingLocation(locations, maxLocations);
+	};
+	_perVertexInputBinding.primitive_index_location = allocateLocation();
+	if (_usesPerspectiveBarycentrics) { _perVertexReplayBarycentricBinding.perspective_location = allocateLocation(); }
+	if (_usesNoPerspectiveBarycentrics) { _perVertexReplayBarycentricBinding.no_perspective_location = allocateLocation(); }
+	if (_perVertexInputBinding.primitive_index_location == ~0u || (_usesPerspectiveBarycentrics && _perVertexReplayBarycentricBinding.perspective_location == ~0u) || (_usesNoPerspectiveBarycentrics && _perVertexReplayBarycentricBinding.no_perspective_location == ~0u)) {
+		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR/barycentrics have no free varying locations for the private key and basis."));
 		return false;
 	}
-	_perVertexInputBinding.primitive_index_location = location;
-	// Replay uses three capture buffers plus the implicit reversed-depth mask when emulated.
-	_perVertexReplayBinding = {0, 1, 2, location};
+	_perVertexReplayBinding = {0, 1, 2, _perVertexInputBinding.primitive_index_location};
+	if (usesPortableBarycentrics()) { _perVertexReplayBarycentricBinding.corner_buffer_index = 3; }
 	std::string replayMSL;
 	SPIRVToMSLConversionResultInfo replayResults = {};
 #ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
@@ -1299,7 +1314,7 @@ bool MVKGraphicsPipeline::addPerVertexReplayShaderToPipeline(MTLRenderPipelineDe
 		common.vertex.fixup_clipspace = shaderConfig.options.shouldFixupClipSpace;
 		replay.set_common_options(common);
 		for (const auto& output : shaderConfig.shaderOutputs) { replay.add_msl_shader_output(output.shaderVar); }
-		replayMSL = replay.compile_captured_output_replay(_perVertexCapturedLayout, _perVertexReplayBinding);
+		replayMSL = replay.compile_captured_output_replay(_perVertexCapturedLayout, _perVertexReplayBinding, _perVertexReplayBarycentricBinding);
 		replayResults.entryPoint.mtlFunctionName = replay.get_cleansed_entry_point_name(pVertexSS->pName, spv::ExecutionModelVertex);
 		replayResults.isPositionInvariant = replay.is_position_invariant();
 #ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
@@ -1829,7 +1844,8 @@ bool MVKGraphicsPipeline::addFragmentShaderToPipeline(MTLRenderPipelineDescripto
 		if (_usesPerVertexInputBuffer) {
 			shaderConfig.options.mslOptions.supports_per_vertex_fragment_input = false;
 			shaderConfig.options.mslOptions.disable_rasterization = false;
-			shaderConfig.setPerVertexInputBuffer(_perVertexCapturedLayout, _perVertexInputBinding);
+			if (_hasPerVertexInputs) { shaderConfig.setPerVertexInputBuffer(_perVertexCapturedLayout, _perVertexInputBinding); }
+			if (usesPortableBarycentrics()) { shaderConfig.setFragmentBarycentricInput({_perVertexReplayBarycentricBinding.perspective_location, _perVertexReplayBarycentricBinding.no_perspective_location}); }
 		}
 		addCommonImplicitBuffersToShaderConfig(shaderConfig, implicit);
 		shaderConfig.options.mslOptions.view_mask_buffer_index = implicit[MVKImplicitBuffer::ViewRange];
@@ -1886,7 +1902,7 @@ bool MVKGraphicsPipeline::addFragmentShaderToPipeline(MTLRenderPipelineDescripto
 		if ( !mtlFunc ) { return false; }
 
 		auto& funcRslts = func.shaderConversionResults;
-		if (_usesPerVertexInputBuffer && !funcRslts.needsPerVertexInputBuffer) {
+		if (_usesPerVertexInputBuffer && _hasPerVertexInputs && !funcRslts.needsPerVertexInputBuffer) {
 			setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Portable PerVertexKHR fragment shader did not consume its captured input buffer."));
 			return false;
 		}
@@ -3183,6 +3199,7 @@ namespace mvk {
 				cfg.discreteDescriptorSets,
 				cfg.dynamicBufferDescriptors,
 				cfg.perVertexInputBuffer,
+				cfg.fragmentBarycentricInput,
 				cfg.exportCapturedVertexLayout);
 	}
 
@@ -3360,7 +3377,7 @@ void mvkValidateCeralArchiveDefinitions() {
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLShaderInterfaceVariable>(3);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLResourceBinding>(2);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::DescriptorBinding>();
-	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(157);	// Contains collection
+	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(156);	// Contains collection
 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionResultInfo>(75);		// Contains collection
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLSpecializationMacroInfo>(22);			// Contains string
 	missingBytes += mvkValidateCerealArchiveSize<MVKShaderModuleKey>();

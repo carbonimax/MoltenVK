@@ -465,7 +465,7 @@ VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t in
 	uint64_t triangleCount = _recordedPerVertexPipeline->getVkPrimitiveTopology() == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ? vertexCount / 3 : (vertexCount > 2 ? vertexCount - 2 : 0);
 	uint64_t occurrences = triangleCount * instanceCount * 3;
 	try {
-		_perVertexScratchRequests.push_back({NSUInteger(uint64_t(vertexCount) * instanceCount * _recordedPerVertexPipeline->getPerVertexCapturedLayout().stride), NSUInteger(occurrences * 2 * sizeof(uint32_t)), NSUInteger(occurrences * sizeof(uint32_t))});
+		_perVertexScratchRequests.push_back({NSUInteger(uint64_t(vertexCount) * instanceCount * _recordedPerVertexPipeline->getPerVertexCapturedLayout().stride), NSUInteger(occurrences * 2 * sizeof(uint32_t)), NSUInteger(occurrences * sizeof(uint32_t)), _recordedPerVertexPipeline->usesPortableBarycentrics() ? NSUInteger(occurrences * sizeof(uint32_t)) : 0});
 	} catch (const std::bad_alloc&) { return reportError(VK_ERROR_OUT_OF_HOST_MEMORY, "Portable PerVertexKHR scratch recording allocation failed."); }
 	return _immediateCmdEncoder ? reservePrefilledPerVertexScratch(_perVertexScratchRequests.size() - 1) : VK_SUCCESS;
 }

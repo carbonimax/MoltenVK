@@ -173,6 +173,15 @@ namespace mvk {
 		}
 	};
 
+	/** Explicit portable barycentric varying ABI; disabled bindings do not affect cache identity. */
+	struct MSLFragmentBarycentricInput {
+		bool enabled = false;
+		SPIRV_CROSS_NAMESPACE::MSLFragmentBarycentricInputBinding binding;
+		bool matches(const MSLFragmentBarycentricInput& other) const { return enabled == other.enabled && (!enabled || (binding.perspective_location == other.binding.perspective_location && binding.no_perspective_location == other.binding.no_perspective_location)); }
+		template<class Archive>
+		void serialize(Archive& archive) { archive(enabled, binding.perspective_location, binding.no_perspective_location); }
+	};
+
 	/**
 	 * Configuration passed to the SPIRVToMSLConverter.
 	 *
@@ -187,10 +196,13 @@ namespace mvk {
 		std::vector<uint32_t> discreteDescriptorSets;
 		std::vector<DescriptorBinding> dynamicBufferDescriptors;
 		MSLPerVertexInputBuffer perVertexInputBuffer;
+		MSLFragmentBarycentricInput fragmentBarycentricInput;
 		bool exportCapturedVertexLayout = false;
 
 		/** Opt in to portable PerVertexKHR inputs using the actual producer layout and reserved resources. */
 		void setPerVertexInputBuffer(const SPIRV_CROSS_NAMESPACE::MSLCapturedVertexLayout& layout, const SPIRV_CROSS_NAMESPACE::MSLPerVertexInputBinding& binding) { perVertexInputBuffer = {true, layout, binding}; }
+
+		void setFragmentBarycentricInput(const SPIRV_CROSS_NAMESPACE::MSLFragmentBarycentricInputBinding& binding) { fragmentBarycentricInput = {true, binding}; }
 
 		/** Returns whether the pipeline stage being converted supports vertex attributes. */
 		bool stageSupportsVertexAttributes() const;

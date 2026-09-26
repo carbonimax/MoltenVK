@@ -253,6 +253,8 @@ public:
 	/** Portable PerVertexKHR uses render capture for direct draws and compute capture for indexed draws, followed by replay.
 	 * Vertex stage resources describe capture; replay uses getPerVertexReplayBinding() and the optional implicit reversed-depth mask. */
 	bool usesPerVertexInputBuffer() const { return _usesPerVertexInputBuffer; }
+	const SPIRV_CROSS_NAMESPACE::MSLCapturedOutputReplayBarycentricBinding& getPerVertexReplayBarycentricBinding() const { return _perVertexReplayBarycentricBinding; }
+	bool usesPortableBarycentrics() const { return _usesPerspectiveBarycentrics || _usesNoPerspectiveBarycentrics; }
 	id<MTLRenderPipelineState> getPerVertexCapturePipelineState() const { return _mtlPerVertexCapturePipelineState; }
 	const SPIRV_CROSS_NAMESPACE::MSLCapturedVertexLayout& getPerVertexCapturedLayout() const { return _perVertexCapturedLayout; }
 	const SPIRV_CROSS_NAMESPACE::MSLCapturedOutputReplayBinding& getPerVertexReplayBinding() const { return _perVertexReplayBinding; }
@@ -411,6 +413,10 @@ protected:
 	SPIRV_CROSS_NAMESPACE::MSLCapturedVertexLayout _perVertexCapturedLayout;
 	SPIRV_CROSS_NAMESPACE::MSLCapturedOutputReplayBinding _perVertexReplayBinding;
 	SPIRV_CROSS_NAMESPACE::MSLPerVertexInputBinding _perVertexInputBinding;
+	SPIRV_CROSS_NAMESPACE::MSLCapturedOutputReplayBarycentricBinding _perVertexReplayBarycentricBinding;
+	bool _usesPerspectiveBarycentrics = false;
+	bool _usesNoPerspectiveBarycentrics = false;
+	bool _hasPerVertexInputs = false;
 	bool _usesPerVertexInputBuffer = false;
 
 	MVKShaderImplicitRezBinding _reservedVertexAttributeBufferCount;

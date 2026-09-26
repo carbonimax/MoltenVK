@@ -73,6 +73,20 @@ int main() {
 				assert(device->calls == fail && liveBuffers == 0 && dispatched == 0);
 			}
 		}
+		// The optional corner allocation belongs to the same pre-submit transaction.
+		for (unsigned mode = 0; mode < 3; ++mode) {
+			device->calls = 0; device->failAt = 5; device->failureMode = mode;
+			MVKPerVertexScratchReservations corners;
+			assert(!mvkReservePerVertexScratch((id<MTLDevice>)device, {{48, 24, 12, 12}}, corners));
+			assert(corners.empty() && liveBuffers == 0 && device->calls == 5);
+		}
+		device->calls = 0; device->failAt = 0;
+		{
+			MVKPerVertexScratchReservations corners;
+			assert(mvkReservePerVertexScratch((id<MTLDevice>)device, {{48, 24, 12, 12}}, corners));
+			assert(corners[0]->buffers[4].length == 12 && corners[0]->buffers[4].contents);
+		}
+		assert(liveBuffers == 0);
 		// Reject a real-looking shared buffer with no CPU mapping.
 		device->calls = 0; device->failAt = 2; device->failureMode = 2;
 		MVKPerVertexScratchReservations unmapped;
@@ -130,5 +144,5 @@ int main() {
 		assert(liveBuffers == 0);
 		[device release];
 	}
-	std::puts("PASS: 120 allocation failures, unmapped buffer, whole-call rollback, prefill retry, independent executions, completion ownership, host OOM (CPU only)");
+	std::puts("PASS: 120 allocation failures, optional corner allocation failures/success, unmapped buffer, whole-call rollback, prefill retry, independent executions, completion ownership, host OOM (CPU only)");
 }

@@ -206,6 +206,7 @@ MVK_PUBLIC_SYMBOL bool SPIRVToMSLConversionConfiguration::matches(const SPIRVToM
 
     if ( !options.matches(other.options) ) { return false; }
 	if (!perVertexInputBuffer.matches(other.perVertexInputBuffer)) { return false; }
+	if (!fragmentBarycentricInput.matches(other.fragmentBarycentricInput)) { return false; }
 	if (exportCapturedVertexLayout != other.exportCapturedVertexLayout) { return false; }
 
 	for (const auto& si : shaderInputs) {
@@ -322,6 +323,9 @@ MVK_PUBLIC_SYMBOL bool SPIRVToMSLConverter::convert(SPIRVToMSLConversionConfigur
 		// Establish the MSL options for the compiler
 		// This needs to be done in two steps...for CompilerMSL and its superclass.
 		pMSLCompiler->set_msl_options(shaderConfig.options.mslOptions);
+		if (shaderConfig.fragmentBarycentricInput.enabled) {
+			pMSLCompiler->set_msl_fragment_barycentric_input(shaderConfig.fragmentBarycentricInput.binding);
+		}
 		if (shaderConfig.perVertexInputBuffer.enabled) {
 			pMSLCompiler->set_msl_per_vertex_input_buffer(shaderConfig.perVertexInputBuffer.layout, shaderConfig.perVertexInputBuffer.binding);
 		}
