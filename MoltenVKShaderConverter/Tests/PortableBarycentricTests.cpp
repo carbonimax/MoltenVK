@@ -115,6 +115,34 @@ int main(int argc, char** argv) {
 				check(!converter.convert(missing, result), "Missing private locations accepted");
 			}
 		}
+		// Capture explicit PointSize; the pinned replay API must not synthesize a default.
+		auto pointProducer = readSPIRV(directory + "/point-producer.spv");
+		auto pointCapture = capture;
+		pointCapture.options.mslOptions.enable_point_size_builtin = true;
+		pointCapture.options.mslOptions.enable_point_size_default = true;
+		converter.setSPIRV(pointProducer.data(), pointProducer.size());
+		check(converter.convert(pointCapture, result), result.resultLog.c_str());
+		auto pointLayout = result.resultInfo.capturedVertexLayout;
+		check(std::any_of(pointLayout.builtins.begin(), pointLayout.builtins.end(), [](const auto& field) { return field.builtin == spv::BuiltInPointSize; }), "PointSize missing from captured layout");
+		std::ofstream(directory + "/point-capture.metal") << result.msl;
+		for (unsigned index = 0; index < 2; ++index) {
+			auto indexed = pointCapture;
+			indexed.options.mslOptions.vertex_for_tessellation = true;
+			indexed.options.mslOptions.vertex_index_type = index ? CompilerMSL::Options::IndexType::UInt32 : CompilerMSL::Options::IndexType::UInt16;
+			check(converter.convert(indexed, result), result.resultLog.c_str());
+			MSLPerVertexInputBuffer expected{true, pointLayout, {}}, actual{true, result.resultInfo.capturedVertexLayout, {}};
+			check(expected.matches(actual), "Indexed point capture layout differs from nonindexed capture");
+			std::ofstream(directory + "/point-indexed-" + std::to_string(index) + ".metal") << result.msl;
+		}
+		CompilerMSL pointReplay(pointProducer);
+		auto pointOptions = pointCapture.options.mslOptions;
+		pointOptions.capture_output_to_buffer = false;
+		pointOptions.enable_point_size_default = false;
+		pointReplay.set_msl_options(pointOptions);
+		auto pointSource = pointReplay.compile_captured_output_replay(pointLayout, {0, 1, 2, 1}, {3, 2, 3});
+		check(pointSource.find("[[point_size]]") != std::string::npos, "Replay lost PointSize raster attribute");
+		check(pointSource.find("spvReplayCorners[spvReplayOccurrence]") != std::string::npos, "Point replay lost corner basis");
+		std::ofstream(directory + "/point-replay.metal") << pointSource;
 		auto explicitOnly = readSPIRV(directory + "/explicit-only.spv");
 		std::vector<SPIRVShaderInterfaceVariable> inputs;
 		std::string error;

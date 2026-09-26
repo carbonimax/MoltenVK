@@ -8,6 +8,7 @@ output=${3:?Output directory required}
 mkdir -p "$output"
 output=$(cd "$output" && pwd)
 glslangValidator -V --target-env vulkan1.1 "$test_dir/portable-barycentric.vert" -o "$output/producer.spv"
+glslangValidator -V --target-env vulkan1.1 -DPOINTS=1 "$test_dir/portable-barycentric.vert" -o "$output/point-producer.spv"
 for mask in 1 2 3; do
     for captured in 0 1; do
         glslangValidator -V --target-env vulkan1.1 -DPERSPECTIVE=$((mask & 1)) -DLINEAR=$((mask & 2)) -DCAPTURED="$captured" "$test_dir/portable-barycentric.frag" -o "$output/fragment-$mask-$captured.spv"
@@ -35,4 +36,4 @@ xcrun clang++ -arch arm64 -std=c++17 -O0 -g -DMVK_EXCLUDE_SPIRV_TOOLS=1 -DSPIRV_
     -framework Foundation -o "$output/portable-barycentric-test"
 "$output/portable-barycentric-test" "$output"
 for shader in "$output"/*.metal; do xcrun metal -x metal -std=macos-metal2.4 -fsyntax-only -fno-modules "$shader"; done
-echo "PASS: 14 Metal 2.4 sources; no GPU device or command submission"
+echo "PASS: 18 Metal 2.4 sources; no GPU device or command submission"

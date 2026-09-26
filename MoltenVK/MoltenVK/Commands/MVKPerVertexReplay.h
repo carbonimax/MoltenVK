@@ -5,31 +5,79 @@
 #include <cstdint>
 #include <unordered_set>
 
+// Vulkan ignores restart for nonindexed draws; indexed restart needs GPU primitive assembly.
+static inline bool mvkPerVertexRequiresRestartAssembly(bool indexed, bool primitiveRestart) { return indexed && primitiveRestart; }
+
+// Zero also identifies topologies outside the portable capture/replay contract.
+static inline uint32_t mvkPerVertexReplayVertexCount(VkPrimitiveTopology topology) {
+	switch (topology) {
+		case VK_PRIMITIVE_TOPOLOGY_POINT_LIST: return 1;
+		case VK_PRIMITIVE_TOPOLOGY_LINE_LIST: case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP: return 2;
+		case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN: return 3;
+		default: return 0;
+	}
+}
+
+static inline uint32_t mvkPerVertexPrimitiveCount(uint32_t vertexCount, VkPrimitiveTopology topology) {
+	switch (topology) {
+		case VK_PRIMITIVE_TOPOLOGY_POINT_LIST: return vertexCount;
+		case VK_PRIMITIVE_TOPOLOGY_LINE_LIST: return vertexCount / 2;
+		case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP: return vertexCount > 1 ? vertexCount - 1 : 0;
+		case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: return vertexCount / 3;
+		case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN: return vertexCount > 2 ? vertexCount - 2 : 0;
+		default: return 0;
+	}
+}
+
+static inline uint32_t mvkPerVertexIndexSize(VkIndexType type) {
+	switch (type) {
+		case VK_INDEX_TYPE_UINT8: return 1;
+		case VK_INDEX_TYPE_UINT16: return 2;
+		case VK_INDEX_TYPE_UINT32: return 4;
+		default: return 0;
+	}
+}
+
+// Validate both the Vulkan binding and its underlying Metal allocation without overflowing.
+static inline bool mvkPerVertexIndexRange(uint32_t count, uint32_t firstIndex, VkIndexType type, uint64_t bindingSize, uint64_t bindingOffset, uint64_t bufferSize) {
+	uint32_t size = mvkPerVertexIndexSize(type);
+	uint64_t start = uint64_t(firstIndex) * size, bytes = uint64_t(count) * size;
+	return size && start <= bindingSize && bytes <= bindingSize - start && bindingOffset <= bufferSize && start <= bufferSize - bindingOffset && bytes <= bufferSize - bindingOffset - start;
+}
+
 // Caller checks counts and buffer bounds with mvkCanEncodePerVertexDraw before allocating.
-// Records are dense (instance, input occurrence); corners follow the primitive's PerVertexKHR order.
+// Records are dense (instance, input occurrence), including for indexed capture on the GPU.
+// PerVertexKHR always uses three records; point/line raster replay uses only one/two vertices.
 static inline void mvkPopulatePerVertexReplay(uint32_t vertexCount, uint32_t instanceCount, VkPrimitiveTopology topology, bool provokingLast, uint32_t* pairs, uint32_t* indices, uint32_t* corners) {
-	uint32_t triangleCount = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ? vertexCount / 3 : (vertexCount > 2 ? vertexCount - 2 : 0);
+	uint32_t primitiveCount = mvkPerVertexPrimitiveCount(vertexCount, topology);
+	uint32_t replayVertices = mvkPerVertexReplayVertexCount(topology);
 	for (uint32_t instance = 0; instance < instanceCount; instance++) {
-		for (uint32_t triangle = 0; triangle < triangleCount; triangle++) {
-			uint32_t key = instance * uint32_t(triangleCount) + triangle;
-			uint32_t vertices[] = {triangle * 3, triangle * 3 + 1, triangle * 3 + 2};
+		for (uint32_t primitive = 0; primitive < primitiveCount; primitive++) {
+			uint32_t key = instance * primitiveCount + primitive;
+			uint32_t vertices[] = {primitive * 3, primitive * 3 + 1, primitive * 3 + 2};
 			// Vulkan primsrast-barycentric-order-table and -last-vertex. MoltenVK
 			// advertises triStripVertexOrderIndependentOfProvokingVertex = false.
-			// These orders also preserve winding and the replay triangle's provoking vertex.
-			if (topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP) {
-				vertices[0] = triangle; vertices[1] = triangle + 1; vertices[2] = triangle + 2;
-				if (triangle & 1) { std::swap(vertices[provokingLast ? 0 : 1], vertices[provokingLast ? 1 : 2]); }
+			// These orders preserve winding and the replay primitive's provoking vertex.
+			if (topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST) {
+				vertices[0] = vertices[1] = vertices[2] = primitive;
+			} else if (replayVertices == 2) {
+				vertices[0] = topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ? primitive * 2 : primitive;
+				vertices[1] = vertices[2] = vertices[0] + 1;
+			} else if (topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP) {
+				vertices[0] = primitive; vertices[1] = primitive + 1; vertices[2] = primitive + 2;
+				if (primitive & 1) { std::swap(vertices[provokingLast ? 0 : 1], vertices[provokingLast ? 1 : 2]); }
 			} else if (topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN) {
-				vertices[0] = provokingLast ? 0 : triangle + 1;
-				vertices[1] = provokingLast ? triangle + 1 : triangle + 2;
-				vertices[2] = provokingLast ? triangle + 2 : 0;
+				vertices[0] = provokingLast ? 0 : primitive + 1;
+				vertices[1] = provokingLast ? primitive + 1 : primitive + 2;
+				vertices[2] = provokingLast ? primitive + 2 : 0;
 			}
 			for (uint32_t vertex = 0; vertex < 3; vertex++) {
-				uint32_t occurrence = key * 3 + vertex;
 				uint32_t record = instance * vertexCount + vertices[vertex];
+				indices[3 * key + vertex] = record;
+				if (vertex >= replayVertices) { continue; }
+				uint32_t occurrence = key * replayVertices + vertex;
 				pairs[2 * occurrence] = record;
 				pairs[2 * occurrence + 1] = key;
-				indices[occurrence] = record;
 				if (corners) { corners[occurrence] = vertex; }
 			}
 		}
