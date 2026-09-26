@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright (c) 2026 Jean-Philippe Meunier
+# SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 test_dir=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$test_dir/../.." && pwd)

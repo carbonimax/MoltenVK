@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jean-Philippe Meunier
+// SPDX-License-Identifier: Apache-2.0
 #version 450
 struct Nested { float scalar; vec4 wide; vec2 tail[20]; };
 #if VERTEX

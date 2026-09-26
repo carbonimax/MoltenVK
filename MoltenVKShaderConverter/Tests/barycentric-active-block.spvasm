@@ -1,3 +1,5 @@
+; Copyright (c) 2026 Jean-Philippe Meunier
+; SPDX-License-Identifier: Apache-2.0
 ; F1: only statically active members require a portable barycentric basis.
 OpCapability Shader
 OpCapability FragmentBarycentricKHR
