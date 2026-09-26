@@ -1287,8 +1287,9 @@ bool MVKGraphicsPipeline::addPerVertexReplayShaderToPipeline(MTLRenderPipelineDe
 	for (const auto& output : vertexOutputs) { if (output.builtin == spv::BuiltInMax) { locations.insert(output.location); } }
 	for (const auto& input : fragmentInputs) { if (input.builtin == spv::BuiltInMax) { locations.insert(input.location); } }
 	for (const auto& component : _perVertexCapturedLayout.components) { locations.insert(component.location); }
+	auto userLocations = mvkPerVertexReplayUserLocations(fragmentInputs);
 	uint32_t maxComponents = std::min(getDeviceProperties().limits.maxFragmentInputComponents, getDeviceProperties().limits.maxVertexOutputComponents);
-	uint64_t replayComponents = mvkPerVertexReplayVaryingComponents(_perVertexCapturedLayout, _usesPerspectiveBarycentrics, _usesNoPerspectiveBarycentrics);
+	uint64_t replayComponents = mvkPerVertexReplayVaryingComponents(_perVertexCapturedLayout, _usesPerspectiveBarycentrics, _usesNoPerspectiveBarycentrics, userLocations);
 	if (replayComponents > maxComponents) {
 		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR replay requires %llu varying components including private key and basis; Metal budget is %u.", (unsigned long long)replayComponents, maxComponents));
 		return false;
@@ -1328,7 +1329,7 @@ bool MVKGraphicsPipeline::addPerVertexReplayShaderToPipeline(MTLRenderPipelineDe
 		common.vertex.fixup_clipspace = shaderConfig.options.shouldFixupClipSpace;
 		replay.set_common_options(common);
 		for (const auto& output : shaderConfig.shaderOutputs) { replay.add_msl_shader_output(output.shaderVar); }
-		replayMSL = replay.compile_captured_output_replay(_perVertexCapturedLayout, _perVertexReplayBinding, _perVertexReplayBarycentricBinding);
+		replayMSL = replay.compile_captured_output_replay(_perVertexCapturedLayout, _perVertexReplayBinding, _perVertexReplayBarycentricBinding, userLocations);
 		replayResults.entryPoint.mtlFunctionName = replay.get_cleansed_entry_point_name(pVertexSS->pName, spv::ExecutionModelVertex);
 		replayResults.isPositionInvariant = replay.is_position_invariant();
 #ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
