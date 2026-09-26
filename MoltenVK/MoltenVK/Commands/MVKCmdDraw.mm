@@ -174,13 +174,14 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	auto reject = [&](VkResult result, const char* message) {
 		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(result, "Portable PerVertexKHR %s", message));
 	};
-	// Vulkan ignores primitiveRestartEnable for nonindexed draws. Indexed restart must
-	// suppress sentinel capture and rebuild segment topology on GPU, never from CPU snapshots.
-	if (mvkPerVertexRequiresRestartAssembly(indexBinding != nullptr, cmdEncoder->getVkGraphics().isPrimitiveRestartEnabled())) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "indexed primitive restart requires GPU primitive assembly."); return; }
+	// Vulkan ignores primitiveRestartEnable for nonindexed draws.
+	bool restart = mvkPerVertexRequiresRestartAssembly(indexBinding != nullptr, cmdEncoder->getVkGraphics().isPrimitiveRestartEnabled());
+	if (restart && !mvkCanAssemblePerVertexRestart(vertexCount, instanceCount, cmdEncoder->getMetalFeatures().indirectDrawing)) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "restart requires indirect drawing and at most 65536 index occurrences across instances."); return; }
 	auto* scratch = cmdEncoder->nextPerVertexScratch();
 	if (!scratch) { return; }
 	id<MTLComputePipelineState> captureState = nil;
 	id<MTLComputePipelineState> widenState = nil;
+	id<MTLComputePipelineState> restartState = nil;
 	id<MTLBuffer> indexBuffer = indexBinding ? indexBinding->mtlBuffer : nil;
 	VkDeviceSize indexOffset = 0;
 	if (indexBinding) {
@@ -188,14 +189,18 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 		if (!indexSize) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "indexed capture requires uint8, uint16 or uint32 indices."); return; }
 		if (!indexBuffer || !mvkPerVertexIndexRange(vertexCount, firstIndex, indexBinding->vkIndexType, indexBinding->size, indexBinding->offset, indexBuffer.length)) { reject(VK_ERROR_UNKNOWN, "indexed capture exceeds the bound index buffer range."); return; }
 		indexOffset = indexBinding->offset + uint64_t(firstIndex) * indexSize;
-		captureState = indexSize == 4 ? pipeline->getTessVertexStageIndex32State() : pipeline->getTessVertexStageIndex16State();
-		if (indexSize == 1) {
+		captureState = restart || indexSize == 4 ? pipeline->getTessVertexStageIndex32State() : pipeline->getTessVertexStageIndex16State();
+		if (restart) {
+			if (!scratch->buffers[5] || scratch->buffers[5].length < uint64_t(vertexCount) * sizeof(uint32_t) || !scratch->buffers[6] || scratch->buffers[6].length < 68 * sizeof(uint32_t)) { reject(VK_ERROR_OUT_OF_DEVICE_MEMORY, "restart assembly scratch is unavailable."); return; }
+			restartState = cmdEncoder->getCommandEncodingPool()->getPerVertexRestartMTLComputePipelineState();
+			if (!restartState) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "restart assembly pipeline is unavailable."); return; }
+		} else if (indexSize == 1) {
 			if (!scratch->buffers[5] || scratch->buffers[5].length < uint64_t(vertexCount) * sizeof(uint16_t)) { reject(VK_ERROR_OUT_OF_DEVICE_MEMORY, "widened index scratch is unavailable."); return; }
 			// Restart is disabled: 255 is a vertex index, not a sentinel. Read on GPU.
 			widenState = cmdEncoder->getCommandEncodingPool()->getConvertUint8IndicesMTLComputePipelineState(true);
 			if (!widenState || !widenState.maxTotalThreadsPerThreadgroup || !widenState.threadExecutionWidth) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "raw uint8 index conversion is unavailable."); return; }
 		}
-		if (!captureState) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "indexed compute capture pipeline is unavailable."); return; }
+		if (!captureState || !captureState.maxTotalThreadsPerThreadgroup || !captureState.threadExecutionWidth) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "indexed compute capture pipeline is unavailable."); return; }
 		// Restrict encoder splitting to inspectable, single-sample attachments.
 		// Imageless framebuffer attachments live only in the encoder's private state.
 		auto* framebuffer = cmdEncoder->_pEncodingContext->getFramebuffer();
@@ -229,6 +234,25 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 		if (!pipeline->hasValidMTLPipelineStates()) { return; }
 		id<MTLComputeCommandEncoder> captureEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
 		auto& computeState = cmdEncoder->getMtlCompute();
+		if (restartState) {
+			computeState.bindPipeline(captureEncoder, restartState);
+			computeState.bindBuffer(captureEncoder, indexBuffer, indexOffset, 0);
+			computeState.bindBuffer(captureEncoder, scratch->buffers[5], 0, 1);
+			computeState.bindBuffer(captureEncoder, occurrences ?: scratch->buffers[5], 0, 2);
+			computeState.bindBuffer(captureEncoder, primitiveIndices ?: scratch->buffers[5], 0, 3);
+			computeState.bindBuffer(captureEncoder, scratch->buffers[4] ?: scratch->buffers[5], 0, 4);
+			computeState.bindBuffer(captureEncoder, scratch->buffers[6], 0, 5);
+			uint32_t params[] = {vertexCount, instanceCount, mvkPerVertexIndexSize(indexBinding->vkIndexType), uint32_t(topology), uint32_t(provokingLast), firstInstance, uint32_t(pipeline->usesPortableBarycentrics())};
+			computeState.bindBytes(captureEncoder, params, sizeof(params), 6);
+			[captureEncoder dispatchThreadgroups: MTLSizeMake(1, 1, 1) threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
+			[captureEncoder memoryBarrierWithScope: MTLBarrierScopeBuffers];
+			indexBuffer = scratch->buffers[5];
+			indexOffset = 0;
+			// Restore application resources after the assembly kernel occupied slots 0..6.
+			computeState._exists.descriptorSetData.reset();
+			cmdEncoder->finalizeDrawState(kMVKGraphicsStageVertex);
+			computeState.bindPipeline(captureEncoder, captureState);
+		}
 		if (widenState) {
 			computeState.bindPipeline(captureEncoder, widenState);
 			computeState.bindBuffer(captureEncoder, indexBuffer, indexOffset, 0);
@@ -257,10 +281,13 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 		[captureEncoder setStageInRegion: MTLRegionMake2D(uint32_t(baseVertex), firstInstance, vertexCount, instanceCount)];
 		cmdEncoder->getState().offsetZeroDivisorVertexBuffers(*cmdEncoder, kMVKGraphicsStageVertex, pipeline, firstInstance);
 		NSUInteger width = std::min(captureState.threadExecutionWidth, captureState.maxTotalThreadsPerThreadgroup);
-		if (cmdEncoder->getMetalFeatures().nonUniformThreadgroups) {
+		if (restart) {
+			// grid_size is the compiler's dense record stride: never round up GPU counts.
+			[captureEncoder dispatchThreadgroupsWithIndirectBuffer: scratch->buffers[6] indirectBufferOffset: 0 threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
+		} else if (cmdEncoder->getMetalFeatures().nonUniformThreadgroups) {
 			[captureEncoder dispatchThreads: MTLSizeMake(vertexCount, instanceCount, 1) threadsPerThreadgroup: MTLSizeMake(width, 1, 1)];
 		} else {
-			[captureEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(vertexCount, width), instanceCount, 1) threadsPerThreadgroup: MTLSizeMake(width, 1, 1)];
+			[captureEncoder dispatchThreadgroups: MTLSizeMake(vertexCount, instanceCount, 1) threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
 		}
 		cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass);
 	}
@@ -291,7 +318,7 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	auto* pairs = (uint32_t*)occurrences.contents;
 	auto* indices = (uint32_t*)primitiveIndices.contents;
 	auto* corners = (uint32_t*)scratch->buffers[4].contents;
-	mvkPopulatePerVertexReplay(vertexCount, instanceCount, topology, provokingLast, pairs, indices, corners);
+	if (!restart) { mvkPopulatePerVertexReplay(vertexCount, instanceCount, topology, provokingLast, pairs, indices, corners); }
 	const auto& replay = pipeline->getPerVertexReplayBinding();
 	const auto& fragment = pipeline->getPerVertexInputBinding();
 	uint32_t replayDraw[] = {0, 0, firstInstance, uint32_t(replayCount)};
@@ -299,7 +326,8 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	metalState.bindVertexBuffer(encoder, captured, 0, replay.vertex_buffer_index);
 	metalState.bindVertexBuffer(encoder, occurrences, 0, replay.occurrence_buffer_index);
 	if (corners) { metalState.bindVertexBuffer(encoder, scratch->buffers[4], 0, pipeline->getPerVertexReplayBarycentricBinding().corner_buffer_index); }
-	metalState.bindVertexBytes(encoder, replayDraw, sizeof(replayDraw), replay.draw_parameters_buffer_index);
+	if (restart) { metalState.bindVertexBuffer(encoder, scratch->buffers[6], 256, replay.draw_parameters_buffer_index); }
+	else { metalState.bindVertexBytes(encoder, replayDraw, sizeof(replayDraw), replay.draw_parameters_buffer_index); }
 	metalState.bindFragmentBuffer(encoder, captured, 0, fragment.vertex_buffer_index);
 	metalState.bindFragmentBuffer(encoder, primitiveIndices, 0, fragment.primitive_index_buffer_index);
 	if (cmdEncoder->getPhysicalDevice()->shouldEmulateReversedDepthViewport()) {
@@ -307,7 +335,9 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 		metalState.bindVertexBytes(encoder, &viewportMask, sizeof(viewportMask), pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::EmulatedReversedDepthViewport]);
 	}
 	MTLPrimitiveType replayType = replayVertices == 1 ? MTLPrimitiveTypePoint : replayVertices == 2 ? MTLPrimitiveTypeLine : MTLPrimitiveTypeTriangle;
-	if (cmdEncoder->getMetalFeatures().baseVertexInstanceDrawing) {
+	if (restart) {
+		[encoder drawPrimitives: replayType indirectBuffer: scratch->buffers[6] indirectBufferOffset: 4 * sizeof(uint32_t)];
+	} else if (cmdEncoder->getMetalFeatures().baseVertexInstanceDrawing) {
 		[encoder drawPrimitives: replayType vertexStart: 0 vertexCount: replayCount instanceCount: instanceCount baseInstance: firstInstance];
 	} else {
 		[encoder drawPrimitives: replayType vertexStart: 0 vertexCount: replayCount instanceCount: instanceCount];
@@ -931,7 +961,7 @@ VkResult MVKCmdDrawIndirect::setContent(MVKCommandBuffer* cmdBuff,
 										VkDeviceSize offset,
 										uint32_t drawCount,
 										uint32_t stride) {
-	if (cmdBuff->recordedGraphicsPipelineUsesPerVertexInput()) { return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indirect draws require GPU-sized occurrence capture."); }
+	if (drawCount && cmdBuff->recordedGraphicsPipelineUsesPerVertexInput()) { return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indirect draws have no vertex/instance bound for pre-submit scratch reservation."); }
 	MVKBuffer* mvkBuffer = (MVKBuffer*)buffer;
 	_mtlIndirectBuffer = mvkBuffer->getMTLBuffer();
 	_mtlIndirectBufferOffset = mvkBuffer->getMTLBufferOffset() + offset;
@@ -1016,8 +1046,9 @@ void MVKCmdDrawIndirect::encodeIndexedIndirect(MVKCommandEncoder* cmdEncoder,
 }
 
 void MVKCmdDrawIndirect::encode(MVKCommandEncoder* cmdEncoder) {
+	if (!_drawCount) { return; }
 	if (cmdEncoder->getGraphicsPipeline()->usesPerVertexInputBuffer()) {
-		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indirect draws require GPU-sized occurrence capture."));
+		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indirect draws have no vertex/instance bound for pre-submit scratch reservation."));
 		return;
 	}
 
@@ -1319,7 +1350,7 @@ VkResult MVKCmdDrawIndexedIndirect::setContent(MVKCommandBuffer* cmdBuff,
 											   VkDeviceSize offset,
 											   uint32_t drawCount,
 											   uint32_t stride) {
-	if (cmdBuff->recordedGraphicsPipelineUsesPerVertexInput()) { return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed indirect draws require GPU-sized occurrence capture."); }
+	if (drawCount && cmdBuff->recordedGraphicsPipelineUsesPerVertexInput()) { return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed indirect draws have no vertex/instance bound for pre-submit scratch reservation."); }
 	if (cmdBuff->_lastTessellationPipeline && !cmdBuff->getMetalFeatures().indirectTessellationDrawing) {
 		return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCmdDrawIndexedIndirect(): The current device does not support indirect tessellated drawing.");
 	}
@@ -1371,13 +1402,15 @@ VkResult MVKCmdDrawIndexedIndirect::setContent(MVKCommandBuffer* cmdBuff,
 }
 
 void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder) {
+	if (!_drawCount) { return; }
 	cmdEncoder->restartMetalRenderPassIfNeeded();
 	encode(cmdEncoder, cmdEncoder->getVkGraphics()._indexBuffer);
 }
 
 void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder, const MVKIndexMTLBufferBinding& ibbOrig) {
+	if (!_drawCount) { return; }
 	if (cmdEncoder->getGraphicsPipeline()->usesPerVertexInputBuffer()) {
-		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed indirect draws require GPU-sized occurrence capture."));
+		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed indirect draws have no vertex/instance bound for pre-submit scratch reservation."));
 		return;
 	}
 
