@@ -328,8 +328,10 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	if (corners) { metalState.bindVertexBuffer(encoder, scratch->buffers[4], 0, pipeline->getPerVertexReplayBarycentricBinding().corner_buffer_index); }
 	if (restart) { metalState.bindVertexBuffer(encoder, scratch->buffers[6], 256, replay.draw_parameters_buffer_index); }
 	else { metalState.bindVertexBytes(encoder, replayDraw, sizeof(replayDraw), replay.draw_parameters_buffer_index); }
-	metalState.bindFragmentBuffer(encoder, captured, 0, fragment.vertex_buffer_index);
-	metalState.bindFragmentBuffer(encoder, primitiveIndices, 0, fragment.primitive_index_buffer_index);
+	if (fragment.vertex_buffer_index != ~0u) {
+		metalState.bindFragmentBuffer(encoder, captured, 0, fragment.vertex_buffer_index);
+		metalState.bindFragmentBuffer(encoder, primitiveIndices, 0, fragment.primitive_index_buffer_index);
+	}
 	if (cmdEncoder->getPhysicalDevice()->shouldEmulateReversedDepthViewport()) {
 		uint32_t viewportMask = cmdEncoder->getVkGraphics()._implicitBufferData[kMVKShaderStageVertex].emulatedReversedDepthViewportMask;
 		metalState.bindVertexBytes(encoder, &viewportMask, sizeof(viewportMask), pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::EmulatedReversedDepthViewport]);

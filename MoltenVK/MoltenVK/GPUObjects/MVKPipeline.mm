@@ -18,6 +18,7 @@
 
 #include "MVKPipeline.h"
 #include "MVKPerVertexReplay.h"
+#include "MVKPerVertexCapacity.h"
 #include "MVKCommandBuffer.h"
 #include "MVKInlineObjectConstructor.h"
 #include "MVKImage.h"
@@ -1205,10 +1206,12 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 	if (_dynamicStateFlags.has(MVKRenderStateFlag::ProvokingVertexMode)) { return unsupported("does not support dynamic provoking-vertex mode."); }
 	initReservedVertexAttributeBufferCount(pCreateInfo);
 	uint32_t captureParams = getImplicitBufferIndex(kMVKShaderStageVertex, 6);
-	if (captureParams >= getMetalFeatures().maxPerStageBufferCount || captureParams < _descriptorBufferCounts.stages[kMVKShaderStageVertex]) { return unsupported("has no free vertex capture parameter buffer slot."); }
-	_perVertexInputBinding.vertex_buffer_index = getImplicitBufferIndex(kMVKShaderStageFragment, 4);
-	_perVertexInputBinding.primitive_index_buffer_index = getImplicitBufferIndex(kMVKShaderStageFragment, 5);
-	if (_perVertexInputBinding.primitive_index_buffer_index >= getMetalFeatures().maxPerStageBufferCount || _perVertexInputBinding.primitive_index_buffer_index < _descriptorBufferCounts.stages[kMVKShaderStageFragment]) { return unsupported("has no free fragment capture buffer slots."); }
+	if (!mvkPerVertexBufferIndexAvailable(captureParams, _descriptorBufferCounts.stages[kMVKShaderStageVertex], getMetalFeatures().maxPerStageBufferCount)) { return unsupported("has no free vertex capture parameter buffer slot."); }
+	if (_hasPerVertexInputs) {
+		_perVertexInputBinding.vertex_buffer_index = getImplicitBufferIndex(kMVKShaderStageFragment, 4);
+		_perVertexInputBinding.primitive_index_buffer_index = getImplicitBufferIndex(kMVKShaderStageFragment, 5);
+		if (!mvkPerVertexBufferIndexAvailable(_perVertexInputBinding.primitive_index_buffer_index, _descriptorBufferCounts.stages[kMVKShaderStageFragment], getMetalFeatures().maxPerStageBufferCount)) { return unsupported("has no free fragment capture buffer slots."); }
+	}
 	// Replay is generated directly from the capture ABI and is not yet a shader-library cache entry.
 	if (shouldFailOnPipelineCompileRequired()) {
 		setConfigurationResult(VK_PIPELINE_COMPILE_REQUIRED);
@@ -1283,7 +1286,15 @@ bool MVKGraphicsPipeline::addPerVertexReplayShaderToPipeline(MTLRenderPipelineDe
 	for (const auto& output : vertexOutputs) { if (output.builtin == spv::BuiltInMax) { locations.insert(output.location); } }
 	for (const auto& input : fragmentInputs) { if (input.builtin == spv::BuiltInMax) { locations.insert(input.location); } }
 	for (const auto& component : _perVertexCapturedLayout.components) { locations.insert(component.location); }
-	uint32_t maxLocations = std::min(getDeviceProperties().limits.maxFragmentInputComponents, getDeviceProperties().limits.maxVertexOutputComponents) / 4;
+	uint32_t maxComponents = std::min(getDeviceProperties().limits.maxFragmentInputComponents, getDeviceProperties().limits.maxVertexOutputComponents);
+	uint64_t replayComponents = mvkPerVertexReplayVaryingComponents(_perVertexCapturedLayout, _usesPerspectiveBarycentrics, _usesNoPerspectiveBarycentrics);
+	if (replayComponents > maxComponents) {
+		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR replay requires %llu varying components including private key and basis; Metal budget is %u.", (unsigned long long)replayComponents, maxComponents));
+		return false;
+	}
+	// Metal user(locnN) names are not Vulkan Locations. Allow three private names beyond
+	// the public range; a sparse interface can fill every Location and still fit Metal.
+	uint32_t maxLocations = maxComponents / 4 + 3;
 	auto allocateLocation = [&]() -> uint32_t {
 		return mvkAllocatePerVertexVaryingLocation(locations, maxLocations);
 	};
@@ -1623,6 +1634,15 @@ bool MVKGraphicsPipeline::verifyImplicitBuffers(MVKShaderStage stage) {
 		"Tessellation evaluation",
 		"Fragment"
 	};
+	if (_usesPerVertexInputBuffer) {
+		const auto& buffers = _stageResources[stage].implicitBuffers;
+		for (MVKImplicitBuffer needed : buffers.needed.removingAll(MVKImplicitBuffer::PushConstant)) {
+			if (!mvkPerVertexBufferIndexAvailable(buffers.ids[needed], _descriptorBufferCounts.stages[stage], getMetalFeatures().maxPerStageBufferCount)) {
+				setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR %s shader has no valid slot for its %s buffer.", stageNames[stage], getImplicitBufferName(needed)));
+				return false;
+			}
+		}
+	}
 
 	return ::verifyImplicitBuffers(_stageResources[stage].implicitBuffers, stageNames[stage], _descriptorBufferCounts.stages[stage], this);
 }
