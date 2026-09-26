@@ -295,12 +295,12 @@ namespace mvk {
 
 	template<typename Vi>
 	static inline uint32_t getShaderInterfaceStructMembers(const SPIRV_CROSS_NAMESPACE::CompilerReflection& reflect,
-														   Vi& vars, SPIRVShaderInterfaceVariable* pParentFirstMember,
+														   Vi& vars, size_t parentFirstMember,
 														   const SPIRV_CROSS_NAMESPACE::SPIRType* structType, spv::StorageClass storage,
 														   bool patch, uint32_t loc, bool perVertex = false) {
 		bool isUsed = true;
 		auto biType = spv::BuiltInMax;
-		SPIRVShaderInterfaceVariable* pFirstMember = nullptr;
+		const size_t firstMember = vars.size();
 		size_t mbrCnt = structType->member_types.size();
 		for (uint32_t mbrIdx = 0; mbrIdx < mbrCnt; mbrIdx++) {
 			// Each member may have a location decoration. If not, each member
@@ -322,34 +322,31 @@ namespace mvk {
 			for (uint32_t count : type->array) { elemCnt *= count; }
 			for (uint32_t elemIdx = 0; elemIdx < elemCnt; elemIdx++) {
 				if (type->basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Struct)
-					loc = getShaderInterfaceStructMembers(reflect, vars, pFirstMember, type, storage, patch, loc, perVertex || memberPerVertex);
+					loc = getShaderInterfaceStructMembers(reflect, vars, firstMember, type, storage, patch, loc, perVertex || memberPerVertex);
 				else {
 					// The alignment of a structure is the same as the largest member of the structure.
 					// Consequently, the first flattened member of a structure should align with structure itself.
 					vars.push_back({type->basetype, type->vecsize, loc, cmp, 0, biType, patch, isUsed, perVertex || memberPerVertex});
-					auto& currOutput = vars.back();
-					if ( !pFirstMember ) { pFirstMember = &currOutput; }
-					pFirstMember->firstStructMemberAlignment = std::max(pFirstMember->firstStructMemberAlignment, getShaderOutputSize(currOutput));
+					vars[firstMember].firstStructMemberAlignment = std::max(vars[firstMember].firstStructMemberAlignment, getShaderOutputSize(vars.back()));
 					loc = addSat(loc, 1);
 				}
 			}
 		}
 
 		// Set the parent's first member alignment to the largest alignment found so far.
-		if ( !pParentFirstMember ) {
-			pParentFirstMember = pFirstMember;
-		} else if (pParentFirstMember && pFirstMember) {
-			pParentFirstMember->firstStructMemberAlignment = std::max(pParentFirstMember->firstStructMemberAlignment, pFirstMember->firstStructMemberAlignment);
+		// Indices remain valid when appending leaves reallocates the container.
+		if (parentFirstMember < vars.size() && firstMember < vars.size()) {
+			vars[parentFirstMember].firstStructMemberAlignment = std::max(vars[parentFirstMember].firstStructMemberAlignment, vars[firstMember].firstStructMemberAlignment);
 		}
 
 		return loc;
 	}
 	template<typename Vo>
 	static inline uint32_t getShaderOutputStructMembers(const SPIRV_CROSS_NAMESPACE::CompilerReflection& reflect,
-														Vo& outputs, SPIRVShaderOutput* pParentFirstMember,
+														Vo& outputs, size_t parentFirstMember,
 														const SPIRV_CROSS_NAMESPACE::SPIRType* structType, spv::StorageClass storage,
 														bool patch, uint32_t loc) {
-		return getShaderInterfaceStructMembers(reflect, outputs, pParentFirstMember, structType, storage, patch, loc);
+		return getShaderInterfaceStructMembers(reflect, outputs, parentFirstMember, structType, storage, patch, loc);
 	}
 
 	/** Given a shader in SPIR-V format, returns interface reflection data. */
@@ -363,25 +360,31 @@ namespace mvk {
 			parser.parse();
 			if (model == spv::ExecutionModelFragment && storage == spv::StorageClassInput) {
 				// Match the MSL backend's builtin analysis: access chains must see through
-				// copied Input pointers before deciding which block members are active.
+				// copied/aliased Input pointers before deciding which block members are active.
 				// Only the parser's private IR is changed; entry-point reachability is retained.
 				auto& ir = parser.get_parsed_ir();
-				std::unordered_map<uint32_t, uint32_t> copiedPointers;
-				ir.for_each_typed_id<SPIRV_CROSS_NAMESPACE::SPIRBlock>([&](uint32_t, const SPIRV_CROSS_NAMESPACE::SPIRBlock& block) {
-					for (const auto& op : block.ops) {
-						if (op.op != spv::OpCopyObject || op.length < 3) { continue; }
+				std::unordered_map<uint32_t, uint32_t> pointerAliases;
+				ir.for_each_typed_id<SPIRV_CROSS_NAMESPACE::SPIRBlock>([&](uint32_t, SPIRV_CROSS_NAMESPACE::SPIRBlock& block) {
+					for (auto& op : block.ops) {
+						bool emptyAccessChain = (op.op == spv::OpAccessChain || op.op == spv::OpInBoundsAccessChain) && op.length == 3;
+						if ((op.op != spv::OpCopyObject && !emptyAccessChain) || op.length < 3) { continue; }
 						const auto* args = ir.spirv.data() + op.offset;
 						const auto& type = SPIRV_CROSS_NAMESPACE::variant_get<SPIRV_CROSS_NAMESPACE::SPIRType>(ir.ids[args[0]]);
-						if (type.pointer && type.storage == spv::StorageClassInput) { copiedPointers[args[1]] = args[2]; }
+						if (type.pointer && type.storage == spv::StorageClassInput) {
+							pointerAliases[args[1]] = args[2];
+							// Empty access chains are identity copies, but ActiveBuiltinHandler
+							// stops traversal on their three operands. A copy keeps it walking.
+							op.op = spv::OpCopyObject;
+						}
 					}
 				});
 				ir.for_each_typed_id<SPIRV_CROSS_NAMESPACE::SPIRBlock>([&](uint32_t, const SPIRV_CROSS_NAMESPACE::SPIRBlock& block) {
 					for (const auto& op : block.ops) {
 						if ((op.op != spv::OpAccessChain && op.op != spv::OpInBoundsAccessChain) || op.length < 3) { continue; }
 						auto* args = ir.spirv.data() + op.offset;
-						for (size_t count = 0; copiedPointers.count(args[2]); ++count) {
-							if (count == copiedPointers.size()) { using namespace SPIRV_CROSS_NAMESPACE; SPIRV_CROSS_THROW("Cyclic input pointer copies."); }
-							args[2] = copiedPointers.at(args[2]);
+						for (size_t count = 0; pointerAliases.count(args[2]); ++count) {
+							if (count == pointerAliases.size()) { using namespace SPIRV_CROSS_NAMESPACE; SPIRV_CROSS_THROW("Cyclic input pointer aliases."); }
+							args[2] = pointerAliases.at(args[2]);
 						}
 					}
 				});
@@ -437,8 +440,7 @@ namespace mvk {
 				for (uint32_t count : type->array) { elemCnt *= count; }
 				for (uint32_t i = 0; i < elemCnt; i++) {
 					if (type->basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Struct) {
-						SPIRVShaderInterfaceVariable* pFirstMember = nullptr;
-						loc = getShaderInterfaceStructMembers(reflect, vars, pFirstMember, type, storage, patch, loc, perVertex);
+						loc = getShaderInterfaceStructMembers(reflect, vars, size_t(-1), type, storage, patch, loc, perVertex);
 					} else {
 						vars.push_back({type->basetype, type->vecsize, loc, cmp, 0, biType, patch, isUsed, perVertex});
 						loc = addSat(loc, 1);
