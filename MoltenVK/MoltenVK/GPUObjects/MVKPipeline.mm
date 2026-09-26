@@ -1185,8 +1185,9 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 		setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to reflect barycentric inputs: %s", errorLog.c_str()));
 		return false;
 	}
-	// Include explicit-interpolation-only inputs, even when generic reflection does not mark an OpLoad.
+	// Reflection includes explicit interpolation through copied pointers, but excludes inactive block members.
 	for (const auto& input : inputs) {
+		if (!input.isUsed) { continue; }
 		_usesPerspectiveBarycentrics |= input.builtin == spv::BuiltInBaryCoordKHR;
 		_usesNoPerspectiveBarycentrics |= input.builtin == spv::BuiltInBaryCoordNoPerspKHR;
 	}

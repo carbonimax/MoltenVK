@@ -24,6 +24,7 @@
 #include <spirv_parser.hpp>
 #include <spirv_reflect.hpp>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 
@@ -360,6 +361,31 @@ namespace mvk {
 #endif
 			SPIRV_CROSS_NAMESPACE::Parser parser(spirv);
 			parser.parse();
+			if (model == spv::ExecutionModelFragment && storage == spv::StorageClassInput) {
+				// Match the MSL backend's builtin analysis: access chains must see through
+				// copied Input pointers before deciding which block members are active.
+				// Only the parser's private IR is changed; entry-point reachability is retained.
+				auto& ir = parser.get_parsed_ir();
+				std::unordered_map<uint32_t, uint32_t> copiedPointers;
+				ir.for_each_typed_id<SPIRV_CROSS_NAMESPACE::SPIRBlock>([&](uint32_t, const SPIRV_CROSS_NAMESPACE::SPIRBlock& block) {
+					for (const auto& op : block.ops) {
+						if (op.op != spv::OpCopyObject || op.length < 3) { continue; }
+						const auto* args = ir.spirv.data() + op.offset;
+						const auto& type = SPIRV_CROSS_NAMESPACE::variant_get<SPIRV_CROSS_NAMESPACE::SPIRType>(ir.ids[args[0]]);
+						if (type.pointer && type.storage == spv::StorageClassInput) { copiedPointers[args[1]] = args[2]; }
+					}
+				});
+				ir.for_each_typed_id<SPIRV_CROSS_NAMESPACE::SPIRBlock>([&](uint32_t, const SPIRV_CROSS_NAMESPACE::SPIRBlock& block) {
+					for (const auto& op : block.ops) {
+						if ((op.op != spv::OpAccessChain && op.op != spv::OpInBoundsAccessChain) || op.length < 3) { continue; }
+						auto* args = ir.spirv.data() + op.offset;
+						for (size_t count = 0; copiedPointers.count(args[2]); ++count) {
+							if (count == copiedPointers.size()) { using namespace SPIRV_CROSS_NAMESPACE; SPIRV_CROSS_THROW("Cyclic input pointer copies."); }
+							args[2] = copiedPointers.at(args[2]);
+						}
+					}
+				});
+			}
 			SPIRV_CROSS_NAMESPACE::CompilerReflection reflect(parser.get_parsed_ir());
 			if (!entryName.empty()) {
 				reflect.set_entry_point(entryName, model);
@@ -385,6 +411,9 @@ namespace mvk {
 				if (reflect.has_decoration(varID, spv::DecorationBuiltIn)) {
 					biType = (spv::BuiltIn)reflect.get_decoration(varID, spv::DecorationBuiltIn);
 					isUsed = reflect.has_active_builtin(biType, storage);
+					// The active interface includes whole-variable InterpolateAt* operands,
+					// which update_active_builtins() does not count as loads.
+					if (model == spv::ExecutionModelFragment && storage == spv::StorageClassInput && (biType == spv::BuiltInBaryCoordKHR || biType == spv::BuiltInBaryCoordNoPerspKHR)) { isUsed = true; }
 				}
 				uint32_t loc = -1;
 				uint32_t cmp = 0;
