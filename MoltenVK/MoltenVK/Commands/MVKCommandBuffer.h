@@ -26,7 +26,9 @@
 #include "MVKCmdPipeline.h"
 #include "MVKQueryPool.h"
 #include "MVKSmallVector.h"
+#include "MVKPerVertexScratch.h"
 #include <unordered_map>
+#include <unordered_set>
 
 class MVKCommandPool;
 class MVKQueueCommandBufferSubmission;
@@ -57,6 +59,8 @@ typedef struct MVKCommandEncodingContext {
 	uint32_t firstVisibilityResultOffsetInRenderPass = 0;
 	MVKVisibilityBuffer visibilityResultBuffer;
 	BarrierFenceSlots fenceSlots;
+	const MVKPerVertexScratchReservations* perVertexScratch = nullptr;
+	size_t nextPerVertexScratch = 0;
 
 	void syncFences(MVKDevice *device, id<MTLCommandBuffer> mtlCommandBuffer);
 	MVKRenderPass* getRenderPass() { return _renderPass; }
@@ -126,7 +130,8 @@ public:
 	MVKCommandPool* getCommandPool() { return _commandPool; }
 
 	/** Submit the commands in this buffer as part of the queue submission. */
-	void submit(MVKQueueCommandBufferSubmission* cmdBuffSubmit, MVKCommandEncodingContext* pEncodingContext);
+	void submit(MVKQueueCommandBufferSubmission* cmdBuffSubmit, MVKCommandEncodingContext* pEncodingContext, const MVKPerVertexScratchReservations& scratch);
+	VkResult reservePerVertexScratch(MVKPerVertexScratchReservations& scratch, std::unordered_set<MVKCommandBuffer*>& prefilledExecutions);
 
     /** Returns whether this command buffer can be submitted to a queue more than once. */
     bool getIsReusable() { return _isReusable; }
@@ -204,6 +209,9 @@ protected:
 	void checkDeferredEncoding();
 	void beginSecondaryEncoding(MVKCommandEncoder* cmdEncoder);
 	VkResult validateIndexedPerVertexAttachments();
+	VkResult reservePrefilledPerVertexScratch(size_t firstRequest);
+	std::vector<MVKPerVertexScratchRequest> _perVertexScratchRequests;
+	MVKPerVertexScratchReservations _prefilledPerVertexScratch;
 	MVKGraphicsPipeline* _recordedPerVertexPipeline = nullptr;
 
 	MVKFramebuffer* _recordedFramebuffer = nullptr;
@@ -520,6 +528,9 @@ public:
 
 	/** Indicates whether the current draw is an indexed draw. */
 	bool _isIndexedDraw;
+
+	/** Consume a preflight reservation and retain its resources until Metal completes. */
+	MVKPerVertexScratch* nextPerVertexScratch();
 
 #pragma mark Construction
 

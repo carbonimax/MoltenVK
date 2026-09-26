@@ -169,16 +169,12 @@ void MVKCmdDraw::encodeIndexedIndirect(MVKCommandEncoder* cmdEncoder) {
 	diiCmd.encode(cmdEncoder, ibb);
 }
 
-// A pooled wrapper can exist even if Metal failed to allocate its underlying buffer.
-// Check raw contents before getContents(), which adds the suballocation offset.
-static bool isPerVertexAllocationValid(const MVKMTLBufferAllocation* allocation, NSUInteger length, bool hostVisible) {
-	return allocation && allocation->_mtlBuffer && allocation->_length >= length && allocation->_offset <= allocation->_mtlBuffer.length && length <= allocation->_mtlBuffer.length - allocation->_offset && (!hostVisible || allocation->_mtlBuffer.contents);
-}
-
 static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance, uint32_t drawIndex, const MVKIndexMTLBufferBinding* indexBinding = nullptr, uint32_t firstIndex = 0, int32_t baseVertex = 0) {
 	auto reject = [&](VkResult result, const char* message) {
 		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(result, "Portable PerVertexKHR %s", message));
 	};
+	auto* scratch = cmdEncoder->nextPerVertexScratch();
+	if (!scratch) { return; }
 	id<MTLComputePipelineState> captureState = nil;
 	VkDeviceSize indexOffset = 0;
 	if (indexBinding) {
@@ -200,28 +196,19 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 		}
 	}
 	const auto& layout = pipeline->getPerVertexCapturedLayout();
-	uint64_t recordCount = uint64_t(vertexCount) * instanceCount;
 	auto topology = pipeline->getVkPrimitiveTopology();
 	bool provokingLast = cmdEncoder->getVkGraphics().getProvokingVertexMode();
 	uint64_t triangleCount = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ? vertexCount / 3 : (vertexCount > 2 ? vertexCount - 2 : 0);
 	uint64_t primitiveCount = triangleCount * instanceCount;
-	uint64_t occurrenceCount = primitiveCount * 3;
 	if (!mvkCanEncodePerVertexDraw(vertexCount, instanceCount, layout.stride, topology, cmdEncoder->getMetalFeatures().maxMTLBufferSize)) {
 		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR draw exceeds its capture or replay buffer limits."));
 		return;
 	}
-	NSUInteger captureSize = NSUInteger(recordCount * layout.stride);
-	NSUInteger occurrenceSize = NSUInteger(occurrenceCount * 2 * sizeof(uint32_t));
-	NSUInteger primitiveSize = NSUInteger(occurrenceCount * sizeof(uint32_t));
-	const auto* captured = cmdEncoder->getTempMTLBuffer(captureSize, true);
-	const auto* captureParams = cmdEncoder->getTempMTLBuffer(sizeof(uint32_t));
-	const auto* occurrences = primitiveCount ? cmdEncoder->getTempMTLBuffer(occurrenceSize) : nullptr;
-	const auto* primitiveIndices = primitiveCount ? cmdEncoder->getTempMTLBuffer(primitiveSize) : nullptr;
-	if (!isPerVertexAllocationValid(captured, captureSize, false) || !isPerVertexAllocationValid(captureParams, sizeof(uint32_t), true) || (primitiveCount && (!isPerVertexAllocationValid(occurrences, occurrenceSize, true) || !isPerVertexAllocationValid(primitiveIndices, primitiveSize, true)))) {
-		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR capture or replay allocation failed."));
-		return;
-	}
-	*(uint32_t*)captureParams->getContents() = vertexCount;
+	id<MTLBuffer> captured = scratch->buffers[0];
+	id<MTLBuffer> captureParams = scratch->buffers[1];
+	id<MTLBuffer> occurrences = scratch->buffers[2];
+	id<MTLBuffer> primitiveIndices = scratch->buffers[3];
+	*(uint32_t*)captureParams.contents = vertexCount;
 	cmdEncoder->_isIndexedDraw = indexBinding != nullptr;
 	if (indexBinding) {
 		// The compiler writes dense (instance, index occurrence) records and reads
@@ -230,7 +217,7 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 		if (!pipeline->hasValidMTLPipelineStates()) { return; }
 		id<MTLComputeCommandEncoder> captureEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
 		auto& computeState = cmdEncoder->getMtlCompute();
-		computeState.bindBuffer(captureEncoder, captured->_mtlBuffer, captured->_offset, pipeline->getPerVertexCaptureBufferIndex());
+		computeState.bindBuffer(captureEncoder, captured, 0, pipeline->getPerVertexCaptureBufferIndex());
 		computeState.bindBuffer(captureEncoder, indexBinding->mtlBuffer, indexOffset, pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::Index]);
 		if (pipeline->needsDrawIdBuffer()) { computeState.bindStructBytes(captureEncoder, &drawIndex, pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::DrawId]); }
 		// Preserve the signed base vertex as the uint32 bit pattern used by SPIR-V.
@@ -252,8 +239,8 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	if (!indexBinding) {
 		[encoder setRenderPipelineState: pipeline->getPerVertexCapturePipelineState()];
 		MTLPrimitiveType captureType = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ? MTLPrimitiveTypeTriangle : MTLPrimitiveTypePoint;
-		metalState.bindVertexBuffer(encoder, captured->_mtlBuffer, captured->_offset, pipeline->getPerVertexCaptureBufferIndex());
-		metalState.bindVertexBuffer(encoder, captureParams->_mtlBuffer, captureParams->_offset, pipeline->getPerVertexCaptureParamsBufferIndex());
+		metalState.bindVertexBuffer(encoder, captured, 0, pipeline->getPerVertexCaptureBufferIndex());
+		metalState.bindVertexBuffer(encoder, captureParams, 0, pipeline->getPerVertexCaptureParamsBufferIndex());
 		cmdEncoder->getState().offsetZeroDivisorVertexBuffers(*cmdEncoder, kMVKGraphicsStageRasterization, pipeline, firstInstance);
 		if (pipeline->needsDrawIdBuffer()) { metalState.bindVertexBytes(encoder, &drawIndex, sizeof(drawIndex), pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::DrawId]); }
 		if (cmdEncoder->getMetalFeatures().baseVertexInstanceDrawing) {
@@ -268,8 +255,8 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 		return;
 	}
 	if (!indexBinding) { [encoder memoryBarrierWithScope: MTLBarrierScopeBuffers afterStages: MTLRenderStageVertex beforeStages: MTLRenderStageVertex | MTLRenderStageFragment]; }
-	auto* pairs = (uint32_t*)occurrences->getContents();
-	auto* indices = (uint32_t*)primitiveIndices->getContents();
+	auto* pairs = (uint32_t*)occurrences.contents;
+	auto* indices = (uint32_t*)primitiveIndices.contents;
 	for (uint32_t instance = 0; instance < instanceCount; instance++) {
 		for (uint32_t triangle = 0; triangle < triangleCount; triangle++) {
 			uint32_t key = instance * uint32_t(triangleCount) + triangle;
@@ -298,11 +285,11 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	const auto& fragment = pipeline->getPerVertexInputBinding();
 	uint32_t replayDraw[] = {0, 0, firstInstance, uint32_t(triangleCount * 3)};
 	[encoder setRenderPipelineState: pipeline->getMainPipelineState()];
-	metalState.bindVertexBuffer(encoder, captured->_mtlBuffer, captured->_offset, replay.vertex_buffer_index);
-	metalState.bindVertexBuffer(encoder, occurrences->_mtlBuffer, occurrences->_offset, replay.occurrence_buffer_index);
+	metalState.bindVertexBuffer(encoder, captured, 0, replay.vertex_buffer_index);
+	metalState.bindVertexBuffer(encoder, occurrences, 0, replay.occurrence_buffer_index);
 	metalState.bindVertexBytes(encoder, replayDraw, sizeof(replayDraw), replay.draw_parameters_buffer_index);
-	metalState.bindFragmentBuffer(encoder, captured->_mtlBuffer, captured->_offset, fragment.vertex_buffer_index);
-	metalState.bindFragmentBuffer(encoder, primitiveIndices->_mtlBuffer, primitiveIndices->_offset, fragment.primitive_index_buffer_index);
+	metalState.bindFragmentBuffer(encoder, captured, 0, fragment.vertex_buffer_index);
+	metalState.bindFragmentBuffer(encoder, primitiveIndices, 0, fragment.primitive_index_buffer_index);
 	if (cmdEncoder->getPhysicalDevice()->shouldEmulateReversedDepthViewport()) {
 		uint32_t viewportMask = cmdEncoder->getVkGraphics()._implicitBufferData[kMVKShaderStageVertex].emulatedReversedDepthViewportMask;
 		metalState.bindVertexBytes(encoder, &viewportMask, sizeof(viewportMask), pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::EmulatedReversedDepthViewport]);
