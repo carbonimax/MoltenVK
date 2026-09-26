@@ -169,11 +169,17 @@ id<MTLComputePipelineState> MVKCommandEncodingPool::getAccumulateOcclusionQueryR
 }
 
 id<MTLComputePipelineState> MVKCommandEncodingPool::getConvertUint8IndicesMTLComputePipelineState(bool preserveValues) {
-	MVK_ENC_REZ_ACCESS(_mtlConvertUint8IndicesComputePipelineState[preserveValues], newConvertUint8IndicesMTLComputePipelineState(_commandPool, preserveValues));
+	// Preflight can overlap encoding on another queue. Synchronize warm reads too.
+	lock_guard<mutex> lock(_lock);
+	auto& state = _mtlConvertUint8IndicesComputePipelineState[preserveValues];
+	if (!state) { state = _commandPool->getDevice()->getCommandResourceFactory()->newConvertUint8IndicesMTLComputePipelineState(_commandPool, preserveValues); }
+	return state;
 }
 
 id<MTLComputePipelineState> MVKCommandEncodingPool::getPerVertexRestartMTLComputePipelineState() {
-	MVK_ENC_REZ_ACCESS(_mtlPerVertexRestartComputePipelineState, newPerVertexRestartMTLComputePipelineState(_commandPool));
+	lock_guard<mutex> lock(_lock);
+	if (!_mtlPerVertexRestartComputePipelineState) { _mtlPerVertexRestartComputePipelineState = _commandPool->getDevice()->getCommandResourceFactory()->newPerVertexRestartMTLComputePipelineState(_commandPool); }
+	return _mtlPerVertexRestartComputePipelineState;
 }
 
 void MVKCommandEncodingPool::clear() {
