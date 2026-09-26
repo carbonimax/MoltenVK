@@ -1605,6 +1605,8 @@ bool MVKGraphicsPipeline::addFragmentShaderToPipeline(MTLRenderPipelineDescripto
 	auto& mtlFeats = getMetalFeatures();
 	if (pFragmentSS) {
 		shaderConfig.options.entryPointStage = spv::ExecutionModelFragment;
+		// vertex_value requires triangle input and Apple10 hardware, not just a recent OS/MSL version.
+		shaderConfig.options.mslOptions.supports_per_vertex_fragment_input = getPhysicalDevice()->getMTLDeviceCapabilities().supportsApple10 && shaderConfig.options.mslOptions.supports_msl_version(4, 0) && getPrimitiveTopologyClass() == MTLPrimitiveTopologyClassTriangle;
 		addCommonImplicitBuffersToShaderConfig(shaderConfig, implicit);
 		shaderConfig.options.mslOptions.view_mask_buffer_index = implicit[MVKImplicitBuffer::ViewRange];
 		shaderConfig.options.entryPointName = pFragmentSS->pName;
@@ -2761,6 +2763,7 @@ namespace SPIRV_CROSS_NAMESPACE {
 				opt.shader_patch_input_buffer_index,
 				opt.draw_id_buffer_index,
 				opt.reversed_depth_viewport_buffer_index,
+				opt.depth_clip_state_buffer_index,
 				opt.shader_input_wg_index,
 				opt.device_index,
 				opt.enable_frag_output_mask,
@@ -2772,6 +2775,7 @@ namespace SPIRV_CROSS_NAMESPACE {
 				opt.enable_frag_stencil_ref_builtin,
 				opt.disable_rasterization,
 				opt.capture_output_to_buffer,
+				opt.supports_per_vertex_fragment_input,
 				opt.swizzle_texture_samples,
 				opt.tess_domain_origin_lower_left,
 				opt.multiview,
@@ -2780,6 +2784,7 @@ namespace SPIRV_CROSS_NAMESPACE {
 				opt.dispatch_base,
 				opt.texture_1D_as_2D,
 				opt.emulate_reversed_depth_viewport,
+				opt.emulate_depth_clip_enable,
 				opt.argument_buffers,
 				opt.argument_buffers_tier,
 				opt.runtime_array_rich_descriptor,
@@ -3092,17 +3097,17 @@ static size_t mvkValidateCerealArchiveSize(size_t padByteCnt = 0) {
 
 void mvkValidateCeralArchiveDefinitions() {
 	[[maybe_unused]] size_t missingBytes = 0;
-	missingBytes += mvkValidateCerealArchiveSize<SPIRV_CROSS_NAMESPACE::CompilerMSL::Options>(7);
+	missingBytes += mvkValidateCerealArchiveSize<SPIRV_CROSS_NAMESPACE::CompilerMSL::Options>(5);
 	missingBytes += mvkValidateCerealArchiveSize<SPIRV_CROSS_NAMESPACE::MSLShaderInterfaceVariable>();
 	missingBytes += mvkValidateCerealArchiveSize<SPIRV_CROSS_NAMESPACE::MSLResourceBinding>();
 	missingBytes += mvkValidateCerealArchiveSize<SPIRV_CROSS_NAMESPACE::MSLConstexprSampler>();
 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVWorkgroupSizeDimension>(3);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVEntryPoint>(20);						// Contains string
-	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionOptions>(29);			// Contains string
+	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionOptions>(23);			// Contains string
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLShaderInterfaceVariable>(3);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLResourceBinding>(2);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::DescriptorBinding>();
-	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(109);	// Contains collection
+	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(103);	// Contains collection
 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionResultInfo>(40);		// Contains collection
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLSpecializationMacroInfo>(22);			// Contains string
 	missingBytes += mvkValidateCerealArchiveSize<MVKShaderModuleKey>();
