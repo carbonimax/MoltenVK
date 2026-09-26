@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jean-Philippe Meunier
+// SPDX-License-Identifier: Apache-2.0
 #version 450
 // Export the consumer's scalar/vector leaves: matrix/array capture export is unsupported.
 layout(location = 0) out Inputs { vec3 color; vec2 basis0; vec2 basis1; vec2 uv; float weight0; float weight1; } values;

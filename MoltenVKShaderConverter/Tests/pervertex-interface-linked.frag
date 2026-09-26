@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Jean-Philippe Meunier
+// SPDX-License-Identifier: Apache-2.0
 #version 450
 #extension GL_EXT_fragment_shader_barycentric : require
 layout(location = 0) pervertexEXT in Inputs { vec3 color; vec2 basis0; vec2 basis1; vec2 uv; float weight0; float weight1; } values[3];
