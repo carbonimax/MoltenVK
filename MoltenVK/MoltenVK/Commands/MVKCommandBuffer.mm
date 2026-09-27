@@ -364,6 +364,10 @@ bool MVKCommandBuffer::canExecute() {
 
 // Return the number of bits set in the view mask, with a minimum value of 1.
 uint32_t MVKCommandBuffer::getViewCount() const {
+	return max(__builtin_popcount(getViewMask()), 1);
+}
+
+uint32_t MVKCommandBuffer::getViewMask() const {
 	uint32_t viewMask = 0;
 	if (_doesContinueRenderPass) {
 		MVKRenderPass* inheritedRenderPass = (MVKRenderPass*)_secondaryInheritanceInfo.renderPass;
@@ -375,7 +379,7 @@ uint32_t MVKCommandBuffer::getViewCount() const {
 	} else {
 		viewMask = _currentSubpassInfo.subpassViewMask;
 	}
-	return max(__builtin_popcount(viewMask), 1);
+	return viewMask;
 }
 
 void MVKCommandBuffer::clearPrefilledMTLCommandBuffer() {
@@ -461,9 +465,6 @@ VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t in
 	if (!_recordedPerVertexPipeline || !vertexCount || !instanceCount) { return VK_SUCCESS; }
 	bool restart = mvkPerVertexRequiresRestartAssembly(indexed, _recordedPerVertexPipeline->getStaticStateData().enable.has(MVKRenderStateEnableFlag::PrimitiveRestart));
 	if (restart && !mvkCanAssemblePerVertexRestart(vertexCount, instanceCount, getMetalFeatures().indirectDrawing)) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR restart requires indirect drawing and uint32 dense capture record IDs."); }
-	if (!mvkCanEncodePerVertexDraw(vertexCount, instanceCount, _recordedPerVertexPipeline->getPerVertexCapturedLayout().stride, _recordedPerVertexPipeline->getVkPrimitiveTopology(), getMetalFeatures().maxMTLBufferSize)) {
-		return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR draw exceeds its capture or replay buffer limits.");
-	}
 	if (indexed) {
 		if (!mvkPerVertexIndexSize(_recordedIndexType)) {
 			return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed capture requires uint8, uint16 or uint32 indices.");
@@ -474,14 +475,28 @@ VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t in
 		if (result != VK_SUCCESS) { return result; }
 	}
 	auto topology = _recordedPerVertexPipeline->getVkPrimitiveTopology();
-	uint64_t primitiveCount = uint64_t(mvkPerVertexPrimitiveCount(vertexCount, topology)) * instanceCount;
-	uint64_t occurrences = primitiveCount * mvkPerVertexReplayVertexCount(topology);
 	uint64_t indexScratchBytes = restart ? mvkPerVertexRestartIndexScratchSize(vertexCount) : indexed && _recordedIndexType == VK_INDEX_TYPE_UINT8 ? uint64_t(vertexCount) * sizeof(uint16_t) : 0;
 	if (indexScratchBytes > getMetalFeatures().maxMTLBufferSize) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR index scratch buffer exceeds Metal limits."); }
+	uint32_t viewMask = getViewMask();
+	uint32_t passCount = std::max(getDevice()->getMultiviewMetalPassCount(viewMask), 1u);
+	MVKPerVertexScratchRequest requests[32];
+	for (uint32_t pass = 0; pass < passCount; ++pass) {
+		uint32_t views = std::max(getDevice()->getViewCountInMetalPass(viewMask, pass), 1u);
+		uint64_t expandedInstances = uint64_t(instanceCount) * views;
+		if (expandedInstances > UINT32_MAX || !mvkCanEncodePerVertexDraw(vertexCount, uint32_t(expandedInstances), _recordedPerVertexPipeline->getPerVertexCapturedLayout().stride, topology, getMetalFeatures().maxMTLBufferSize)) {
+			return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR draw exceeds its capture or replay buffer limits.");
+		}
+		if (restart && !mvkCanAssemblePerVertexRestart(vertexCount, uint32_t(expandedInstances), getMetalFeatures().indirectDrawing)) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR restart requires indirect drawing and uint32 dense capture record IDs."); }
+		uint64_t primitiveCount = uint64_t(mvkPerVertexPrimitiveCount(vertexCount, topology)) * expandedInstances;
+		uint64_t occurrences = primitiveCount * mvkPerVertexReplayVertexCount(topology);
+		requests[pass] = {NSUInteger(uint64_t(vertexCount) * expandedInstances * _recordedPerVertexPipeline->getPerVertexCapturedLayout().stride), NSUInteger(occurrences * 2 * sizeof(uint32_t)), NSUInteger(primitiveCount * 3 * sizeof(uint32_t)), _recordedPerVertexPipeline->usesPortableBarycentrics() ? NSUInteger(occurrences * sizeof(uint32_t)) : 0, NSUInteger(indexScratchBytes), restart};
+	}
+	size_t firstRequest = _perVertexScratchRequests.size();
 	try {
-		_perVertexScratchRequests.push_back({NSUInteger(uint64_t(vertexCount) * instanceCount * _recordedPerVertexPipeline->getPerVertexCapturedLayout().stride), NSUInteger(occurrences * 2 * sizeof(uint32_t)), NSUInteger(primitiveCount * 3 * sizeof(uint32_t)), _recordedPerVertexPipeline->usesPortableBarycentrics() ? NSUInteger(occurrences * sizeof(uint32_t)) : 0, NSUInteger(indexScratchBytes), restart});
+		// Draw-major storage: every pass owns immutable CPU tables and independent GPU scratch.
+		_perVertexScratchRequests.insert(_perVertexScratchRequests.end(), requests, requests + passCount);
 	} catch (const std::bad_alloc&) { return reportError(VK_ERROR_OUT_OF_HOST_MEMORY, "Portable PerVertexKHR scratch recording allocation failed."); }
-	return _immediateCmdEncoder ? reservePrefilledPerVertexScratch(_perVertexScratchRequests.size() - 1) : VK_SUCCESS;
+	return _immediateCmdEncoder ? reservePrefilledPerVertexScratch(firstRequest) : VK_SUCCESS;
 }
 
 VkResult MVKCommandBuffer::reservePrefilledPerVertexScratch(size_t firstRequest) {
@@ -632,11 +647,14 @@ const char* MVKCommandEncoder::getIndexedPerVertexAttachmentError() {
 
 MVKPerVertexScratch* MVKCommandEncoder::nextPerVertexScratch() {
 	auto* reservations = _pEncodingContext->perVertexScratch;
-	if (!reservations || _pEncodingContext->nextPerVertexScratch >= reservations->size()) {
+	size_t first = _pEncodingContext->nextPerVertexScratch;
+	uint32_t passCount = std::max(getSubpass()->getMultiviewMetalPassCount(), 1u);
+	if (!reservations || first > reservations->size() || passCount > reservations->size() - first || _multiviewPassIndex >= passCount) {
 		_cmdBuffer->setConfigurationResult(_cmdBuffer->reportError(VK_ERROR_INITIALIZATION_FAILED, "Portable PerVertexKHR draw has no scratch reservation."));
 		return nullptr;
 	}
-	auto scratch = (*reservations)[_pEncodingContext->nextPerVertexScratch++];
+	auto scratch = (*reservations)[first + _multiviewPassIndex];
+	_pEncodingContext->nextPerVertexScratch += passCount;
 	auto* device = getDevice();
 	for (auto buffer : scratch->buffers) { if (buffer) { device->makeResident(buffer); } }
 	// This also protects buffers encoded with unretained Metal command buffers and
@@ -744,6 +762,7 @@ void MVKCommandEncoder::setSubpass(MVKCommand* subpassCmd,
 	if (renderPass) { renderPass->encodeSubpassDependencyBarriers(this, subpassIndex); }
 
 	_lastMultiviewPassCmd = subpassCmd;
+	_firstSubpassPerVertexScratch = _pEncodingContext->nextPerVertexScratch;
 	_subpassContents = subpassContents;
 	_renderSubpassIndex = subpassIndex;
 	_multiviewPassIndex = 0;
@@ -759,6 +778,7 @@ bool MVKCommandEncoder::hasMoreMultiviewPasses() { return _multiviewPassIndex + 
 void MVKCommandEncoder::beginNextMultiviewPass() {
 	encodeStoreActions();
 	_multiviewPassIndex++;
+	_pEncodingContext->nextPerVertexScratch = _firstSubpassPerVertexScratch;
 	beginMetalRenderPass(kMVKCommandUseNextSubpass);
 }
 
