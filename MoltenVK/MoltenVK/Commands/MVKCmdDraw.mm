@@ -874,7 +874,7 @@ static const MVKMTLBufferAllocation* encodeIndirectCountConversion(
 // Portable PerVertexKHR indirect draws. Arguments and Count may be written earlier in the same submission,
 // so only the GPU reads them. Before any draw executes, a GPU admission pass checks every draw of the
 // command against the capacity reserved before submission: either all draws execute exactly, or none
-// does and the device is lost at completion. Apple3-10 GPUs cannot order fragment reads before later
+// does and the device is lost when the submission finishes. Apple3-10 GPUs cannot order fragment reads before later
 // vertex writes inside a render encoder, so each draw ends the render encoder around its compute planning
 // and the next draw reuses the bounded, hazard-tracked scratch only after Metal orders the previous replay.
 static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline, id<MTLBuffer> indirectBuffer, VkDeviceSize indirectOffset, uint32_t stride, uint32_t drawCount, id<MTLBuffer> countBuffer, VkDeviceSize countOffset, const MVKIndexMTLBufferBinding* indexBinding) {
@@ -1018,15 +1018,8 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 		metalState._exists.vertex().descriptorSetData.reset();
 		metalState._exists.fragment().descriptorSetData.reset();
 	}
-	// Admission failures are only known on the GPU. Report them before the submission's own completion
-	// handler signals fences, so waits return VK_ERROR_DEVICE_LOST rather than success.
-	auto* device = cmdEncoder->getDevice();
-	[cmdEncoder->_mtlCmdBuffer addCompletedHandler: ^(id<MTLCommandBuffer>) {
-		uint32_t status = *(volatile uint32_t*)plan.contents;
-		if (!status) { return; }
-		device->reportError(VK_ERROR_DEVICE_LOST, "Portable PerVertexKHR indirect command was not executed: %s.", (status & 1) ? "a draw exceeds the reserved capture capacity" : "a draw reads indices beyond the bound index buffer");
-		device->markLost();
-	}];
+	// Admission failures are only known on the GPU. The submission reads the status when it finishes,
+	// before signalling its fence, and then loses the device (MVKQueueFullCommandBufferSubmission).
 }
 
 typedef struct MVKIndirectZeroDivisorVertexBuffer {
