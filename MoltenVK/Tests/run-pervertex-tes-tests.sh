@@ -12,8 +12,10 @@ output=$(mkdir -p "${1:?output directory}" && cd "$1" && pwd)
 mkdir -p "$output/shaders" "$output/runs"
 exec > >(tee "$output/run.log") 2>&1
 sw_vers
-xcodebuild -version | head -1
-glslangValidator --version | head -1
+# Whole outputs: a closed pipe would trip pipefail.
+xcodebuild -version > "$output/tools.txt"
+glslangValidator --version >> "$output/tools.txt"
+cat "$output/tools.txt"
 head=$(git -C "$root" rev-parse HEAD)
 git -C "$root" diff --quiet HEAD -- MoltenVK MoltenVKShaderConverter ExternalRevisions || { echo "Commit the sources first: libraries are built from HEAD"; exit 1; }
 echo "moltenvk_head=$head spirv_cross_head=$(git -C "$root/External/SPIRV-Cross" rev-parse HEAD)"
