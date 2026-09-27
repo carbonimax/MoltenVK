@@ -1,0 +1,75 @@
+#version 450
+// Copyright 2026 Jean-Philippe Meunier
+// SPDX-License-Identifier: Apache-2.0
+// Per-vertex outputs for the exact PerVertexKHR form scenarios of mesh-draw.cpp. Each scalar is a function of
+// n = vertex + 1 + 4 * workgroup and of k = 8 * Location + Component, computed with exact arithmetic that the CPU
+// model repeats bit for bit: 32-bit integers exceed float precision and set their sign or high bit, floats are not
+// representable in half, 16-bit integers set their sign or high bit. A corner, component, Location or type error
+// therefore changes the value. The geometry is the one of mesh.mesh: triangles (0,1,2) and (3,2,1).
+// GRID: each workgroup draws the square in its own half of the target, and the second one rotates its index order
+// to (1,2,0) and (2,1,3). SIXTEEN: also writes the 16-bit forms, which need storageInputOutput16.
+#extension GL_EXT_mesh_shader : require
+#ifdef SIXTEEN
+#extension GL_EXT_shader_explicit_arithmetic_types : require
+#endif
+layout(local_size_x = 4) in;
+layout(triangles, max_vertices = 4, max_primitives = 2) out;
+layout(location = 0) out uint u1[];
+layout(location = 1) out ivec2 i2[];
+layout(location = 2) out vec3 f3[];
+layout(location = 3, component = 0) out float c0[];
+layout(location = 3, component = 1) out vec2 c12[];
+layout(location = 3, component = 3) out float c3[];
+layout(location = 4) out vec4 wide[];
+layout(location = 5) out uvec3 u3[];
+layout(location = 6) out float s1[];
+#ifdef SIXTEEN
+layout(location = 7) out f16vec2 h2[];
+layout(location = 8) out i16vec3 s3[];
+layout(location = 30) out uint16_t w1[];  // A high Location: bit 30 of the corner mask.
+#endif
+const vec2 positions[4] = vec2[](vec2(-0.75, -0.75), vec2(0.75, -0.75), vec2(-0.75, 0.75), vec2(0.75, 0.75));
+const uvec3 triangles[2] = uvec3[](uvec3(0, 1, 2), uvec3(3, 2, 1));
+const uvec3 rotated[2] = uvec3[](uvec3(1, 2, 0), uvec3(2, 1, 3));
+
+uint U(uint n, uint k) { return n * 0x9E3779B9u + k * 0x01000193u; }
+int I(uint n, uint k) { return -int(n * 0x01000193u) - int(k); }
+float F(uint n, uint k) { return float(n) + float(k) * 0.25 + float(n) * 0.0009765625; }
+#ifdef SIXTEEN
+float16_t H(uint n, uint k) { return float16_t(n) + float16_t(k) * 0.25hf; }
+int16_t S(uint n, uint k) { return int16_t(-1000 * int(n) - int(k)); }
+uint16_t W(uint n, uint k) { return uint16_t(0x8000u + n * 0x111u + k); }
+#endif
+
+void main()
+{
+	uint v = gl_LocalInvocationIndex;
+	uint g = gl_WorkGroupID.x;
+	uint n = v + 1u + 4u * g;
+	SetMeshOutputsEXT(4, 2);
+	vec2 position = positions[v];
+#ifdef GRID
+	position.x = position.x * 0.5 + (g == 0u ? -0.5 : 0.5);
+#endif
+	gl_MeshVerticesEXT[v].gl_Position = vec4(position, 0.0, 1.0);
+	u1[v] = U(n, 0u);
+	i2[v] = ivec2(I(n, 8u), I(n, 9u));
+	f3[v] = vec3(F(n, 16u), F(n, 17u), F(n, 18u));
+	c0[v] = F(n, 24u);
+	c12[v] = vec2(F(n, 25u), F(n, 26u));
+	c3[v] = F(n, 27u);
+	wide[v] = vec4(F(n, 32u), F(n, 33u), F(n, 34u), F(n, 35u));
+	u3[v] = uvec3(U(n, 40u), U(n, 41u), U(n, 42u));
+	s1[v] = F(n, 48u);
+#ifdef SIXTEEN
+	h2[v] = f16vec2(H(n, 56u), H(n, 57u));
+	s3[v] = i16vec3(S(n, 64u), S(n, 65u), S(n, 66u));
+	w1[v] = W(n, 240u);
+#endif
+	if (v < 2u)
+#ifdef GRID
+		gl_PrimitiveTriangleIndicesEXT[v] = g == 0u ? triangles[v] : rotated[v];
+#else
+		gl_PrimitiveTriangleIndicesEXT[v] = triangles[v];
+#endif
+}
