@@ -678,6 +678,7 @@ int main(int argc, char** argv) {
 			// with the dynamic value, not with the 3 control points the pipeline declares.
 			const uint64_t patchLimit = props11.maxMemoryAllocationSize / levelBytesPerPatch;
 			uint64_t instances = dynamicScratchLimit ? patchLimit / 3 + 1 : patchLimit + 1;
+			uint64_t patches = dynamicScratchLimit ? 3 * instances : instances;
 			if (instances > UINT32_MAX) { std::printf("TES_TOPOLOGY SKIP %s: buffer limit exceeds addressable patch count\n", scenarioName.c_str()); return 0; }
 			PipelineOptions o{"topology.tesc.spv", tese, "ordinary.frag.spv"};
 			o.dynamicControlPoints = dynamicScratchLimit;
@@ -692,7 +693,7 @@ int main(int argc, char** argv) {
 			VkResult actual = record(pipeline, {uniform(two)}, 0, uint32_t(instances), o, secondary);
 			if (actual != VK_SUCCESS) {
 				bool pass = actual == VK_ERROR_OUT_OF_DEVICE_MEMORY;
-				std::printf("TES_TOPOLOGY %s %s: vkEndCommandBuffer=%d expected=%d, patches=%llu limit=%llu, nothing submitted\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), actual, VK_ERROR_OUT_OF_DEVICE_MEMORY, (unsigned long long)instances, (unsigned long long)props11.maxMemoryAllocationSize);
+				std::printf("TES_TOPOLOGY %s %s: vkEndCommandBuffer=%d expected=%d, patches=%llu limit=%llu, nothing submitted\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), actual, VK_ERROR_OUT_OF_DEVICE_MEMORY, (unsigned long long)patches, (unsigned long long)props11.maxMemoryAllocationSize);
 				return pass ? 0 : 2;
 			}
 			// With prefill, recording encoded the command buffer: a successful recording means the draw itself was encoded.
@@ -723,7 +724,7 @@ int main(int argc, char** argv) {
 			const char* outcome = submitted == VK_SUCCESS ? (rendered ? "the draw ran" : "the draw was omitted and the submission accepted")
 			                    : executed ? "vkQueueSubmit failed after the batch executed and signalled its fence" : "vkQueueSubmit refused the batch without side effects";
 			std::printf("TES_TOPOLOGY %s %s: vkEndCommandBuffer=0 vkQueueSubmit=%d fence=%s prior_block=%s rendered_pixels=%u, %s, patches=%llu limit=%llu\n", pass ? "PASS" : "FAIL", scenarioName.c_str(),
-			            submitted, executed ? "signalled" : "unsignalled", prior ? "present" : "absent", rendered, outcome, (unsigned long long)instances, (unsigned long long)props11.maxMemoryAllocationSize);
+			            submitted, executed ? "signalled" : "unsignalled", prior ? "present" : "absent", rendered, outcome, (unsigned long long)patches, (unsigned long long)props11.maxMemoryAllocationSize);
 			return pass ? 0 : 2;
 		}
 		if (ordinaryOnly) {
