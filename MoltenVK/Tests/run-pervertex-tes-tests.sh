@@ -132,7 +132,7 @@ done
 # before a GPU submission or an undersized scratch allocation.
 # Without prefill, recording must still refuse it, directly or in a secondary: encoding happens after vkQueueSubmit,
 # which may already have returned. Both synchronous and asynchronous queue submissions.
-for scenario in ordinary-levels-scratch-limit ordinary-levels-indexed-scratch-limit ordinary-levels-secondary-scratch-limit ordinary-levels-indexed-secondary-scratch-limit; do
+for scenario in ordinary-levels-scratch-limit ordinary-levels-indexed-scratch-limit ordinary-levels-secondary-scratch-limit ordinary-levels-indexed-secondary-scratch-limit ordinary-levels-dynamic-scratch-limit; do
 	PREFILL=1 topology shipping "$scenario" ccw 0 "TES_TOPOLOGY PASS" "nothing submitted"
 	for sync in 1 0; do SYNC=$sync topology shipping "$scenario" ccw 0 "TES_TOPOLOGY PASS" "nothing submitted"; done
 done

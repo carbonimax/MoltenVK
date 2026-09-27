@@ -1,7 +1,8 @@
 #!/bin/bash
 # Copyright (c) 2026 Jean-Philippe Meunier
 # SPDX-License-Identifier: Apache-2.0
-# Ordinary tessellation draws beyond the float32 level scratch limit, recorded directly or in a secondary command buffer,
+# Ordinary tessellation draws beyond the float32 level scratch limit, recorded directly, in a secondary command buffer
+# or with dynamic patch control points,
 # with prefill (encoded while recording) and without (encoded during vkQueueSubmit, synchronously or asynchronously).
 # Each must be refused while recording, or by vkQueueSubmit without side effects. The draws never reach the GPU: the
 # only GPU work is a clear and a copy per case. Then ordinary tessellation draws within the limit, direct, indexed and
@@ -45,11 +46,15 @@ run() { # scenario winding prefill sync shader-validation
 	if grep -qiE 'Shader Validation|validation error|Execution of the command buffer was aborted|execution failed' "$log"; then verdict=FAIL; fi
 	grep -q 'TES_TOPOLOGY PASS' "$log" || verdict=FAIL
 	[[ $verdict == PASS ]] && pass=$((pass + 1)) || fail=$((fail + 1))
+	last=$verdict
 	printf '%-66s exit=%s %s\n' "$name" "$rc" "$verdict"
 	grep -E '^secondary|^TES_TOPOLOGY|mvk-error' "$log" | sed 's/^/    /' || true
 }
-for scenario in ordinary-levels-scratch-limit ordinary-levels-indexed-scratch-limit ordinary-levels-secondary-scratch-limit ordinary-levels-indexed-secondary-scratch-limit; do
+# Prefill first: it encodes while recording and submits nothing, so it shows that encoding omits the draw before any
+# case can submit it.
+for scenario in ordinary-levels-scratch-limit ordinary-levels-indexed-scratch-limit ordinary-levels-secondary-scratch-limit ordinary-levels-indexed-secondary-scratch-limit ordinary-levels-dynamic-scratch-limit; do
 	run "$scenario" ccw 1 1 1
+	if [[ $last != PASS ]]; then echo "    SKIP no-prefill runs of $scenario: encoding did not refuse the draw"; continue; fi
 	for sync in 1 0; do run "$scenario" ccw 0 "$sync" 1; done
 done
 # Within the limit, without prefill: the recording check must not refuse these draws. The indirect scenarios
