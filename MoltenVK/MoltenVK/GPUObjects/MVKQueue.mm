@@ -579,6 +579,9 @@ VkResult MVKQueueCommandBufferSubmission::commitActiveMTLCommandBuffer(bool sign
 // and the app immediately destroys objects. Rare, but it has been encountered.
 void MVKQueueCommandBufferSubmission::finish() {
 
+	// Before any fence signals: a TES draw refused on the GPU loses the device.
+	reportPerVertexTessFailures();
+
 	// Performed here instead of as part of execute() for rare case where app destroys queue
 	// immediately after a waitIdle() is cleared by fence below, taking the capture scope with it.
 	_queue->_submissionCaptureScope->endScope();
@@ -679,6 +682,20 @@ VkResult MVKQueueFullCommandBufferSubmission<N>::reservePerVertexScratch(std::un
 		if (result != VK_SUCCESS) { return result; }
 	}
 	return VK_SUCCESS;
+}
+
+// All Metal command buffers of this submission completed, so the GPU statuses are final. Checked here rather
+// than in a completed handler of the draw, since Metal does not document the order of completed handlers.
+template <size_t N>
+void MVKQueueFullCommandBufferSubmission<N>::reportPerVertexTessFailures() {
+	for (auto& cbInfo : _cmdBuffers) {
+		for (auto& scratch : cbInfo.perVertexScratch) {
+			if (!scratch->getTessEvalStatus()) { continue; }
+			reportError(VK_ERROR_DEVICE_LOST, "PerVertex TES draw was not rendered: a patch has tessellation levels without a proven topology.");
+			getDevice()->markLost();
+			return;
+		}
+	}
 }
 
 template <size_t N>

@@ -256,6 +256,8 @@ public:
 	// Admission is test-only until GPU topology covers arbitrary TCS factors.
 	bool usesPerVertexTessEval() const { return _usesPerVertexInputBuffer && _isTessellationPipeline; }
 	id<MTLComputePipelineState> getPerVertexTessEvalPipelineState() const { return _mtlPerVertexTessEvalState; }
+	/** Counter-clockwise TES winding (upper-left domain origin) reverses the generator's clockwise corner order. */
+	bool perVertexTessReversesCorners() const { return _tessReflectData.windingOrder == spv::ExecutionModeVertexOrderCcw; }
 	const SPIRV_CROSS_NAMESPACE::MSLCapturedOutputReplayBarycentricBinding& getPerVertexReplayBarycentricBinding() const { return _perVertexReplayBarycentricBinding; }
 	bool usesPortableBarycentrics() const { return _usesPerspectiveBarycentrics || _usesNoPerspectiveBarycentrics; }
 	id<MTLRenderPipelineState> getPerVertexCapturePipelineState(uint32_t viewCount) const {
@@ -438,6 +440,7 @@ protected:
 	MVKShaderImplicitRezBinding _reservedVertexAttributeBufferCount;
 	VkPrimitiveTopology _vkPrimitiveTopology;
 	uint32_t _outputControlPointCount;
+	mvk::SPIRVTessReflectionData _tessReflectData;
 
 	MVKShaderModule* _vertexModule = nullptr;
 	MVKShaderModule* _tessCtlModule = nullptr;
