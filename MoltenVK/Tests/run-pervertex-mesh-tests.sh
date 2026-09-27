@@ -79,6 +79,7 @@ link() { # name mesh fragment [expected status: 3 for a refused form]
 link pervertex mesh.mesh.spv pervertex.frag.spv
 link pervertex-swapped mesh.mesh.spv pervertex-swapped.frag.spv
 link pervertex-permuted permuted.mesh.spv pervertex.frag.spv
+link pervertex-block-output block.mesh.spv pervertex.frag.spv
 link pervertex-consistency permuted.mesh.spv pervertex-consistency.frag.spv
 link reject-pervertex-block block.mesh.spv pervertex-block.frag.spv 3
 link reject-pervertex-matrix matrix.mesh.spv pervertex-matrix.frag.spv 3
@@ -86,6 +87,8 @@ for form in $forms; do
 	case $form in half|int16|uint16) link "form-$form" forms16.mesh.spv "form-$form.frag.spv" ;; *) link "form-$form" forms.mesh.spv "form-$form.frag.spv" ;; esac
 done
 link form-grid forms-grid.mesh.spv form-mixed.frag.spv
+# A mesh translated with a zero workgroup size never leaves its output loops (SPIRV-Cross before 8cd36d69).
+if grep -l 'gl_WorkGroupSize \[\[maybe_unused\]\] = uint3(0, 0, 0)' "$preflight"/*.mesh.metal; then echo "STOP: zero mesh workgroup size would hang the GPU"; exit 1; fi
 syntax=0
 for msl in "$preflight"/*.metal; do
 	xcrun metal -x metal -std=metal3.2 -fsyntax-only "$msl" > "$msl.syntax.log" 2>&1 || { cat "$msl.syntax.log"; echo "STOP: Metal syntax of $msl before any GPU work"; exit 1; }
@@ -113,7 +116,7 @@ run() { # library scenario
 	grep -E '^  |^MESH_DRAW|^VK_EXT|^DEVICE' "$log" | sed 's/^/    /' | head -6
 	if [[ $verdict != PASS ]]; then echo "STOP: inspect $log before any further GPU work"; exit 1; fi
 }
-for scenario in draw grid twice pervertex pervertex-swapped pervertex-permuted barycentric barycentric-permuted pervertex-consistency \
+for scenario in draw grid twice pervertex pervertex-swapped pervertex-permuted pervertex-block-output barycentric barycentric-permuted pervertex-consistency \
 	$(for form in $forms grid; do echo "form-$form"; done) reject-task reject-descriptor reject-per-primitive reject-pervertex-block reject-pervertex-matrix reject-specialization reject-indirect \
 	reject-draw-id reject-draw-id-uint reject-buffer-address no-adapter; do run dev "$scenario"; done
 run shipping public-device-gate
