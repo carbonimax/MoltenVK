@@ -57,7 +57,7 @@ library() { # name admission device [sed expression]
 	cat "$output/$name/PROVENANCE.txt"
 	local lib=$output/$name/build/moltenvk/MoltenVK
 	for program in topology main; do
-		xcrun clang++ -std=c++17 -arch arm64 -O1 -Wall -Wextra -Werror -Wno-missing-field-initializers -DVK_ENABLE_BETA_EXTENSIONS -I"$root/External/Vulkan-Headers/include" "$tes/$program.cpp" "$lib/libMoltenVK.1.4.3.dylib" -Wl,-rpath,"$lib" -o "$output/$name/$program" 2> "$output/$name/$program-build.log" || { cat "$output/$name/$program-build.log"; exit 1; }
+		xcrun clang++ -std=c++17 -arch arm64 -O1 -Wall -Wextra -Werror -Wno-missing-field-initializers -DVK_ENABLE_BETA_EXTENSIONS -I"$root/External/Vulkan-Headers/include" "$tes/$program.cpp" "$lib/libMoltenVK.1.4.3.dylib" -Wl,-rpath,"$lib" -Wl,-U,_mvkEnableTESFixtureDevice -o "$output/$name/$program" 2> "$output/$name/$program-build.log" || { cat "$output/$name/$program-build.log"; exit 1; }
 	done
 }
 library dev ON ON
