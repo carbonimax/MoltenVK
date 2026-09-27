@@ -60,6 +60,9 @@ public:
 	 */
 	bool release();
 
+	/** Permanently unblocks this semaphore after device loss, including later reservations. */
+	void cancel();
+
 	/** Returns whether this instance is in a reserved state. */
 	bool isReserved();
 
@@ -105,6 +108,7 @@ private:
 	std::condition_variable _blocker;
 	uint32_t _reservationCount;
 	bool _shouldWaitAll;
+	bool _cancelled = false;
 };
 
 

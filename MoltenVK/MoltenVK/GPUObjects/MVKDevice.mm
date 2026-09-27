@@ -3948,7 +3948,7 @@ VkResult MVKDevice::markLost(bool alsoMarkPhysicalDevice) {
 	if (alsoMarkPhysicalDevice) { _physicalDevice->setConfigurationResult(VK_ERROR_DEVICE_LOST); }
 
 	for (auto* sem4 : _awaitingSemaphores) {
-		sem4->release();
+		sem4->cancel();
 	}
 	for (auto& sem4AndValue : _awaitingTimelineSem4s) {
 		VkSemaphoreSignalInfo signalInfo;
@@ -4719,7 +4719,8 @@ MVKImage* MVKDevice::removeImage(MVKImage* mvkImg) {
 
 void MVKDevice::addSemaphore(MVKSemaphoreImpl* sem4) {
 	lock_guard<mutex> lock(_sem4Lock);
-	_awaitingSemaphores.push_back(sem4);
+	if (getConfigurationResult() != VK_SUCCESS) { sem4->cancel(); }
+	else { _awaitingSemaphores.push_back(sem4); }
 }
 
 void MVKDevice::removeSemaphore(MVKSemaphoreImpl* sem4) {
