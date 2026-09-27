@@ -161,7 +161,9 @@ int main(int argc, char** argv) {
 		// Scratch-limit draws, direct or indexed, recorded in the primary or in a secondary command buffer.
 		const bool secondaryScratchLimit = scenarioName == "ordinary-levels-secondary-scratch-limit" || scenarioName == "ordinary-levels-indexed-secondary-scratch-limit";
 		const bool indexedScratchLimit = scenarioName == "ordinary-levels-indexed-scratch-limit" || scenarioName == "ordinary-levels-indexed-secondary-scratch-limit";
-		const bool scratchLimit = scenarioName == "ordinary-levels-scratch-limit" || indexedScratchLimit || secondaryScratchLimit;
+		// Dynamic control points: the pipeline declares 3, the command buffer sets 1 before drawing.
+		const bool dynamicScratchLimit = scenarioName == "ordinary-levels-dynamic-scratch-limit";
+		const bool scratchLimit = scenarioName == "ordinary-levels-scratch-limit" || indexedScratchLimit || secondaryScratchLimit || dynamicScratchLimit;
 		std::string drawMode = scratchLimit ? (indexedScratchLimit ? "indexed" : "direct") : ordinaryOnly ? scenarioName.substr(ordinaryPrefix.size()) : "direct";
 		if (scenarioName == "reject-indirect-tes") drawMode = "indirect";
 		if (scenarioName == "reject-indexed-indirect-tes") drawMode = "indexed-indirect";
@@ -238,6 +240,13 @@ int main(int argc, char** argv) {
 		std::vector<const char*> deviceExtensions{VK_KHR_MAINTENANCE_2_EXTENSION_NAME};
 		if (!ordinaryOnly) deviceExtensions.push_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
 		if (hasExtension(extensions, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) deviceExtensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+		VkPhysicalDeviceExtendedDynamicState2FeaturesEXT dynamicState2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT};
+		if (dynamicScratchLimit) {
+			dynamicState2.extendedDynamicState2PatchControlPoints = VK_TRUE;
+			dynamicState2.pNext = features.pNext;
+			features.pNext = &dynamicState2;
+			deviceExtensions.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME);
+		}
 		VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
 		deviceInfo.pNext = &features;
 		deviceInfo.queueCreateInfoCount = 1;
@@ -248,6 +257,8 @@ int main(int argc, char** argv) {
 		check(vkCreateDevice(physical, &deviceInfo, nullptr, &device), "Create device");
 		VkQueue queue = VK_NULL_HANDLE;
 		vkGetDeviceQueue(device, family, 0, &queue);
+		auto setPatchControlPoints = reinterpret_cast<PFN_vkCmdSetPatchControlPointsEXT>(vkGetDeviceProcAddr(device, "vkCmdSetPatchControlPointsEXT"));
+		if (dynamicScratchLimit && !setPatchControlPoints) throw std::runtime_error("vkCmdSetPatchControlPointsEXT unavailable");
 		VkPhysicalDeviceProperties properties{};
 		vkGetPhysicalDeviceProperties(physical, &properties);
 		std::printf("DEVICE=%s scenario=%s winding=%s maxTessellationGenerationLevel=%u\n", properties.deviceName, scenarioName.c_str(), winding.c_str(), properties.limits.maxTessellationGenerationLevel);
@@ -443,7 +454,7 @@ int main(int argc, char** argv) {
 			check(vkCreateShaderModule(device, &info, nullptr, &result), "Create shader module");
 			return modules[name] = result;
 		};
-		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, cache = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; };
+		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, cache = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; };
 		auto pipelineLayout = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureLayout : o.capture == 2 ? fragmentCaptureLayout : o.uniform ? uniformLayout : o.resources ? resourceLayout : o.push ? pushLayout : emptyLayout; };
 		auto descriptorSet = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureSet : o.capture == 2 ? fragmentCaptureSet : o.resources ? resourceSet : VK_NULL_HANDLE; };
 		auto createPipeline = [&](const PipelineOptions& o, VkPipeline& pipeline) {
@@ -495,6 +506,11 @@ int main(int argc, char** argv) {
 			info.pVertexInputState = &vertexInput;
 			info.pInputAssemblyState = &assembly;
 			info.pTessellationState = &tessellation;
+			const VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_PATCH_CONTROL_POINTS_EXT};
+			VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+			dynamic.dynamicStateCount = 1;
+			dynamic.pDynamicStates = dynamicStates;
+			if (o.dynamicControlPoints) info.pDynamicState = &dynamic;
 			info.pViewportState = &viewportState;
 			info.pRasterizationState = &raster;
 			info.pMultisampleState = &multisample;
@@ -571,6 +587,7 @@ int main(int argc, char** argv) {
 			VkClearRect priorRect{{{0, 0}, {2, 2}}, 0, 1};
 			vkCmdClearAttachments(target, 1, &prior, 1, &priorRect);
 			vkCmdBindPipeline(target, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+			if (o.dynamicControlPoints) setPatchControlPoints(target, 1);
 			VkDescriptorSet set = descriptorSet(o);
 			if (set) vkCmdBindDescriptorSets(target, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout(o), 0, 1, &set, 0, nullptr);
 			VkDeviceSize offset = 0;
@@ -657,11 +674,16 @@ int main(int argc, char** argv) {
 			props2.pNext = &props11;
 			vkGetPhysicalDeviceProperties2(physical, &props2);
 			constexpr uint64_t levelBytesPerPatch = 6 * sizeof(float);
-			uint64_t instances = props11.maxMemoryAllocationSize / levelBytesPerPatch + 1;
+			// With one dynamic control point, each instance of 3 vertices draws 3 patches: the draw exceeds the limit only
+			// with the dynamic value, not with the 3 control points the pipeline declares.
+			const uint64_t patchLimit = props11.maxMemoryAllocationSize / levelBytesPerPatch;
+			uint64_t instances = dynamicScratchLimit ? patchLimit / 3 + 1 : patchLimit + 1;
 			if (instances > UINT32_MAX) { std::printf("TES_TOPOLOGY SKIP %s: buffer limit exceeds addressable patch count\n", scenarioName.c_str()); return 0; }
 			PipelineOptions o{"topology.tesc.spv", tese, "ordinary.frag.spv"};
+			o.dynamicControlPoints = dynamicScratchLimit;
 			VkPipeline pipeline = VK_NULL_HANDLE;
 			check(createPipeline(o, pipeline), "Create ordinary float32 pipeline");
+			if (dynamicScratchLimit) std::printf("control points: dynamic 1, pipeline 3; patches per instance: 3\n");
 			VkCommandBuffer secondary = VK_NULL_HANDLE;
 			if (secondaryScratchLimit) {
 				commandInfo.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
@@ -672,6 +694,12 @@ int main(int argc, char** argv) {
 				bool pass = actual == VK_ERROR_OUT_OF_DEVICE_MEMORY;
 				std::printf("TES_TOPOLOGY %s %s: vkEndCommandBuffer=%d expected=%d, patches=%llu limit=%llu, nothing submitted\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), actual, VK_ERROR_OUT_OF_DEVICE_MEMORY, (unsigned long long)instances, (unsigned long long)props11.maxMemoryAllocationSize);
 				return pass ? 0 : 2;
+			}
+			// With prefill, recording encoded the command buffer: a successful recording means the draw itself was encoded.
+			const char* prefill = getenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS");
+			if (prefill && strcmp(prefill, "0")) {
+				std::printf("TES_TOPOLOGY FAIL %s: vkEndCommandBuffer=0 with prefill, the oversized draw was encoded; not submitted\n", scenarioName.c_str());
+				return 2;
 			}
 			memset(readback.data, 0, readback.size);
 			check(vkResetFences(device, 1, &fence), "Reset fence");
