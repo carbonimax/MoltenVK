@@ -103,6 +103,7 @@ int main(int argc, char** argv) {
 		const std::string shaders = argv[1], form = argv[2], indexName = argv[3], scenarioName = argv[4], producer = argv[5], prefix = argv[6];
 		const bool withTES = getenv("PERVERTEX_TEST_INCLUDE_TES") != nullptr;
 		const bool tesFirst = getenv("PERVERTEX_TEST_TES_FIRST") != nullptr;
+		const bool tessWrongPatch = getenv("PERVERTEX_TEST_TES_WRONG_PATCH") != nullptr;
 		const bool indexed = form == "indexed" || form == "indexed-count";
 		const bool counted = form == "draw-count" || form == "indexed-count";
 		if (!indexed && form != "draw" && !counted) throw std::runtime_error("Unknown form");
@@ -409,7 +410,7 @@ int main(int argc, char** argv) {
 		VkPipeline indirectPipeline = graphicsPipeline(indirectVertex);
 		VkPipeline tessPipeline = VK_NULL_HANDLE;
 		if (withTES) {
-			VkShaderModule tessVertex = module("tes-triangle.vert.spv"), tessControl = module("tes-triangle.tesc.spv"), tessEvaluation = module("tes-ordered.tese.spv"), tessFragment = module("tes-ordered.frag.spv");
+			VkShaderModule tessVertex = module("tes-triangle.vert.spv"), tessControl = module("tes-triangle.tesc.spv"), tessEvaluation = module("tes-ordered.tese.spv"), tessFragment = module(tessWrongPatch ? "tes-wrong-patch.frag.spv" : "tes-ordered.frag.spv");
 			VkPipelineShaderStageCreateInfo stages[4]{};
 			VkShaderStageFlagBits kinds[4] = {VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, VK_SHADER_STAGE_FRAGMENT_BIT};
 			VkShaderModule modules[4] = {tessVertex, tessControl, tessEvaluation, tessFragment};
@@ -419,8 +420,9 @@ int main(int argc, char** argv) {
 			assembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
 			VkPipelineTessellationStateCreateInfo tessellation{VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO};
 			tessellation.patchControlPoints = 3;
-			VkViewport viewport{0, 0, float(kSide), float(kSide), 0, 1};
-			VkRect2D scissor{{0, 0}, {kSide, kSide}};
+			// Keep the fixed TES fixture's 32x32 viewport and patch split at x=16.
+			VkViewport viewport{0, 0, 32, 32, 0, 1};
+			VkRect2D scissor{{0, 0}, {32, 32}};
 			VkPipelineViewportStateCreateInfo viewportState{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
 			viewportState.viewportCount = 1; viewportState.pViewports = &viewport; viewportState.scissorCount = 1; viewportState.pScissors = &scissor;
 			VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
@@ -650,9 +652,23 @@ int main(int argc, char** argv) {
 			for (uint32_t i = 0; i < kSide * kSide; ++i) covered += (i % kSide >= 2 || i / kSide >= 2) && (got.image[4 * i] | got.image[4 * i + 1] | got.image[4 * i + 2] | got.image[4 * i + 3]);
 			bool coverage = expected.empty() ? covered == 0 : covered > 0;
 			bool oracle = sampleOracle(s, got.image, samples);
-			bool ok = refOk && got.submit == VK_SUCCESS && got.wait == wantWait && got.produced && !mismatches && magenta && coverage && oracle && got.records == expected && got.invocations == expected.size();
-			std::printf("submission=%zu indirect submit=%d wait=%d expected_wait=%d gpu_written_arguments=%d pixel_mismatches=%zu prior_write=%d covered_pixels=%u cpu_samples=%u/%d invocations=%u expected=%zu records_match=%d %s\n",
-				n, got.submit, got.wait, wantWait, int(got.produced), mismatches, int(magenta), covered, samples, int(oracle), got.invocations, expected.size(), int(got.records == expected), ok ? "PASS" : "FAIL");
+			bool tessOracle = true;
+			uint32_t tessRed = 0;
+			if (withTES) {
+				for (uint32_t x : {7u, 9u, 23u, 25u}) {
+					// The indirect draw can cover y=16 when TES runs first; y=4 remains visible.
+					const uint8_t* pixel = got.image.data() + (4 * kSide + x) * 4;
+					tessOracle &= pixel[0] == 0 && pixel[1] == 255 && pixel[2] == 0 && pixel[3] == 255;
+				}
+				for (uint32_t y = 0; y < 32; ++y) for (uint32_t x = 0; x < 32; ++x) {
+					const uint8_t* pixel = got.image.data() + (y * kSide + x) * 4;
+					tessRed += pixel[0] == 255 && pixel[1] == 0 && pixel[2] == 0 && pixel[3] == 255;
+				}
+				tessOracle &= tessRed == 0;
+			}
+			bool ok = refOk && got.submit == VK_SUCCESS && got.wait == wantWait && got.produced && !mismatches && magenta && coverage && oracle && tessOracle && got.records == expected && got.invocations == expected.size();
+			std::printf("submission=%zu indirect submit=%d wait=%d expected_wait=%d gpu_written_arguments=%d pixel_mismatches=%zu prior_write=%d covered_pixels=%u cpu_samples=%u/%d tess_oracle=%d tess_red=%u invocations=%u expected=%zu records_match=%d %s\n",
+				n, got.submit, got.wait, wantWait, int(got.produced), mismatches, int(magenta), covered, samples, int(oracle), int(tessOracle), tessRed, got.invocations, expected.size(), int(got.records == expected), ok ? "PASS" : "FAIL");
 			std::ofstream(prefix + "-" + std::to_string(n) + "-indirect.rgba", std::ios::binary).write(reinterpret_cast<const char*>(got.image.data()), got.image.size());
 			std::ofstream(prefix + "-" + std::to_string(n) + "-reference.rgba", std::ios::binary).write(reinterpret_cast<const char*>(ref.image.data()), ref.image.size());
 			pass &= ok;

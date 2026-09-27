@@ -285,11 +285,11 @@ static void checkIndirect() {
 	for (auto& scratch : saved) {
 		// Planning helper retained, no index helper, plan buffer present and zeroed before any submission.
 		assert(scratch->indirectPipeline && !scratch->indexPipeline && scratch->indirectCapacity == 4);
-		assert(scratch->buffers[7] && scratch->buffers[7].length == 256);
-		auto* bytes = (const uint8_t*)scratch->buffers[7].contents;
+		assert(scratch->buffers[12] && scratch->buffers[12].length == 256);
+		auto* bytes = (const uint8_t*)scratch->buffers[12].contents;
 		for (unsigned i = 0; i < 256; ++i) { assert(!bytes[i]); }
 	}
-	assert(saved[0]->buffers[7] != saved[1]->buffers[7] && device.creations[3] == 1 && !device.creations[1] && !device.creations[2]);
+	assert(saved[0]->buffers[12] != saved[1]->buffers[12] && device.creations[3] == 1 && !device.creations[1] && !device.creations[2]);
 	// Restart-capable indirect scratch also retains the restart assembly helper.
 	auto restart = indirectRequest();
 	restart.restart = true;
