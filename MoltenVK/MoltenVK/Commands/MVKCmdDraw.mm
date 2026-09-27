@@ -221,8 +221,8 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	*(uint32_t*)captureParams.contents = vertexCount;
 	cmdEncoder->_isIndexedDraw = indexBinding != nullptr;
 	if (indexBinding) {
-		// The compiler writes dense (instance, index occurrence) records and reads
-		// indices on the GPU, including writes earlier in this command buffer.
+		// Capture uses vertexCount records per instance; restart compacts occurrences within that stride.
+		// Indices are read on the GPU, including writes earlier in this command buffer.
 		cmdEncoder->finalizeDrawState(kMVKGraphicsStageVertex);
 		if (!pipeline->hasValidMTLPipelineStates()) { return; }
 		id<MTLComputeCommandEncoder> captureEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
@@ -279,7 +279,7 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 		cmdEncoder->getState().offsetZeroDivisorVertexBuffers(*cmdEncoder, kMVKGraphicsStageVertex, pipeline, firstInstance);
 		NSUInteger width = std::min(captureState.threadExecutionWidth, captureState.maxTotalThreadsPerThreadgroup);
 		if (restart) {
-			// grid_size is the compiler's dense record stride: never round up GPU counts.
+			// Only compact occurrences execute; grid_size (capture stride) remains the original stage-in region.
 			[captureEncoder dispatchThreadgroupsWithIndirectBuffer: scratch->buffers[6] indirectBufferOffset: 0 threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
 		} else if (cmdEncoder->getMetalFeatures().nonUniformThreadgroups) {
 			[captureEncoder dispatchThreads: MTLSizeMake(vertexCount, instanceCount, 1) threadsPerThreadgroup: MTLSizeMake(width, 1, 1)];

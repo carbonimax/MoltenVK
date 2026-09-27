@@ -565,11 +565,12 @@ kernel void perVertexRestart(const device uint8_t* source [[buffer(0)]], device 
         return;
     }
     if (p[7] == 3) {
-        uint captured = args[0], primitives = args[4] / rasterVertices;
+        uint primitives = args[4] / rasterVertices;
         if (i >= primitives * p[1]) { return; }
         uint instance = i / primitives, primitive = i % primitives;
         for (uint corner = 0; corner < 3; ++corner) {
-            uint record = instance * captured + triplets[3 * primitive + corner];
+            // Capture's grid_size is the original stage-in region, not the compact dispatch size.
+            uint record = instance * p[0] + triplets[3 * primitive + corner];
             // Keep the base triplets read-only while other instances read them.
             if (instance) { triplets[3 * i + corner] = record; }
             if (corner >= rasterVertices) { continue; }
