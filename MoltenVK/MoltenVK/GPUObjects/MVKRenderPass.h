@@ -75,6 +75,14 @@ public:
 	/** Returns whether or not the stencil attachment is being used. */
 	bool isStencilAttachmentUsed() const { return _stencilAttachment.attachment != VK_ATTACHMENT_UNUSED; }
 
+	/** Returns whether an active source attachment has a native or fallback resolve. */
+	bool hasResolveAttachments() const {
+		for (size_t i = 0; i < _colorAttachments.size() && i < _resolveAttachments.size(); ++i) {
+			if (_colorAttachments[i].attachment != VK_ATTACHMENT_UNUSED && _resolveAttachments[i].attachment != VK_ATTACHMENT_UNUSED) { return true; }
+		}
+		return (isDepthAttachmentUsed() && _depthResolveAttachment.attachment != VK_ATTACHMENT_UNUSED && _depthResolveMode != VK_RESOLVE_MODE_NONE) || (isStencilAttachmentUsed() && _stencilResolveAttachment.attachment != VK_ATTACHMENT_UNUSED && _stencilResolveMode != VK_RESOLVE_MODE_NONE);
+	}
+
 	/** Return the depth attachment format. */
 	VkFormat getDepthFormat();
 
