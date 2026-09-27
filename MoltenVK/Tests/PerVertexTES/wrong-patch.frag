@@ -1,3 +1,5 @@
+// Copyright 2026 Jean-Philippe Meunier
+// SPDX-License-Identifier: Apache-2.0
 #version 450
 #extension GL_EXT_fragment_shader_barycentric : require
 layout(location=0) pervertexEXT in vec3 corner[3];

@@ -1,3 +1,5 @@
+// Copyright 2026 Jean-Philippe Meunier
+// SPDX-License-Identifier: Apache-2.0
 #version 450
 void main() {
     const vec2 p[3] = vec2[3](vec2(-0.4,-0.8), vec2(0.4,-0.8), vec2(0.0,0.8));
