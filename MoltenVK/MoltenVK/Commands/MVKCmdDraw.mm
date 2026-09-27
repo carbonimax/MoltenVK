@@ -365,12 +365,11 @@ static void encodePerVertexTessEval(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	};
 	if (const char* error = cmdEncoder->getIndexedPerVertexAttachmentError()) { reject(VK_ERROR_FEATURE_NOT_PRESENT, error); return; }
 	uint32_t patches = vertexCount / 3;
-	if (!patches) { return; }
 	auto* scratch = cmdEncoder->nextPerVertexScratch();
 	if (!scratch) { return; }
 	id<MTLComputePipelineState> topology = scratch->tessTopologyPipeline;
 	id<MTLBuffer> levels = scratch->buffers[11], plan = scratch->buffers[12], invocations = scratch->buffers[7];
-	if (!topology || !levels || !plan || !invocations) { reject(VK_ERROR_INITIALIZATION_FAILED, "draw has no topology scratch."); return; }
+	if (patches && (!topology || !levels || !plan || !invocations)) { reject(VK_ERROR_INITIALIZATION_FAILED, "draw has no topology scratch."); return; }
 	cmdEncoder->_isIndexedDraw = false;
 	cmdEncoder->finalizeDrawState(kMVKGraphicsStageVertex);
 	id<MTLComputeCommandEncoder> compute = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
@@ -381,6 +380,8 @@ static void encodePerVertexTessEval(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	if (pipeline->needsDrawIdBuffer()) { computeState.bindStructBytes(compute, &drawIndex, pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::DrawId]); }
 	[compute setStageInRegion:MTLRegionMake2D(0, 0, vertexCount, 1)];
 	[compute dispatchThreads:MTLSizeMake(vertexCount, 1, 1) threadsPerThreadgroup:MTLSizeMake(pipeline->getTessVertexStageState().threadExecutionWidth, 1, 1)];
+	// Vulkan runs the VS for every vertex, including those that complete no patch; nothing is tessellated then.
+	if (!patches) { cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass); return; }
 	[compute memoryBarrierWithScope:MTLBarrierScopeBuffers];
 	cmdEncoder->finalizeDrawState(kMVKGraphicsStageTessControl);
 	const auto& tcs = pipeline->getImplicitBuffers(kMVKShaderStageTessCtl).ids;
