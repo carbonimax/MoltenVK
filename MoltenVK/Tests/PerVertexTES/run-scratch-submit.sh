@@ -57,6 +57,9 @@ for scenario in ordinary-levels-scratch-limit ordinary-levels-indexed-scratch-li
 	if [[ $last != PASS ]]; then echo "    SKIP no-prefill runs of $scenario: encoding did not refuse the draw"; continue; fi
 	for sync in 1 0; do run "$scenario" ccw 0 "$sync" 1; done
 done
+# UINT32_MAX vertices with three control points wrap a 32-bit ceiling division to zero; four instances exceed UINT32_MAX patches.
+# Never submit these draws, even if a regression accepts them while recording.
+for scenario in ordinary-levels-count-overflow ordinary-levels-indexed-count-overflow; do run "$scenario" ccw 0 0 1; done
 # Within the limit, without prefill: the recording check must not refuse these draws. The indirect scenarios
 # run without shader validation, as in the TES runner.
 for command in direct indexed; do run "ordinary-levels-$command" ccw 0 1 1; done
