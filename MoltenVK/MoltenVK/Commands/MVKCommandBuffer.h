@@ -176,6 +176,7 @@ public:
 	/** The most recent recorded tessellation pipeline */
 	MVKCmdBindPipeline* _lastTessellationPipeline;
 	bool recordedGraphicsPipelineUsesPerVertexInput() const { return _recordedPerVertexPipeline != nullptr; }
+	bool recordedGraphicsPipelineUsesPerVertexTessEval() const;
 
 
 #pragma mark Construction

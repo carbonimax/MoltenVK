@@ -160,6 +160,31 @@ static void checkCaptureLayout(SPIRVToMSLConverter& converter, SPIRVToMSLConvers
 		check(converter.convert(ordinary, result), "Ordinary tessellation capture rejected by portable layout export");
 		check(result.resultInfo.capturedVertexLayout.stride == 0, "Ordinary tessellation unexpectedly exported a portable layout");
 	}
+	// TES compute capture exports the same physical layout contract as vertex capture.
+	for (const char* fixture : {"capture-tese", "capture-tese-block"}) {
+		auto words = readSPIRV((directory + "/" + fixture + ".spv").c_str());
+		SPIRVToMSLConversionConfiguration tess;
+		tess.options.entryPointName = "main";
+		tess.options.entryPointStage = spv::ExecutionModelTessellationEvaluation;
+		tess.options.numTessControlPoints = 3;
+		tess.options.shouldFlipVertexY = false;
+		tess.options.mslOptions.set_msl_version(2, 4);
+		tess.options.mslOptions.capture_output_to_buffer = true;
+		tess.options.mslOptions.raw_buffer_tese_input = true;
+		tess.options.mslOptions.tese_as_compute = true;
+		tess.exportCapturedVertexLayout = true;
+		CompilerMSL reference(words);
+		reference.set_execution_mode(spv::ExecutionModeOutputVertices, 3);
+		reference.set_msl_options(tess.options.mslOptions);
+		reference.compile();
+		auto expected = reference.get_msl_captured_vertex_layout();
+		converter.setSPIRV(words.data(), words.size());
+		check(converter.convert(tess, result), "TES capture conversion failed");
+		check(result.resultInfo.needsOutputBuffer && equal(result.resultInfo.capturedVertexLayout, expected), "TES converter did not export the captured physical layout");
+		std::ofstream output(directory + "/" + fixture + ".metal");
+		output << result.msl;
+		check(bool(output), "Cannot write TES capture MSL");
+	}
 	auto unsupported = readSPIRV((directory + "/capture-unsupported.spv").c_str());
 	converter.setSPIRV(unsupported.data(), unsupported.size());
 	SPIRVToMSLConversionConfiguration config;

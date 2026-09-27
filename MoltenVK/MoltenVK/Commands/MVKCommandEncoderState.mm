@@ -1469,7 +1469,9 @@ void MVKMetalGraphicsCommandEncoderState::prepareDraw(
 	bindState(encoder, mvkEncoder, vk);
 
 	// Resources
-	if (pipeline->isTessellationPipeline()) {
+	if (pipeline->usesPerVertexTessEval()) {
+		// Replay has its own buffers; TES resources were consumed by the compute stage.
+	} else if (pipeline->isTessellationPipeline()) {
 		bindVulkanGraphicsToMetalGraphics(encoder, mvkEncoder, vk, vkShared, *this, pipeline, kMVKShaderStageTessEval, MVKMetalGraphicsStage::Vertex);
 	} else {
 		bindVulkanGraphicsToMetalGraphics(encoder, mvkEncoder, vk, vkShared, *this, pipeline, kMVKShaderStageVertex,   MVKMetalGraphicsStage::Vertex);
@@ -1643,7 +1645,7 @@ void MVKMetalComputeCommandEncoderState::prepareRenderDispatch(
 
 	id<MTLComputePipelineState> mtlPipeline = nil;
 	if (stage == kMVKShaderStageVertex) {
-		if (pipeline->usesPerVertexInputBuffer()) {
+		if (pipeline->usesPerVertexInputBuffer() && !pipeline->usesPerVertexTessEval()) {
 			auto* subpass = mvkEncoder.getSubpass();
 			uint32_t viewCount = subpass->isMultiview() ? subpass->getViewCountInMetalPass(mvkEncoder.getMultiviewPassIndex()) : 1;
 			mtlPipeline = pipeline->getPerVertexIndexedCapturePipelineState(vk.isPrimitiveRestartEnabled() || vk._indexBuffer.vkIndexType == VK_INDEX_TYPE_UINT32, viewCount);
@@ -1656,6 +1658,8 @@ void MVKMetalComputeCommandEncoderState::prepareRenderDispatch(
 		}
 	} else if (stage == kMVKShaderStageTessCtl) {
 		mtlPipeline = pipeline->getTessControlStageState();
+	} else if (stage == kMVKShaderStageTessEval) {
+		mtlPipeline = pipeline->getPerVertexTessEvalPipelineState();
 	} else {
 		assert(0);
 	}

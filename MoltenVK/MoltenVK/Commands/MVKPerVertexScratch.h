@@ -16,11 +16,13 @@ struct MVKPerVertexScratchRequest {
 	// Indirect draws: dense record capacity checked on the GPU, and the shared plan/status buffer.
 	uint32_t indirectCapacity = 0;
 	NSUInteger planSize = 0;
+	// TES invocation ABI followed by VS, TCS vertex, patch and factor scratch.
+	NSUInteger tessSizes[5] = {};
 };
 
 // Individually owned allocations: the shared scratch pool cannot recover from a nil Metal buffer.
 struct MVKPerVertexScratch {
-	id<MTLBuffer> buffers[8] = {};
+	id<MTLBuffer> buffers[13] = {};
 	id<MTLComputePipelineState> indexPipeline = nil;
 	id<MTLComputePipelineState> widenUint8Pipeline = nil;
 	id<MTLComputePipelineState> indirectPipeline = nil;
@@ -32,22 +34,22 @@ struct MVKPerVertexScratch {
 
 	bool reserve(id<MTLDevice> device, const MVKPerVertexScratchRequest& request) {
 		// Indirect dispatch/draw arguments plus replay constants aligned to 256 bytes.
-		NSUInteger lengths[] = {request.captureSize, sizeof(uint32_t), request.occurrenceSize, request.primitiveSize, request.cornerSize, request.indexSize, request.restart ? 68 * sizeof(uint32_t) : 0, request.planSize};
-		for (size_t i = 0; i < 8; ++i) {
+		NSUInteger lengths[] = {request.captureSize, sizeof(uint32_t), request.occurrenceSize, request.primitiveSize, request.cornerSize, request.indexSize, request.restart ? 68 * sizeof(uint32_t) : 0, request.tessSizes[0], request.tessSizes[1], request.tessSizes[2], request.tessSizes[3], request.tessSizes[4], request.planSize};
+		for (size_t i = 0; i < std::size(buffers); ++i) {
 			if (!lengths[i]) { continue; }
-			bool shared = i != 0 && i != 5 && i != 6;
+			bool shared = (i > 0 && i < 5) || i == 7 || i == 12;
 			id<MTLBuffer> buffer = [device newBufferWithLength:lengths[i] options:shared ? MTLResourceStorageModeShared : MTLResourceStorageModePrivate];
 			if (!buffer || buffer.length < lengths[i] || (shared && !buffer.contents)) { [buffer release]; return false; }
 			buffers[i] = buffer;
 		}
 		// The GPU only ORs admission failures into the status word; each submission starts admitted.
-		if (buffers[7]) { memset(buffers[7].contents, 0, buffers[7].length); }
+		if (buffers[12]) { memset(buffers[12].contents, 0, buffers[12].length); }
 		indirectCapacity = request.indirectCapacity;
 		return true;
 	}
 
 	// Admission failures ORed by the GPU into the plan buffer; read only after the work completed.
-	uint32_t getIndirectStatus() const { return buffers[7] ? *(volatile const uint32_t*)buffers[7].contents : 0; }
+	uint32_t getIndirectStatus() const { return indirectCapacity && buffers[12] ? *(volatile const uint32_t*)buffers[12].contents : 0; }
 };
 
 using MVKPerVertexScratchReservations = std::vector<std::shared_ptr<MVKPerVertexScratch>>;
