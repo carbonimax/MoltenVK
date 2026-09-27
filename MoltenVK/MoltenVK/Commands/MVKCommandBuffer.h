@@ -179,6 +179,14 @@ public:
 	bool recordedGraphicsPipelineUsesPerVertexInput() const { return _recordedPerVertexPipeline != nullptr; }
 	bool recordedGraphicsPipelineUsesPerVertexTessEval() const;
 
+	/**
+	 * The recorded graphics pipeline if its draws take the ordinary tessellation path, and the patch control points
+	 * they will encode with: the recorded dynamic value when the pipeline declares it dynamic, as while encoding.
+	 */
+	MVKGraphicsPipeline* getRecordedTessellationPipeline() const { return _recordedTessellationPipeline; }
+	uint32_t getRecordedPatchControlPoints() const;
+	void recordPatchControlPoints(uint32_t count) { _recordedPatchControlPoints = static_cast<uint8_t>(count); }
+
 
 #pragma mark Construction
 
@@ -219,6 +227,8 @@ protected:
 	std::vector<MVKPerVertexScratchRequest> _perVertexScratchRequests;
 	MVKPerVertexScratchReservations _prefilledPerVertexScratch;
 	MVKGraphicsPipeline* _recordedPerVertexPipeline = nullptr;
+	MVKGraphicsPipeline* _recordedTessellationPipeline = nullptr;
+	uint8_t _recordedPatchControlPoints = 0;
 
 	bool _recordedAttachmentsKnown = false;
 	const char* _recordedRenderingError = nullptr;

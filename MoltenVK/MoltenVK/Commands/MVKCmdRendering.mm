@@ -528,6 +528,12 @@ void MVKCmdSetFrontFace::encode(MVKCommandEncoder* cmdEncoder) {
 #pragma mark -
 #pragma mark MVKCmdSetPatchControlPoints
 
+// Recorded too, so that tessellation draws can be checked while recording.
+VkResult MVKCmdSetPatchControlPoints::setContent(MVKCommandBuffer* cmdBuff, uint32_t patchControlPoints) {
+	cmdBuff->recordPatchControlPoints(patchControlPoints);
+	return MVKSingleValueCommand::setContent(cmdBuff, patchControlPoints);
+}
+
 void MVKCmdSetPatchControlPoints::encode(MVKCommandEncoder* cmdEncoder) {
 	cmdEncoder->getState().updateDynamicState(MVKRenderStateFlag::PatchControlPoints)._renderState.patchControlPoints = static_cast<uint8_t>(_value);
 }
