@@ -637,11 +637,13 @@ kernel void perVertexRestart(const device uint8_t* source [[buffer(0)]], device 
 }
 // Portable PerVertexKHR indirect draws, planned from Vulkan arguments and Count read on the GPU.
 // p: maxDrawCount, stride, indexBytes, index capacity lo/hi, record capacity, views, topology,
-//    provokingLast, corners, hasCount, draw, table/gather/capture threadgroup widths, phase.
+//    provokingLast, corners, hasCount, draw, table/gather/capture threadgroup widths, phase,
+//    restart, restart scan steps.
 // Phases: admit every draw of the command, plan one draw, build replay tables, gather indices.
 // Plan words: 0 status (1 capacity, 2 index range), 4 capture draw, 8 capture dispatch,
 // 12 stage-in region, 20 replay draw, 24 table dispatch, 28 gather dispatch, 32 table params,
-// 64 replay constants (byte 256), 128 capture params (byte 512).
+// 36 restart dispatch, 40 restart expansion dispatch, 64 replay constants (byte 256),
+// 128 capture params (byte 512), then perVertexRestart parameters every 64 words from byte 1024.
 kernel void perVertexIndirect(const device uint8_t* args [[buffer(0)]], const device uint* count [[buffer(1)]], device uint* w [[buffer(2)]], const device uint8_t* source [[buffer(3)]], device uint* gathered [[buffer(4)]], device uint* pairs [[buffer(5)]], device uint* triplets [[buffer(6)]], device uint* corners [[buffer(7)]], constant uint* p [[buffer(8)]], uint i [[thread_position_in_grid]]) {
     uint draws = p[10] ? min(p[0], count[0]) : p[0], topology = p[7], rasterVertices = topology == 0 ? 1 : topology <= 2 ? 2 : 3;
     if (p[15] == 0) {
@@ -669,6 +671,17 @@ kernel void perVertexIndirect(const device uint8_t* args [[buffer(0)]], const de
         w[32] = vertices; w[33] = instances; w[34] = primitives; w[35] = p[2] ? a[2] : 0;
         w[64] = 0; w[65] = 0; w[66] = firstInstance; w[67] = occurrences;
         w[128] = vertices;
+        if (p[16]) {
+            // Restart assembly with a fixed number of scan steps: surplus steps copy, keeping parity.
+            w[36] = uint((max(ulong(vertices), 1ul) + p[12] - 1) / p[12]); w[37] = 1; w[38] = 1;
+            w[40] = uint((ulong(vertices) * instances + p[12] - 1) / p[12]); w[41] = 1; w[42] = 1;
+            for (uint block = 0; block < p[17] + 3; ++block) {
+                device uint* r = w + 256 + 64 * block;
+                uint phase = block == 0 ? 0 : block <= p[17] ? 1 : block - p[17] + 1;
+                r[0] = vertices; r[1] = instances; r[2] = 4; r[3] = topology; r[4] = p[8]; r[5] = firstInstance; r[6] = p[9];
+                r[7] = phase; r[8] = phase == 1 ? 1u << (block - 1) : 0; r[9] = phase == 0 ? 0 : phase == 1 ? (block - 1) & 1 : p[17] & 1;
+            }
+        }
         return;
     }
     if (p[15] == 3) {
@@ -676,6 +689,8 @@ kernel void perVertexIndirect(const device uint8_t* args [[buffer(0)]], const de
         uint index = 0;
         ulong offset = (ulong(w[35]) + i) * p[2];
         for (uint b = 0; b < p[2]; ++b) { index |= uint(source[offset + b]) << (8 * b); }
+        // Widened indices keep their restart marker for perVertexRestart, which then reads four bytes.
+        if (p[16] && index == (p[2] == 1 ? 0xFFu : p[2] == 2 ? 0xFFFFu : 0xFFFFFFFFu)) { index = 0xFFFFFFFFu; }
         gathered[i] = index;
         return;
     }

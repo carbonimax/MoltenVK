@@ -99,7 +99,7 @@ static Buffer makeBuffer(const Device& d, VkDeviceSize size, VkBufferUsageFlags 
 
 int main(int argc, char** argv) {
 	try {
-		if (argc != 7) throw std::runtime_error("Usage: pervertex-indirect-gpu shader-dir draw|indexed|draw-count|indexed-count u8|u16|u32 decisive|zero|two|repeat|overflow|overflow-second|huge|index-oob update|copy|compute output-prefix");
+		if (argc != 7) throw std::runtime_error("Usage: pervertex-indirect-gpu shader-dir draw|indexed|draw-count|indexed-count u8|u16|u32 decisive|zero|two|repeat|overflow|overflow-second|huge|index-oob|restart|restart-two|restart-overflow|restart-dynamic-on|restart-dynamic-off update|copy|compute output-prefix");
 		const std::string shaders = argv[1], form = argv[2], indexName = argv[3], scenarioName = argv[4], producer = argv[5], prefix = argv[6];
 		const bool indexed = form == "indexed" || form == "indexed-count";
 		const bool counted = form == "draw-count" || form == "indexed-count";
@@ -109,18 +109,26 @@ int main(int argc, char** argv) {
 		const uint32_t indexSize = indexName == "u8" ? 1 : indexName == "u16" ? 2 : indexName == "u32" ? 4 : 0;
 		if (!indexSize) throw std::runtime_error("Unknown index type");
 		const VkIndexType indexType = indexSize == 1 ? VK_INDEX_TYPE_UINT8_KHR : indexSize == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+		// Restart scenarios draw an indexed triangle strip split by the index type's restart marker.
+		const bool restart = scenarioName.rfind("restart", 0) == 0;
+		// Dynamic restart state: the pipeline may restart, so restart scratch is reserved either way.
+		const bool dynamicRestart = scenarioName.rfind("restart-dynamic", 0) == 0, restartOn = scenarioName != "restart-dynamic-off";
+		if (restart && !indexed) throw std::runtime_error("restart scenarios need an indexed form");
+		const std::vector<uint32_t> sources = restart ? std::vector<uint32_t>{10, 11, 13, 12, UINT32_MAX, 10, 11, 12} : std::vector<uint32_t>{10, 11, 12, 12, 13, 10};
+		const uint32_t marker = indexSize == 1 ? 0xFFu : indexSize == 2 ? 0xFFFFu : 0xFFFFFFFFu;
 		// Nonzero first/base values everywhere; uint16 also exercises a negative vertexOffset.
-		const Draw base = indexed ? Draw{6, 2, 2, indexSize == 2 ? -3 : 3, 2} : Draw{6, 2, 4, 0, 2};
+		const Draw base = indexed ? Draw{uint32_t(sources.size()), 2, 2, indexSize == 2 ? -3 : 3, 2} : Draw{6, 2, 4, 0, 2};
 		auto scenarioFor = [&](const std::string& name) {
 			Draw empty = base;
 			empty.instances = 0;
 			Scenario s{{base, counted ? base : empty}, 1, false};
 			if (name == "zero") { s.draws = {counted ? base : empty, counted ? base : empty}; s.gpuCount = 0; }
-			else if (name == "two" || name == "overflow-second") { s.draws = {base, base}; s.gpuCount = 7; }
+			else if (name == "two" || name == "overflow-second" || name == "restart-two") { s.draws = {base, base}; s.gpuCount = 7; }
+			else if (name == "restart-overflow") { s.expectLost = true; }
 			else if (name == "huge") { s.draws[0].instances = UINT32_MAX; s.expectLost = true; }
 			else if (name == "index-oob") { if (!indexed) throw std::runtime_error("index-oob needs an indexed form"); s.draws[0].first = 100000; s.expectLost = true; }
 			else if (name == "overflow") { s.expectLost = true; }
-			else if (name != "decisive" && name != "repeat") throw std::runtime_error("Unknown scenario");
+			else if (name != "decisive" && name != "repeat" && name != "restart" && !dynamicRestart) throw std::runtime_error("Unknown scenario");
 			// Only the second draw exceeds a capacity of 11 records: the whole command must still do nothing.
 			if (name == "overflow-second") { s.draws[0].instances = 1; s.expectLost = true; }
 			return s;
@@ -149,6 +157,7 @@ int main(int argc, char** argv) {
 		check(vkEnumeratePhysicalDevices(instance, &count, physicals.data()), "Read devices");
 		Device d;
 		std::vector<const char*> deviceExtensions{VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME};
+		if (dynamicRestart) deviceExtensions.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME);
 		for (auto candidate : physicals) {
 			check(vkEnumerateDeviceExtensionProperties(candidate, nullptr, &count, nullptr), "Enumerate device extensions");
 			std::vector<VkExtensionProperties> extensions(count);
@@ -168,16 +177,20 @@ int main(int argc, char** argv) {
 		}
 		if (!d.physical) throw std::runtime_error("No device with barycentric, indirect count and required index type");
 		if (indexSize == 1) deviceExtensions.push_back(VK_KHR_INDEX_TYPE_UINT8_EXTENSION_NAME);
+		// Feature chain: barycentric -> draw parameters [-> uint8 indices] [-> dynamic restart].
 		VkPhysicalDeviceIndexTypeUint8FeaturesKHR uint8Features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_KHR};
+		VkPhysicalDeviceExtendedDynamicState2FeaturesEXT dynamicState2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT};
 		VkPhysicalDeviceShaderDrawParametersFeatures drawParameters{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES};
 		VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR barycentric{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR};
 		barycentric.pNext = &drawParameters;
-		drawParameters.pNext = indexSize == 1 ? &uint8Features : nullptr;
+		void** tail = &drawParameters.pNext;
+		if (indexSize == 1) { *tail = &uint8Features; tail = &uint8Features.pNext; }
+		if (dynamicRestart) { *tail = &dynamicState2; }
 		VkPhysicalDeviceFeatures2 supported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 		supported.pNext = &barycentric;
 		vkGetPhysicalDeviceFeatures2(d.physical, &supported);
 		const auto& core = supported.features;
-		if (!barycentric.fragmentShaderBarycentric || !drawParameters.shaderDrawParameters || !core.drawIndirectFirstInstance || !core.multiDrawIndirect || !core.vertexPipelineStoresAndAtomics || (indexSize == 1 && !uint8Features.indexTypeUint8))
+		if (!barycentric.fragmentShaderBarycentric || !drawParameters.shaderDrawParameters || !core.drawIndirectFirstInstance || !core.multiDrawIndirect || !core.vertexPipelineStoresAndAtomics || (indexSize == 1 && !uint8Features.indexTypeUint8) || (dynamicRestart && !dynamicState2.extendedDynamicState2))
 			throw std::runtime_error("Required features are unavailable");
 		VkPhysicalDeviceFeatures2 enabled{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 		enabled.pNext = &barycentric;
@@ -321,6 +334,7 @@ int main(int argc, char** argv) {
 		};
 		VkShaderModule indirectVertex = module("indirect.vert.spv"), referenceVertex = module("reference.vert.spv"), fragment = module("pervertex.frag.spv"), producerShader = module("args.comp.spv");
 		auto graphicsPipeline = [&](VkShaderModule vertex) {
+			// Restart needs a strip here: list restart would require primitiveTopologyListRestart.
 			VkPipelineShaderStageCreateInfo stages[2]{{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
 			stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
 			stages[0].module = vertex;
@@ -330,7 +344,12 @@ int main(int argc, char** argv) {
 			stages[1].pName = "main";
 			VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
 			VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-			assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+			assembly.topology = restart ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+			assembly.primitiveRestartEnable = restart && !dynamicRestart;
+			VkDynamicState dynamicState = VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE;
+			VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+			dynamic.dynamicStateCount = dynamicRestart ? 1 : 0;
+			dynamic.pDynamicStates = &dynamicState;
 			VkViewport viewport{0, 0, float(kSide), float(kSide), 0, 1};
 			VkRect2D scissor{{0, 0}, {kSide, kSide}};
 			VkPipelineViewportStateCreateInfo viewportState{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
@@ -366,6 +385,7 @@ int main(int argc, char** argv) {
 			info.pRasterizationState = &raster;
 			info.pMultisampleState = &multisample;
 			info.pColorBlendState = &blend;
+			info.pDynamicState = &dynamic;
 			info.layout = graphicsLayout;
 			info.renderPass = renderPass;
 			VkPipeline result = VK_NULL_HANDLE;
@@ -399,9 +419,8 @@ int main(int argc, char** argv) {
 		// Staging layout: indices from byte 16, arguments at 256 (stride 32), Count at 384.
 		auto fillStaging = [&](const Scenario& s) {
 			memset(staging.data, 0, kWorkSize);
-			const uint32_t sources[6] = {10, 11, 12, 12, 13, 10};
-			for (uint32_t i = 0; i < 6 && indexed; ++i) {
-				uint32_t index = uint32_t(int32_t(sources[i]) - base.base);
+			for (uint32_t i = 0; i < sources.size() && indexed; ++i) {
+				uint32_t index = sources[i] == UINT32_MAX ? marker : uint32_t(int32_t(sources[i]) - base.base);
 				memcpy(staging.data + kIndexOffset + (base.first + i) * indexSize, &index, indexSize);
 			}
 			for (uint32_t i = 0; i < 2; ++i) {
@@ -422,11 +441,11 @@ int main(int argc, char** argv) {
 		};
 		auto expectedRecords = [&](const Scenario& s) {
 			std::vector<std::array<uint32_t, 4>> records;
-			const uint32_t sources[6] = {10, 11, 12, 12, 13, 10};
+			// A restart marker never invokes the vertex shader.
 			for (auto& [drawId, a] : executed(s))
 				for (uint32_t k = 0; k < a.instances; ++k)
 					for (uint32_t j = 0; j < a.count; ++j)
-						records.push_back({indexed ? sources[j] : a.first + j, a.firstInstance + k, drawId | (a.firstInstance << 16), indexed ? uint32_t(a.base) : a.first});
+						if (!indexed || sources[j] != UINT32_MAX || !restartOn) records.push_back({indexed ? (sources[j] == UINT32_MAX ? marker + uint32_t(a.base) : sources[j]) : a.first + j, a.firstInstance + k, drawId | (a.firstInstance << 16), indexed ? uint32_t(a.base) : a.first});
 			std::sort(records.begin(), records.end());
 			return records;
 		};
@@ -472,6 +491,7 @@ int main(int argc, char** argv) {
 			vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, referenceRun ? referencePipeline : indirectPipeline);
 			vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsLayout, 0, 1, &sets[0], 0, nullptr);
 			if (indexed) vkCmdBindIndexBuffer(cb, work.buffer, kIndexOffset, indexType);
+			if (dynamicRestart) vkCmdSetPrimitiveRestartEnableEXT(cb, restartOn);
 			if (referenceRun) {
 				for (auto& [drawId, a] : executed(s)) {
 					vkCmdPushConstants(cb, graphicsLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 4, &drawId);
@@ -541,9 +561,8 @@ int main(int argc, char** argv) {
 		// original vertex colours in order, blended at alpha 0.5 over the zero clear.
 		auto sampleOracle = [&](const Scenario& s, const std::vector<uint8_t>& image, uint32_t& samples) {
 			auto draws = executed(s);
-			if (draws.size() != 1) { return true; }
+			if (draws.size() != 1 || restart) { return true; }
 			auto& [drawId, a] = draws[0];
-			const uint32_t sources[6] = {10, 11, 12, 12, 13, 10};
 			const float corners[14][2] = {{4, 4}, {4, 4}, {4, 4}, {4, 4}, {-0.8f, -0.8f}, {0.8f, -0.8f}, {0.8f, 0.8f}, {0.8f, 0.8f}, {-0.8f, 0.8f}, {-0.8f, -0.8f}, {-0.8f, -0.8f}, {0.8f, -0.8f}, {0.8f, 0.8f}, {-0.8f, 0.8f}};
 			bool ok = true;
 			for (uint32_t k = 0; k < a.instances; ++k) {
