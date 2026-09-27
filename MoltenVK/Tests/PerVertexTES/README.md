@@ -1,31 +1,78 @@
-# Internal TES PerVertex integration test
+# TES PerVertex tests: GPU-generated triangle topology
 
-This is a compile-time fixture pilot, not generic Vulkan tessellation support. Production CMake and Xcode builds never define `MVK_TEST_TES_PERVERTEX_FIXTURE` or link `EnableTestDevice.mm`. The public pipeline gate and macOS barycentric device gate remain closed.
+This is a test-only admission, not generic Vulkan tessellation support. Production CMake and Xcode builds never define `MVK_TEST_TES_PERVERTEX_ADMISSION` or link `EnableTestDevice.mm`. The public pipeline gate and the macOS barycentric device gate stay closed.
+
+## Admitted scope
+
+A PerVertexKHR pipeline with tessellation is admitted only for:
+
+- triangles, equal spacing, `cw` or `ccw`, no point mode;
+- three input and output control points, and the default upper-left domain origin (no `VkPipelineTessellationDomainOriginStateCreateInfo`);
+- TCS and TES without descriptor resources, because the float32 TessLevel ABI excludes Metal argument buffers;
+- vertex inputs without divisors, static state, a single view and a single sample;
+- no pipeline cache and no specialization;
+- direct non-indexed draws of one instance with `firstVertex`, `firstInstance` and DrawID equal to 0.
+
+Any other pipeline mode returns `VK_ERROR_FEATURE_NOT_PRESENT` at `vkCreateGraphicsPipelines`. Any other draw fails at `vkEndCommandBuffer`, before submission.
+
+## Execution
+
+1. **TCS.** VS and TCS run in compute. The TCS is compiled with SPIRV-Cross `tessellation_factors_float32`, so it writes the exact float32 levels (`outer[4]`, `inner[2]`, 24 bytes per patch). Metal's half factors would round `nextafter(1, +inf)` down to level 1.
+2. **Topology.** `perVertexTessTopology` classifies each patch on the GPU:
+   - a patch is discarded when one of its first three outer levels is ≤ 0 or NaN;
+   - otherwise each level is clamped to `[1, maxTessellationGenerationLevel]` and rounded up;
+   - uniform levels 1, 2 and 3 emit the Metal topologies (1, 6 and 13 triangles) that the ordinary Vulkan oracles proved on M4;
+   - the corner order is clockwise in (u,v) and reversed for `ccw`, as Vulkan specifies for the upper-left origin;
+   - a serial prefix assigns patch offsets.
+3. **Refusal.** Any other level (non-uniform, above 3, NaN inner) refuses the whole draw: nothing is captured or replayed. The submission reports `VK_ERROR_DEVICE_LOST` in `finish()`, before signalling its fence. The VS and TCS of that draw have already run.
+4. **Capture and replay.** TES runs in compute over the generated corner records, one per triangle corner. Vulkan allows more than one TES invocation per unique vertex. The replay draws the GPU-written count indirectly.
+5. **Capacity.** Scratch is reserved before submission for the proven maximum of 39 records per patch, including the float32 levels and the plan buffer. Every allocation is transactional.
+6. **Synchronization.** Compute buffer barriers separate VS, TCS, the generator phases and TES. Ending compute makes the tracked scratch visible to the restarted render pass.
+
+## Oracles (`topology.cpp`)
+
+Positions and levels are vertex attributes that the GPU copies into a host-zeroed buffer earlier in the command buffer. For each scenario the test checks:
+
+- **Ordinary pipeline.** The PerVertex replay must match the ordinary hardware TES pipeline in coverage and interpolated nonlinear TES values (tolerance 2/255).
+- **Barycentric order.** Every covered pixel must show that PerVertexKHR follows the BaryCoordKHR order, which is Vulkan's only ordering requirement for tessellation.
+- **CPU model.** Every triangle is sampled against an independent CPU model of the ordered topology.
+- **Negative control.** A corner-swapped fragment must fail that model.
+
+Scenarios cover:
+
+- levels 1, 2 and 3;
+- `nextafter(1, +inf)`, rendered at level 2 like an exact 2.0 while the ordinary half path still renders level 1;
+- a patch discarded by a zero or a NaN outer level, placed between patches with different levels;
+- clamped fractional levels;
+- back-face culling with a mirrored patch;
+- both windings;
+- level 4, non-uniform levels and a NaN inner level, which must be refused with `VK_ERROR_DEVICE_LOST` and no pixel.
+
+`main.cpp` keeps the earlier pilot checks that still apply: the factor-1 fixture with the ordered, swapped and wrong-patch fragments, the compute-bind recording guards, and the refusals for cache, patch size, specialization, instances, first vertex, indexed draws and the no-admission build.
 
 ## Reproduce
 
-From the MoltenVK root, on a Mac with Metal and non-uniform compute dispatch, with CMake/Ninja, Xcode Metal tools, glslangValidator and SPIR-V Tools on PATH:
+From the MoltenVK root, on a Mac with Metal, with the sources committed:
 
 ```sh
-bash MoltenVK/Tests/run-pervertex-tes-tests.sh /private/tmp/mvk-tes-repro
+bash MoltenVK/Tests/run-pervertex-tes-tests.sh /private/tmp/mvk-tes-topology
 ```
 
-The runner builds arm64 from this checkout and its `External/SPIRV-Cross` link. It must run with access to Metal (the restricted agent sandbox exposes no device). It builds three variants sequentially: exact fixture admission + test device adapter; no fixture admission + test device adapter to test pipeline refusal; neither admission nor adapter to test the public device gate. It preserves each dylib and logs with Metal API/GPU validation. It never edits MVKDevice.mm.
+The runner builds from `HEAD`:
 
-## Fixture contract
+- three Debug arm64 libraries: development, without admission, and shipping;
+- three generator mutations that must be caught: reversed winding, a wrong level-3 interior, and ignored patch offsets.
 
-The generated header compares complete SPIR-V word arrays for VS, TCS, TES and the three test fragments. No hash-only admission, specialization, alternate entry point, dynamic state, vertex attributes, multiview, multisampling or domain override is admitted. Vulkan pipeline caches are explicitly refused because the persistent options serialization does not yet include `tese_as_compute`; that format must be versioned before production use. The shader-module in-memory cache compares the complete MSL option struct and remains safe for this pilot.
+It also checks that the float32 TessLevel ABI is live in the generated TCS and TES, and writes `EVIDENCE.sha256` and `SOURCE-INDEX.txt`.
 
-One direct non-indexed `vkCmdDraw(6, 1, 0, 0)` emits two three-control-point patches. The actual VS generates two separated triangles, the actual TCS copies positions and writes all four triangle levels to 1, and the exact triangle/equal-spacing/ccw TES consumes TCS output and writes domain coordinates plus distinct patch identity. DrawID must be zero. Other nonempty draw shapes fail recording; zero-work commands retain Vulkan no-op behavior. Existing indirect guards remain intact.
+## Limits
 
-CPU-generated invocation/replay tables are **test-only scaffolding**: exact TCS words, with no specialization or resources, establish factor 1. No general TCS-factor inference or production topology admission is implemented. TES reads real TCS buffers on the GPU. Compute barriers separate VS/TCS/TES, then ending compute makes tracked scratch visible to the restarted render pass.
+Proven on one Apple M4 Pro (macOS 27.2, Xcode 27.1) only. Not supported:
 
-For N=6, patch count=2: invocations use 16+32N bytes (208); header = count plus three zero words; record = float xyz bits, patch ID, dense output record ID, three zero words. Capture = N×TES stride; occurrences = 8N; primitive indices = 4N; optional barycentric corners = 4N. VS/TCS intermediate buffers use declared device component limits, computed in uint64 and checked against Metal buffer limits. All ten allocations are reserved before submission and released on any reservation failure. Slots 7..11 extend existing scratch with invocations, VS output, TCS vertex output, TCS patch output, TCS factors. TES implicit binding allocation and compiler collision checks are reused.
+- other levels, spacings, domains or domain origins;
+- point mode;
+- descriptors in TCS/TES, instancing, multiview, indexed or indirect draws;
+- pipeline caches;
+- other GPU families.
 
-## Proof and limits
-
-`evidence-20260927/README.md` records the passing M4 Pro run and source fingerprints. Four asymmetric pixels across both patches are green for `ordered.frag`; swapping corners produces red. Patch identity is independently checked from screen X, and the wrong-patch oracle produces red. Three pixels outside the triangles remain black. Ordinary hardware TES controls pass on both admission configurations.
-
-Refusals cover changed factor-2 TCS, cache, specialization, patch size, count, instances, firstVertex and indexed draw; no rejected command buffer is submitted. With explicit prefill=0, the runner also binds the TES graphics pipeline followed by a valid compute pipeline before the render pass: valid draws still render green, while nonzero firstVertex or firstInstance fail at vkEndCommandBuffer. For each rejection, a separate GPU initialization/probe verifies all 1024 blue pixels survive the pending black clear, and the host readback sentinel remains untouched. `evidence-p2-compute-bind-20260927/README.md` records the failing-before/passing-after P2 regression and SHA evidence. Scratch fault injection covers every new allocation. Corrected SPIRV-Cross builtins/helper/PatchVertices regressions pass separately (3/3); the Vulkan fixture itself uses ordinary gl_PerVertex input and direct PrimitiveId. The converter's pre-existing TES-layout export WIP is required and was preserved.
-
-Remaining: replace CPU fixture topology with GPU generation from actual TCS factors and establish supported modes/capacity semantics; compatible persistent cache serialization; wider shader resources/effects, domains, factors, draws, attachment combinations and GPU families. This test proves the bounded Vulkan connection, not any of those extensions.
+Ordinary point-mode TES pipelines already fail in MoltenVK, independently of this path. The ordinary TES path keeps its half factors, so it diverges from the PerVertex path on levels that half cannot represent.
