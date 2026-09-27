@@ -1205,7 +1205,6 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 	if (getMetalFeatures().mslVersion < CompilerMSL::Options::make_msl_version(2, 4)) { return unsupported("requires MSL 2.4."); }
 	const auto* assembly = pCreateInfo->pInputAssemblyState;
 	if (!assembly || !mvkPerVertexReplayVertexCount(assembly->topology) || _dynamicStateFlags.has(MVKRenderStateFlag::PrimitiveTopology)) { return unsupported("requires a static point, line-list/strip, or triangle-list/strip/fan topology."); }
-	if (_dynamicStateFlags.has(MVKRenderStateFlag::PrimitiveRestartEnable)) { return unsupported("does not support dynamic primitive restart."); }
 	uint32_t viewMask = getRenderingCreateInfo(pCreateInfo)->viewMask;
 	if ((viewMask & (viewMask - 1)) || mvkIsAnyFlagEnabled(_flags, VK_PIPELINE_CREATE_2_VIEW_INDEX_FROM_DEVICE_INDEX_BIT)) { return unsupported("supports at most one multiview view and no device-index views."); }
 	if (pCreateInfo->pRasterizationState->polygonMode != VK_POLYGON_MODE_FILL || _dynamicStateFlags.has(MVKRenderStateFlag::PolygonMode) || _dynamicStateFlags.has(MVKRenderStateFlag::RasterizerDiscardEnable)) { return unsupported("requires static filled rasterization."); }

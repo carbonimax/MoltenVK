@@ -12,16 +12,18 @@ struct MVKPerVertexScratchRequest {
 	NSUInteger cornerSize = 0;
 	NSUInteger indexSize = 0;
 	bool restart = false;
+	bool widenUint8 = false;
 };
 
 // Individually owned allocations: the shared scratch pool cannot recover from a nil Metal buffer.
 struct MVKPerVertexScratch {
 	id<MTLBuffer> buffers[7] = {};
 	id<MTLComputePipelineState> indexPipeline = nil;
+	id<MTLComputePipelineState> widenUint8Pipeline = nil;
 	MVKPerVertexScratch() = default;
 	MVKPerVertexScratch(const MVKPerVertexScratch&) = delete;
 	MVKPerVertexScratch& operator=(const MVKPerVertexScratch&) = delete;
-	~MVKPerVertexScratch() { for (auto buffer : buffers) { [buffer release]; } [indexPipeline release]; }
+	~MVKPerVertexScratch() { for (auto buffer : buffers) { [buffer release]; } [indexPipeline release]; [widenUint8Pipeline release]; }
 
 	bool reserve(id<MTLDevice> device, const MVKPerVertexScratchRequest& request) {
 		// Indirect dispatch/draw arguments plus replay constants aligned to 256 bytes.
