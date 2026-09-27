@@ -457,7 +457,9 @@ VkResult MVKCommandBuffer::validateIndexedPerVertexAttachments() {
 
 VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t instanceCount, bool indexed) {
 	if (!_recordedPerVertexPipeline || !vertexCount || !instanceCount) { return VK_SUCCESS; }
-	bool restart = mvkPerVertexRequiresRestartAssembly(indexed, _recordedPerVertexPipeline->getStaticStateData().enable.has(MVKRenderStateEnableFlag::PrimitiveRestart));
+	// Dynamic restart can change at execution. Reserve both helper paths before submission.
+	bool dynamicRestart = indexed && _recordedPerVertexPipeline->getDynamicStateFlags().has(MVKRenderStateFlag::PrimitiveRestartEnable);
+	bool restart = mvkPerVertexRequiresRestartAssembly(indexed, dynamicRestart || _recordedPerVertexPipeline->getStaticStateData().enable.has(MVKRenderStateEnableFlag::PrimitiveRestart));
 	if (restart && !mvkCanAssemblePerVertexRestart(vertexCount, instanceCount, getMetalFeatures().indirectDrawing)) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR restart requires indirect drawing and uint32 dense capture record IDs."); }
 	if (indexed) {
 		if (!mvkPerVertexIndexSize(_recordedIndexType)) {
@@ -483,7 +485,7 @@ VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t in
 		if (restart && !mvkCanAssemblePerVertexRestart(vertexCount, uint32_t(expandedInstances), getMetalFeatures().indirectDrawing)) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR restart requires indirect drawing and uint32 dense capture record IDs."); }
 		uint64_t primitiveCount = uint64_t(mvkPerVertexPrimitiveCount(vertexCount, topology)) * expandedInstances;
 		uint64_t occurrences = primitiveCount * mvkPerVertexReplayVertexCount(topology);
-		requests[pass] = {NSUInteger(uint64_t(vertexCount) * expandedInstances * _recordedPerVertexPipeline->getPerVertexCapturedLayout().stride), NSUInteger(occurrences * 2 * sizeof(uint32_t)), NSUInteger(primitiveCount * 3 * sizeof(uint32_t)), _recordedPerVertexPipeline->usesPortableBarycentrics() ? NSUInteger(occurrences * sizeof(uint32_t)) : 0, NSUInteger(indexScratchBytes), restart};
+		requests[pass] = {NSUInteger(uint64_t(vertexCount) * expandedInstances * _recordedPerVertexPipeline->getPerVertexCapturedLayout().stride), NSUInteger(occurrences * 2 * sizeof(uint32_t)), NSUInteger(primitiveCount * 3 * sizeof(uint32_t)), _recordedPerVertexPipeline->usesPortableBarycentrics() ? NSUInteger(occurrences * sizeof(uint32_t)) : 0, NSUInteger(indexScratchBytes), restart, dynamicRestart && _recordedIndexType == VK_INDEX_TYPE_UINT8};
 	}
 	size_t firstRequest = _perVertexScratchRequests.size();
 	try {
@@ -534,6 +536,13 @@ VkResult MVKCommandBuffer::reservePerVertexScratch(const std::vector<MVKPerVerte
 		if (result != VK_SUCCESS) { return result; }
 		if (!state || !state.maxTotalThreadsPerThreadgroup || !state.threadExecutionWidth) { return reportError(VK_ERROR_INITIALIZATION_FAILED, "Portable PerVertexKHR index helper pipeline is unavailable or has invalid dispatch limits."); }
 		pending[i]->indexPipeline = [state retain];
+		if (requests[i].widenUint8) {
+			id<MTLComputePipelineState> widen = pool->getConvertUint8IndicesMTLComputePipelineState(true);
+			result = _device->getConfigurationResult();
+			if (result != VK_SUCCESS) { return result; }
+			if (!widen || !widen.maxTotalThreadsPerThreadgroup || !widen.threadExecutionWidth) { return reportError(VK_ERROR_INITIALIZATION_FAILED, "Portable PerVertexKHR uint8 helper pipeline is unavailable or has invalid dispatch limits."); }
+			pending[i]->widenUint8Pipeline = [widen retain];
+		}
 	}
 	VkResult result = _device->getConfigurationResult();
 	if (result != VK_SUCCESS) { return result; }
