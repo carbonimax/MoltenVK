@@ -17,8 +17,8 @@
  */
 
 #include "MVKPipeline.h"
-#include "MVKPerVertexReplay.h"
-#include "MVKPerVertexCapacity.h"
+#include "../Commands/MVKPerVertexReplay.h"
+#include "../Commands/MVKPerVertexCapacity.h"
 #ifdef MVK_TEST_TES_PERVERTEX_FIXTURE
 // Generated solely by MoltenVK/Tests/run-pervertex-tes-tests.sh. Never a shipping option.
 #include MVK_TEST_TES_PERVERTEX_FIXTURE
