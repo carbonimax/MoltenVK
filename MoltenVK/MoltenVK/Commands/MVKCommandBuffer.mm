@@ -257,6 +257,8 @@ VkResult MVKCommandBuffer::reset(VkCommandBufferResetFlags flags) {
 	_hasStageCounterTimestampCommand = false;
 	_lastTessellationPipeline = nullptr;
 	_recordedPerVertexPipeline = nullptr;
+	_recordedTessellationPipeline = nullptr;
+	_recordedPatchControlPoints = 0;
 	_recordedAttachmentsKnown = false;
 	_recordedRenderingError = nullptr;
 	_recordedIndexType = VK_INDEX_TYPE_MAX_ENUM;
@@ -662,7 +664,17 @@ bool MVKCommandBuffer::recordedGraphicsPipelineUsesPerVertexTessEval() const { r
 
 void MVKCommandBuffer::recordBindPipeline(MVKCmdBindPipeline* mvkBindPipeline) {
 	_lastTessellationPipeline = mvkBindPipeline->isTessellationPipeline() ? mvkBindPipeline : nullptr;
-	if (auto* graphics = mvkBindPipeline->getGraphicsPipeline()) { _recordedPerVertexPipeline = graphics->usesPerVertexInputBuffer() ? graphics : nullptr; }
+	if (auto* graphics = mvkBindPipeline->getGraphicsPipeline()) {
+		_recordedPerVertexPipeline = graphics->usesPerVertexInputBuffer() ? graphics : nullptr;
+		bool ordinaryTessellation = graphics->isTessellationPipeline() && !graphics->usesPerVertexTessEval() && !graphics->usesPerVertexInputBuffer();
+		_recordedTessellationPipeline = ordinaryTessellation ? graphics : nullptr;
+	}
+}
+
+uint32_t MVKCommandBuffer::getRecordedPatchControlPoints() const {
+	if (!_recordedTessellationPipeline) { return 0; }
+	bool dynamic = _recordedTessellationPipeline->getDynamicStateFlags().has(MVKRenderStateFlag::PatchControlPoints);
+	return dynamic ? _recordedPatchControlPoints : _recordedTessellationPipeline->getStaticStateData().patchControlPoints;
 }
 
 

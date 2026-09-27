@@ -564,6 +564,7 @@ protected:
 class MVKCmdSetPatchControlPoints : public MVKSingleValueCommand<uint32_t> {
 
 public:
+	VkResult setContent(MVKCommandBuffer* cmdBuff, uint32_t patchControlPoints);
 	void encode(MVKCommandEncoder* cmdEncoder) override;
 
 protected:

@@ -111,6 +111,8 @@ void MVKCmdBindIndexBuffer::encode(MVKCommandEncoder* cmdEncoder) {
 }
 
 
+static VkResult recordTessPatchCount(MVKCommandBuffer* cmdBuff, uint32_t vertexCount, uint32_t instanceCount);
+
 #pragma mark -
 #pragma mark MVKCmdDraw
 
@@ -132,7 +134,8 @@ VkResult MVKCmdDraw::setContent(MVKCommandBuffer* cmdBuff,
     }
 
 	if (cmdBuff->recordedGraphicsPipelineUsesPerVertexTessEval() && vertexCount && instanceCount && (firstVertex || firstInstance || drawIndex)) { return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "PerVertex TES test requires zero firstVertex, firstInstance and DrawID."); }
-	return cmdBuff->recordPerVertexDraw(_vertexCount, _instanceCount);
+	VkResult result = recordTessPatchCount(cmdBuff, _vertexCount, _instanceCount);
+	return result == VK_SUCCESS ? cmdBuff->recordPerVertexDraw(_vertexCount, _instanceCount) : result;
 }
 
 // Populates and encodes a MVKCmdDrawIndexedIndirect command, after populating indexed indirect buffers.
@@ -474,11 +477,29 @@ static constexpr bool mvkFitsFloat32TessLevels(uint64_t patchCount, uint64_t max
 static_assert(mvkFitsFloat32TessLevels(178956970, UINT32_MAX));
 static_assert(!mvkFitsFloat32TessLevels(178956971, UINT32_MAX));
 
+static constexpr bool mvkFitsTessPatchCount(uint64_t patchCount, bool float32Levels, uint64_t maxBufferSize) {
+	return patchCount <= UINT32_MAX && (!float32Levels || mvkFitsFloat32TessLevels(patchCount, maxBufferSize));
+}
+
+// Without prefill, encoding runs during vkQueueSubmit, possibly after it returned: recordTessPatchCount() refuses
+// direct and indexed draws while recording, so that this check cannot silently omit an accepted draw.
 static bool validateTessPatchCount(MVKCommandEncoder* cmdEncoder, uint64_t patchCount, bool float32Levels) {
-	if (patchCount <= UINT32_MAX && (!float32Levels || mvkFitsFloat32TessLevels(patchCount, cmdEncoder->getMetalFeatures().maxMTLBufferSize))) { return true; }
+	if (mvkFitsTessPatchCount(patchCount, float32Levels, cmdEncoder->getMetalFeatures().maxMTLBufferSize)) { return true; }
 	auto* cmdBuffer = cmdEncoder->_cmdBuffer;
 	cmdBuffer->setConfigurationResult(cmdBuffer->reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Tessellation level scratch exceeds Metal buffer limits."));
 	return false;
+}
+
+// The check of validateTessPatchCount(), while recording a direct or indexed draw of an ordinary tessellation pipeline.
+// A failure stops the command from being recorded and fails vkEndCommandBuffer. Unknown dynamic control points are left
+// to encoding.
+static VkResult recordTessPatchCount(MVKCommandBuffer* cmdBuff, uint32_t vertexCount, uint32_t instanceCount) {
+	auto* pipeline = cmdBuff->getRecordedTessellationPipeline();
+	uint32_t controlPoints = cmdBuff->getRecordedPatchControlPoints();
+	if (!pipeline || !controlPoints || !vertexCount || !instanceCount) { return VK_SUCCESS; }
+	uint64_t patchCount = uint64_t(mvkCeilingDivide(vertexCount, controlPoints)) * instanceCount;
+	if (mvkFitsTessPatchCount(patchCount, pipeline->usesFloat32TessLevels(), cmdBuff->getMetalFeatures().maxMTLBufferSize)) { return VK_SUCCESS; }
+	return cmdBuff->reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Tessellation level scratch exceeds Metal buffer limits.");
 }
 
 void MVKCmdDraw::encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline) {
@@ -709,7 +730,8 @@ VkResult MVKCmdDrawIndexed::setContent(MVKCommandBuffer* cmdBuff,
         return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCmdDrawIndexed(): The current device does not support drawing with a non-zero base vertex.");
     }
 
-	return cmdBuff->recordPerVertexDraw(_indexCount, _instanceCount, true);
+	VkResult result = recordTessPatchCount(cmdBuff, _indexCount, _instanceCount);
+	return result == VK_SUCCESS ? cmdBuff->recordPerVertexDraw(_indexCount, _instanceCount, true) : result;
 }
 
 // Populates and encodes a MVKCmdDrawIndexedIndirect command, after populating an indexed indirect buffer.
@@ -989,6 +1011,9 @@ void MVKCmdDrawIndexed::encode(MVKCommandEncoder* cmdEncoder) {
 // TODO: Consider breaking up such draws using different base instance values. But this will
 // require yet more munging of the indirect buffers...
 static const uint32_t kMVKMaxDrawIndirectVertexCount = 1024 * KIBI;
+// Indirect tessellation draws size their scratch for this fixed vertex count: even with one control point per patch,
+// its float32 levels fit any Metal buffer limit of at least 256 MiB, so validateTessPatchCount() cannot omit them.
+static_assert(mvkFitsTessPatchCount(kMVKMaxDrawIndirectVertexCount, true, 256 * MEBI));
 
 static const MVKMTLBufferAllocation* encodeIndirectCountConversion(
 		MVKCommandEncoder* cmdEncoder,
