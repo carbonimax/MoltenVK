@@ -1,3 +1,6 @@
+#!/bin/bash
+# Copyright (c) 2026 Jean-Philippe Meunier
+# SPDX-License-Identifier: Apache-2.0
 # GPU-generated PerVertexKHR TES topology tests (test-only admission) with Metal API/GPU validation.
 # Builds from the committed HEAD of this checkout: development, no-admission and shipping libraries, plus
 # three generator mutations that must fail. Stops at the first unexpected result.
