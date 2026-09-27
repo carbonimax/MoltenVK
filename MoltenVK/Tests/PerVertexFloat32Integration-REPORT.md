@@ -78,6 +78,21 @@ MTL_SHADER_VALIDATION=0 gtimeout -k 2 60 /private/tmp/pervertex-float32-replay/t
 
 Le contrôle `wrong-patch` doit sortir avec le code 2 et 336 pixels rouges ; les sept autres avec 0. Claude a reproduit l'absence de sortie du dessin TES ordinaire indirect sous GPU Validation avant et après son correctif : le dernier PASS ne prouve donc que l'API Validation pour ce cas.
 
+## Rejeu M4 du refus scratch Vulkan sur `c1a766a9`
+
+Sur le HEAD propre `c1a766a96321bfe0bf089f3e4c185d7f98936412`, le runner TES reconstruit la bibliothèque de développement arm64 Debug SHA-256 `3726875ddd492abaf39bb14db12e056ffb53c1b26e14f4cfa2766683fa6dae69`. Sous Metal API/GPU Validation, la matrice passe **84/84**. Les deux nouveaux cas, direct et indexé, demandent chacun 1 739 461 974 patches avec `maxBufferLength=41747087360` et observent `vkEndCommandBuffer = VK_ERROR_OUT_OF_DEVICE_MEMORY (-2)` avant toute soumission. Ce sont des refus Vulkan, pas seulement des contrôles arithmétiques hôtes.
+
+La matrice indirecte rejouée sur **cette même bibliothèque** passe **121/121**. Les trois cas mixtes (indirect puis TES, TES puis indirect, facteur 3) passent avec 24/24 invocations et zéro pixel rouge TES. Le témoin au mauvais patch sort avec le code 2 et 336 pixels rouges. Les images produites sont identiques octet par octet à celles du premier jalon float32 archivé. Les journaux et bibliothèques se trouvent dans `build/integration-float32-r12/{tes,indirect,mixed}/`, ignoré par Git. Les trois manifestes SHA-256 relatifs ont été vérifiés après archivage : **781/781**, **372/372**, **34/34**.
+
+Reproduction depuis ce worktree, avec le même pin SPIRV-Cross et le témoin « avant » indirect du précédent rapport :
+
+```sh
+bash MoltenVK/Tests/run-pervertex-tes-tests.sh build/integration-float32-r12-recheck/tes
+bash MoltenVK/Tests/run-pervertex-indirect-gpu-tests.sh build/integration-float32-r12-recheck/tes/dev/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib ../MoltenVK-indirect-gpu/build/indirect-gpu/lib-before/arm64/MoltenVK/libMoltenVK.1.4.3.dylib build/integration-float32-r12-recheck/indirect
+```
+
+Les commandes mixtes sont celles de `PerVertexTopologyIntegration-REPORT.md` avec la bibliothèque `build/integration-float32-r12/tes/dev/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib` et les shaders dans `build/integration-float32-r12/mixed/`. Les quatre journaux `.log` et images `.rgba` correspondants y sont archivés. La limite déjà décrite pour le TES ordinaire indirect sous GPU Validation reste inchangée.
+
 ## Travail restant
 
-Tester au niveau Vulkan le refus du nouveau scratch float32 hors capacité, puis mesurer le coût du dispatch supplémentaire. La preuve est M4 seulement ; M1/M3 et le mesh restent ouverts. L'indirect conserve sa borne R et aucune continuation Vulkan générale n'est implémentée. Une revue Astra indépendante des SHA finaux reste requise avant toute proposition upstream.
+Mesurer le coût du dispatch supplémentaire. La preuve est M4 seulement ; M1/M3 et le mesh restent ouverts. L'indirect conserve sa borne R et aucune continuation Vulkan générale n'est implémentée. Une revue Astra indépendante des SHA finaux reste requise avant toute proposition upstream.
