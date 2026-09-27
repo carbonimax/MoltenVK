@@ -16,6 +16,8 @@ struct Trace {
     MTLRegion region{};
     id directState = nil, indexedState = nil;
     uint64_t offsets[6]{};
+    NSUInteger strides[6]{};
+    uint32_t computeOffsets = 0, renderOffsets = 0;
     bool replay = false;
 } trace;
 @interface CPUBuffer : NSObject { @public std::vector<uint32_t> words; }
@@ -38,8 +40,10 @@ static id mainState;
 @interface CPUEncoder : NSObject
 @end
 @implementation CPUEncoder
-- (void)setBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index { trace.offsets[index] = offset; }
-- (void)setVertexBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index { trace.offsets[index] = offset; }
+- (void)setBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index { trace.offsets[index] = offset; trace.strides[index] = MTLAttributeStrideStatic; ++trace.computeOffsets; }
+- (void)setBufferOffset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index { trace.offsets[index] = offset; trace.strides[index] = stride; ++trace.computeOffsets; }
+- (void)setVertexBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index { trace.offsets[index] = offset; trace.strides[index] = MTLAttributeStrideStatic; ++trace.renderOffsets; }
+- (void)setVertexBufferOffset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index { trace.offsets[index] = offset; trace.strides[index] = stride; ++trace.renderOffsets; }
 - (void)setRenderPipelineState:(id)state { trace.replay = state == mainState; if (!trace.replay) trace.directState = state; }
 - (void)drawPrimitives:(MTLPrimitiveType)type vertexStart:(NSUInteger)start vertexCount:(NSUInteger)count instanceCount:(NSUInteger)instances baseInstance:(NSUInteger)base {
     if (trace.replay) { trace.replayInstances = uint32_t(instances); trace.replayBase = uint32_t(base); }
@@ -228,11 +232,17 @@ int main() {
         encoder.subpass.views = 2;
         encodePerVertexInput(&encoder, &pipeline, 3, UINT32_MAX, 0, 0, 0);
         assert(buffer.result == VK_ERROR_OUT_OF_DEVICE_MEMORY && trace.directInstances == 0 && trace.replayInstances == 0);
-        for (bool dynamic : {false, true}) for (Stage stage : {kMVKGraphicsStageVertex, kMVKGraphicsStageRasterization}) {
+        for (bool dynamic : {false, true}) for (Stage stage : {kMVKGraphicsStageVertex, kMVKGraphicsStageRasterization}) for (uint32_t firstInstance : {0u, 7u, UINT32_MAX}) for (uint32_t boundStride : {0u, 24u, 48u}) {
+            trace = {};
             pipeline.flags.dynamic = dynamic;
-            uint64_t stride = dynamic ? 24 : 16;
-            encoder.state.offsetZeroDivisorVertexBuffers(encoder, stage, &pipeline, UINT32_MAX);
-            assert(trace.offsets[0] == 32 + uint64_t(UINT32_MAX) * stride && trace.offsets[5] == 32 + 64 + uint64_t(UINT32_MAX) * stride);
+            encoder.state._vkGraphics._vertexBuffers[0].stride = boundStride;
+            uint64_t stride = dynamic ? boundStride : 16;
+            encoder.state.offsetZeroDivisorVertexBuffers(encoder, stage, &pipeline, firstInstance);
+            assert(trace.offsets[0] == 32 + uint64_t(firstInstance) * stride && trace.offsets[5] == 32 + 64 + uint64_t(firstInstance) * stride);
+            NSUInteger attributeStride = dynamic ? boundStride : MTLAttributeStrideStatic;
+            assert(trace.strides[0] == attributeStride && trace.strides[5] == attributeStride);
+            assert(trace.computeOffsets == (stage == kMVKGraphicsStageVertex ? 2u : 0u));
+            assert(trace.renderOffsets == (stage == kMVKGraphicsStageRasterization ? 2u : 0u));
         }
         [input release];
         for (auto b : encoder.scratch.buffers) [b release];
