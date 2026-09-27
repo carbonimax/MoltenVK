@@ -42,7 +42,7 @@ static bool hasExtension(const std::vector<VkExtensionProperties>& extensions, c
 
 constexpr uint32_t kSide = 64;
 constexpr VkDeviceSize kWorkSize = 512, kIndexOffset = 16, kArgsOffset = 256, kCountOffset = 384, kStride = 32;
-constexpr uint32_t kMaxRecords = 256;
+constexpr uint32_t kMaxRecords = 1u << 18;
 
 // first is firstVertex (non-indexed) or firstIndex (indexed); base is vertexOffset.
 struct Draw { uint32_t count, instances, first; int32_t base; uint32_t firstInstance; };
@@ -99,7 +99,7 @@ static Buffer makeBuffer(const Device& d, VkDeviceSize size, VkBufferUsageFlags 
 
 int main(int argc, char** argv) {
 	try {
-		if (argc != 7) throw std::runtime_error("Usage: pervertex-indirect-gpu shader-dir draw|indexed|draw-count|indexed-count u8|u16|u32 decisive|zero|two|repeat|overflow|overflow-second|huge|index-oob|restart|restart-two|restart-overflow|restart-dynamic-on|restart-dynamic-off update|copy|compute output-prefix");
+		if (argc != 7) throw std::runtime_error("Usage: pervertex-indirect-gpu shader-dir draw|indexed|draw-count|indexed-count u8|u16|u32 decisive|zero|two|repeat|overflow|overflow-second|huge|index-oob|restart|restart-two|restart-overflow|restart-dynamic-on|restart-dynamic-off|stress update|copy|compute output-prefix");
 		const std::string shaders = argv[1], form = argv[2], indexName = argv[3], scenarioName = argv[4], producer = argv[5], prefix = argv[6];
 		const bool indexed = form == "indexed" || form == "indexed-count";
 		const bool counted = form == "draw-count" || form == "indexed-count";
@@ -111,6 +111,11 @@ int main(int argc, char** argv) {
 		const VkIndexType indexType = indexSize == 1 ? VK_INDEX_TYPE_UINT8_KHR : indexSize == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
 		// Restart scenarios draw an indexed triangle strip split by the index type's restart marker.
 		const bool restart = scenarioName.rfind("restart", 0) == 0;
+		// PERVERTEX_TEST_TOPOLOGY selects another portable topology for non-restart scenarios.
+		const char* topologyName = getenv("PERVERTEX_TEST_TOPOLOGY");
+		const std::string topologyText = topologyName ? topologyName : "triangle-list";
+		const VkPrimitiveTopology topology = restart ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : topologyText == "point-list" ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST : topologyText == "line-list" ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : topologyText == "line-strip" ? VK_PRIMITIVE_TOPOLOGY_LINE_STRIP : topologyText == "triangle-strip" ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : topologyText == "triangle-fan" ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+		if (topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST && topologyText != "triangle-list") throw std::runtime_error("Unknown topology");
 		// Dynamic restart state: the pipeline may restart, so restart scratch is reserved either way.
 		const bool dynamicRestart = scenarioName.rfind("restart-dynamic", 0) == 0, restartOn = scenarioName != "restart-dynamic-off";
 		if (restart && !indexed) throw std::runtime_error("restart scenarios need an indexed form");
@@ -125,6 +130,8 @@ int main(int argc, char** argv) {
 			if (name == "zero") { s.draws = {counted ? base : empty, counted ? base : empty}; s.gpuCount = 0; }
 			else if (name == "two" || name == "overflow-second" || name == "restart-two") { s.draws = {base, base}; s.gpuCount = 7; }
 			else if (name == "restart-overflow") { s.expectLost = true; }
+			// Two heavy overlapping draws: draw 1 reuses the scratch that draw 0's replay reads, with different values.
+			else if (name == "stress") { s.draws = {base, base}; s.draws[0].instances = s.draws[1].instances = 20000; s.gpuCount = 2; }
 			else if (name == "huge") { s.draws[0].instances = UINT32_MAX; s.expectLost = true; }
 			else if (name == "index-oob") { if (!indexed) throw std::runtime_error("index-oob needs an indexed form"); s.draws[0].first = 100000; s.expectLost = true; }
 			else if (name == "overflow") { s.expectLost = true; }
@@ -212,7 +219,7 @@ int main(int argc, char** argv) {
 		vkGetDeviceQueue(d.device, d.family, 0, &d.queue);
 		VkPhysicalDeviceProperties properties{};
 		vkGetPhysicalDeviceProperties(d.physical, &properties);
-		std::printf("DEVICE=%s form=%s index=%s scenario=%s producer=%s\n", properties.deviceName, form.c_str(), indexName.c_str(), scenarioName.c_str(), producer.c_str());
+		std::printf("DEVICE=%s form=%s index=%s scenario=%s producer=%s topology=%s\n", properties.deviceName, form.c_str(), indexName.c_str(), scenarioName.c_str(), producer.c_str(), restart ? "triangle-strip" : topologyText.c_str());
 
 		// Colour attachment and readback.
 		VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -344,7 +351,7 @@ int main(int argc, char** argv) {
 			stages[1].pName = "main";
 			VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
 			VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-			assembly.topology = restart ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+			assembly.topology = topology;
 			assembly.primitiveRestartEnable = restart && !dynamicRestart;
 			VkDynamicState dynamicState = VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE;
 			VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
@@ -561,7 +568,7 @@ int main(int argc, char** argv) {
 		// original vertex colours in order, blended at alpha 0.5 over the zero clear.
 		auto sampleOracle = [&](const Scenario& s, const std::vector<uint8_t>& image, uint32_t& samples) {
 			auto draws = executed(s);
-			if (draws.size() != 1 || restart) { return true; }
+			if (draws.size() != 1 || restart || topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) { return true; }
 			auto& [drawId, a] = draws[0];
 			const float corners[14][2] = {{4, 4}, {4, 4}, {4, 4}, {4, 4}, {-0.8f, -0.8f}, {0.8f, -0.8f}, {0.8f, 0.8f}, {0.8f, 0.8f}, {-0.8f, 0.8f}, {-0.8f, -0.8f}, {-0.8f, -0.8f}, {0.8f, -0.8f}, {0.8f, 0.8f}, {-0.8f, 0.8f}};
 			bool ok = true;
