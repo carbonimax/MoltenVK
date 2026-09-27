@@ -30,6 +30,8 @@ compile topology.tesc topology.tesc.spv
 compile topology.tesc descriptor.tesc.spv -DDESCRIPTOR
 compile topology.tese ccw.tese.spv
 compile topology.tese cw.tese.spv -DCW
+compile topology.tese capture-ccw.tese.spv -DCAPTURE
+compile topology.tese capture-cw.tese.spv -DCAPTURE -DCW
 compile topology.tese quads.tese.spv -DQUADS
 compile topology.tese fractional.tese.spv -DFRACTIONAL
 compile topology.tese points.tese.spv -DPOINTS
@@ -40,6 +42,9 @@ compile interp.frag interp-resources.frag.spv -DRESOURCES
 compile flat-ordered.frag flat-ordered.frag.spv
 compile flat-ordered.frag flat-swapped.frag.spv -DSWAP
 compile consistency.frag consistency.frag.spv
+compile coords.frag coords.frag.spv
+compile primitive-id.frag primitive-id.frag.spv
+compile primitive-id.frag primitive-id-ordinary.frag.spv -DORDINARY
 # Host fault injection for the eleven TES scratch allocations.
 xcrun clang++ -std=c++17 -fblocks -Wall -Wextra -Werror -Wno-return-type -I"$root/MoltenVK/MoltenVK/Commands" -I"$root/MoltenVK/MoltenVK/GPUObjects" -I"$root/External/Vulkan-Headers/include" "$tes/ScratchTests.mm" -framework Foundation -framework Metal -o "$output/tes-scratch"
 "$output/tes-scratch" | tee "$output/scratch.log"
@@ -84,7 +89,7 @@ check_log() { # log expected-exit actual-exit required...
 	for required in "$@"; do grep -qE -- "$required" "$log" || { verdict=FAIL; echo "    missing: $required"; }; done
 	cases=$((cases + 1))
 	printf '%-52s exit=%s %s\n' "$(basename "$log" .log)" "$actual" "$verdict"
-	grep -E '^  (ordinary vs|barycentric|CPU model)|^pipeline rejection|^Pixel|PASS|FAIL' "$log" | grep -v 'Validation Enabled' | sed 's/^/    /' | head -8 || true
+	grep -E '^  (ordinary vs|barycentric|CPU model|tessellation coordinates|seam|fragment gl_PrimitiveID|VS storage)|^pipeline rejection|^Pixel|PASS|FAIL' "$log" | grep -v 'Validation Enabled' | sed 's/^/    /' | head -12 || true
 	if [[ $verdict != PASS ]]; then echo "STOP: inspect $log before any further GPU work"; exit 1; fi
 }
 env_run() { env -u DYLD_LIBRARY_PATH -u DYLD_INSERT_LIBRARIES MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MVK_CONFIG_LOG_LEVEL=2 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS="${PREFILL:-0}" "$@"; }
@@ -98,10 +103,12 @@ pilot() { # library mode fragment [control]
 	(cd "$output/runs" && env_run gtimeout -k 2 60 "$output/$1/main" "$output/shaders/triangle.vert.spv" "$output/shaders/${4:-triangle.tesc}.spv" "$output/shaders/ordered.tese.spv" "$output/shaders/$3.spv" "$2" "$output/shaders/noop.comp.spv") > "$output/runs/$name.log" 2>&1 || rc=$?
 	check_log "$output/runs/$name.log" 0 "$rc"
 }
-# 1. Topology from GPU-written float32 levels, both windings, against ordinary TES and the CPU model.
+# 1. Topology from GPU-written float32 levels, both windings, against ordinary TES, the CPU model, the hardware
+# tessellation coordinates and Vulkan's fragment gl_PrimitiveID; seams share an edge between two patches.
 for winding in ccw cw; do
-	for scenario in f1 f2 f3 next mixed nan fraction cull drawid; do topology dev "$scenario" "$winding" 0 "TES_TOPOLOGY PASS"; done
+	for scenario in f1 f2 f3 next mixed nan fraction cull drawid seam1 seam2 seam3; do topology dev "$scenario" "$winding" 0 "TES_TOPOLOGY PASS"; done
 	topology dev resources "$winding" 0 "TES_TOPOLOGY PASS" "VS storage counter: expected=9 ordinary=9 pervertex=9"
+	for count in 1 2 4 5; do topology dev "vertices$count" "$winding" 0 "TES_TOPOLOGY PASS" "VS storage counter: expected=$count ordinary=$count pervertex=$count"; done
 	for scenario in level4 nonuniform inner-nan; do topology dev "$scenario" "$winding" 0 "TES_TOPOLOGY PASS" "PerVertex TES draw was not rendered"; done
 done
 PREFILL=1 topology dev mixed ccw 0 "TES_TOPOLOGY PASS"
