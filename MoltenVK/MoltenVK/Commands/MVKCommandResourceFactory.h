@@ -388,6 +388,9 @@ public:
 	/** Returns a new MTLComputePipelineState generating portable PerVertexKHR tessellation topology. */
 	id<MTLComputePipelineState> newPerVertexTessTopologyMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
 
+	/** Returns a new compute pipeline state that classifies float32 TCS levels into Metal half tessellation factors. */
+	id<MTLComputePipelineState> newTessLevelsToHalfFactorsMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
+
 	id<MTLComputePipelineState> newConvertUint8IndicesMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner, bool preserveValues = false);
 
 

@@ -821,6 +821,20 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
 
 	// Tessellation - must ignore allowed bad pTessellationState pointer if not tess pipeline
 	_tessReflectData = reflectData;
+	// Metal only reads half tessellation factors, which round levels such as nextafter(1, +inf) before Vulkan
+	// classifies them. The ordinary path keeps the TCS levels in float32 until a kernel classifies them, for the
+	// configuration the Vulkan oracles prove: triangles, equal spacing, no point mode, upper-left origin, one view.
+	// Everything else keeps the half path.
+	if (_isTessellationPipeline && reflectData.float32TessLevels && reflectData.patchKind == spv::ExecutionModeTriangles &&
+		reflectData.partitionMode == spv::ExecutionModeSpacingEqual && !reflectData.pointMode && !getRenderingCreateInfo(pCreateInfo)->viewMask) {
+		_usesFloat32TessLevels = true;
+		for (const auto* next = pCreateInfo->pTessellationState ? (const VkBaseInStructure*)pCreateInfo->pTessellationState->pNext : nullptr; next; next = next->pNext) {
+			if (next->sType == VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO &&
+				((const VkPipelineTessellationDomainOriginStateCreateInfo*)next)->domainOrigin == VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT) {
+				_usesFloat32TessLevels = false;
+			}
+		}
+	}
 	_outputControlPointCount = reflectData.numControlPoints;
 	if (_isTessellationPipeline && pCreateInfo->pTessellationState)
 		_staticStateData.patchControlPoints = pCreateInfo->pTessellationState->patchControlPoints;
@@ -1864,6 +1878,8 @@ bool MVKGraphicsPipeline::addTessCtlShaderToPipeline(MTLComputePipelineDescripto
 		shaderConfig.options.mslOptions.tessellation_factors_float32 = true;
 		shaderConfig.options.mslOptions.argument_buffers = false;
 	}
+	// The ordinary path classifies the float32 levels before Metal reads them as half factors.
+	if (usesFloat32TessLevels()) { shaderConfig.options.mslOptions.tessellation_factors_float32 = true; }
 
 	MVKMTLFunction func = getMTLFunction(shaderConfig, pTessCtlSS, pTessCtlFB, _tessCtlModule, "Tessellation control");
 	shaderConfig.options.mslOptions.tessellation_factors_float32 = false;
@@ -1944,7 +1960,10 @@ bool MVKGraphicsPipeline::addTessEvalShaderToPipeline(MTLRenderPipelineDescripto
 		}
 		return addPerVertexReplayShaderToPipeline(plDesc, pCreateInfo, shaderConfig, pTessEvalSS, pFragmentSS, outputs);
 	}
+	// Vulkan TES levels are the values the TCS wrote, so the TES reads the float32 levels, not the half factors.
+	shaderConfig.options.mslOptions.tessellation_factors_float32 = usesFloat32TessLevels();
 	MVKMTLFunction func = getMTLFunction(shaderConfig, pTessEvalSS, pTessEvalFB, _tessEvalModule, "Tessellation evaluation");
+	shaderConfig.options.mslOptions.tessellation_factors_float32 = false;
 	id<MTLFunction> mtlFunc = func.getMTLFunction();
 	plDesc.vertexFunction = mtlFunc;	// Yeah, you read that right. Tess. eval functions are a kind of vertex function in Metal.
 	if ( !mtlFunc ) { return false; }
