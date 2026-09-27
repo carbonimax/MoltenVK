@@ -27,7 +27,7 @@ using namespace std;
 
 bool MVKSemaphoreImpl::release() {
 	lock_guard<mutex> lock(_lock);
-    if (isClear()) { return true; }
+    if (_cancelled || isClear()) { return true; }
 
     // Either decrement the reservation counter, or clear it altogether
     if (_shouldWaitAll) {
@@ -40,9 +40,16 @@ bool MVKSemaphoreImpl::release() {
     return isClear();
 }
 
+void MVKSemaphoreImpl::cancel() {
+	lock_guard<mutex> lock(_lock);
+	_cancelled = true;
+	_reservationCount = 0;
+	_blocker.notify_all();
+}
+
 void MVKSemaphoreImpl::reserve() {
 	lock_guard<mutex> lock(_lock);
-	_reservationCount++;
+	if (!_cancelled) { _reservationCount++; }
 }
 
 bool MVKSemaphoreImpl::isReserved() {
@@ -71,7 +78,7 @@ bool MVKSemaphoreImpl::wait(uint64_t timeout, bool reserveAgain) {
         isDone = _blocker.wait_for(lock, nanos, [this]{ return isClear(); });
     }
 
-	if (reserveAgain) { _reservationCount++; }
+	if (reserveAgain && !_cancelled) { _reservationCount++; }
     return isDone;
 }
 
