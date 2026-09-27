@@ -1206,12 +1206,14 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 	const auto* assembly = pCreateInfo->pInputAssemblyState;
 	if (!assembly || !mvkPerVertexReplayVertexCount(assembly->topology) || _dynamicStateFlags.has(MVKRenderStateFlag::PrimitiveTopology)) { return unsupported("requires a static point, line-list/strip, or triangle-list/strip/fan topology."); }
 	if (_dynamicStateFlags.has(MVKRenderStateFlag::PrimitiveRestartEnable)) { return unsupported("does not support dynamic primitive restart."); }
-	if (getRenderingCreateInfo(pCreateInfo)->viewMask || mvkIsAnyFlagEnabled(_flags, VK_PIPELINE_CREATE_2_VIEW_INDEX_FROM_DEVICE_INDEX_BIT)) { return unsupported("does not support multiview or device-index views."); }
+	uint32_t viewMask = getRenderingCreateInfo(pCreateInfo)->viewMask;
+	if ((viewMask & (viewMask - 1)) || mvkIsAnyFlagEnabled(_flags, VK_PIPELINE_CREATE_2_VIEW_INDEX_FROM_DEVICE_INDEX_BIT)) { return unsupported("supports at most one multiview view and no device-index views."); }
 	if (pCreateInfo->pRasterizationState->polygonMode != VK_POLYGON_MODE_FILL || _dynamicStateFlags.has(MVKRenderStateFlag::PolygonMode) || _dynamicStateFlags.has(MVKRenderStateFlag::RasterizerDiscardEnable)) { return unsupported("requires static filled rasterization."); }
 	if (_dynamicStateFlags.has(MVKRenderStateFlag::ProvokingVertexMode)) { return unsupported("does not support dynamic provoking-vertex mode."); }
 	initReservedVertexAttributeBufferCount(pCreateInfo);
 	uint32_t captureParams = getImplicitBufferIndex(kMVKShaderStageVertex, 6);
 	if (!mvkPerVertexBufferIndexAvailable(captureParams, _descriptorBufferCounts.stages[kMVKShaderStageVertex], getMetalFeatures().maxPerStageBufferCount)) { return unsupported("has no free vertex capture parameter buffer slot."); }
+	if (viewMask && !mvkPerVertexBufferIndexAvailable(getImplicitBufferIndex(kMVKShaderStageVertex, 8), _descriptorBufferCounts.stages[kMVKShaderStageVertex], getMetalFeatures().maxPerStageBufferCount)) { return unsupported("has no free vertex view range buffer slot."); }
 	if (_hasPerVertexInputs) {
 		_perVertexInputBinding.vertex_buffer_index = getImplicitBufferIndex(kMVKShaderStageFragment, 4);
 		_perVertexInputBinding.primitive_index_buffer_index = getImplicitBufferIndex(kMVKShaderStageFragment, 5);
@@ -1323,6 +1325,9 @@ bool MVKGraphicsPipeline::addPerVertexReplayShaderToPipeline(MTLRenderPipelineDe
 		auto options = shaderConfig.options.mslOptions;
 		options.capture_output_to_buffer = false;
 		options.disable_rasterization = false;
+		// Single-view capture already evaluated ViewIndex; the render pass selects its attachment slice.
+		options.multiview = false;
+		options.multiview_layered_rendering = false;
 		// PointSize is captured from the producer; the pinned replay API cannot synthesize it.
 		options.enable_point_size_default = false;
 		options.emulate_reversed_depth_viewport = getPhysicalDevice()->shouldEmulateReversedDepthViewport();
@@ -2329,6 +2334,8 @@ void MVKGraphicsPipeline::initShaderConversionConfig(SPIRVToMSLConversionConfigu
 				_stageResources[stage].implicitBuffers.ids[MVKImplicitBuffer::DrawId]    = getImplicitBufferIndex(stage, 5);
 				if (_usesPerVertexInputBuffer) {
 					_stageResources[stage].implicitBuffers.ids[MVKImplicitBuffer::IndirectParams] = getImplicitBufferIndex(stage, 6);
+					// Indexed compute capture needs both the index buffer and the single-view range.
+					if (getRenderingCreateInfo(pCreateInfo)->viewMask) { _stageResources[stage].implicitBuffers.ids[MVKImplicitBuffer::ViewRange] = getImplicitBufferIndex(stage, 8); }
 				}
 				break;
 			case kMVKShaderStageFragment:
@@ -2376,7 +2383,8 @@ void MVKGraphicsPipeline::initShaderConversionConfig(SPIRVToMSLConversionConfigu
     shaderConfig.options.shouldFixupClipSpace = isDepthClipNegativeOneToOne(pCreateInfo);
     shaderConfig.options.mslOptions.tess_domain_origin_lower_left = pTessDomainOriginState && pTessDomainOriginState->domainOrigin == VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
     shaderConfig.options.mslOptions.multiview = mvkIsMultiview(pRendInfo->viewMask);
-    shaderConfig.options.mslOptions.multiview_layered_rendering = getPhysicalDevice()->canUseInstancingForMultiview();
+    // Portable replay admits one view only: keep InstanceIndex intact and read ViewIndex from ViewRange.
+    shaderConfig.options.mslOptions.multiview_layered_rendering = !_usesPerVertexInputBuffer && getPhysicalDevice()->canUseInstancingForMultiview();
     shaderConfig.options.mslOptions.view_index_from_device_index = mvkAreAllFlagsEnabled(_flags, VK_PIPELINE_CREATE_2_VIEW_INDEX_FROM_DEVICE_INDEX_BIT);
 	shaderConfig.options.mslOptions.replace_recursive_inputs = mvkOSVersionIsAtLeast(14.0, 17.0, 1.0);
 #if MVK_MACOS
