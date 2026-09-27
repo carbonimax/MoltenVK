@@ -465,7 +465,21 @@ static MVKMetalComputeCommandEncoderState& bindTessLevelsToHalfFactors(MVKComman
 }
 
 // Float32 TCS levels: outer[4], inner[2] per patch.
-static constexpr uint32_t kMVKFloat32TessLevelSize = 6 * sizeof(float);
+static constexpr size_t kMVKFloat32TessLevelSize = 6 * sizeof(float);
+
+static constexpr bool mvkFitsFloat32TessLevels(uint64_t patchCount, uint64_t maxBufferSize) {
+	return patchCount <= UINT32_MAX && patchCount <= maxBufferSize / kMVKFloat32TessLevelSize;
+}
+
+static_assert(mvkFitsFloat32TessLevels(178956970, UINT32_MAX));
+static_assert(!mvkFitsFloat32TessLevels(178956971, UINT32_MAX));
+
+static bool validateTessPatchCount(MVKCommandEncoder* cmdEncoder, uint64_t patchCount, bool float32Levels) {
+	if (patchCount <= UINT32_MAX && (!float32Levels || mvkFitsFloat32TessLevels(patchCount, cmdEncoder->getMetalFeatures().maxMTLBufferSize))) { return true; }
+	auto* cmdBuffer = cmdEncoder->_cmdBuffer;
+	cmdBuffer->setConfigurationResult(cmdBuffer->reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Tessellation level scratch exceeds Metal buffer limits."));
+	return false;
+}
 
 void MVKCmdDraw::encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline) {
 	::encodePerVertexInput(cmdEncoder, pipeline, _vertexCount, _instanceCount, _firstVertex, _firstInstance, _drawIndex);
@@ -516,7 +530,9 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
     if (pipeline->isTessellationPipeline()) {
         tessParams.inControlPointCount = cmdEncoder->getVkGraphics().getPatchControlPoints();
         outControlPointCount = pipeline->getOutputControlPointCount();
-        tessParams.patchCount = mvkCeilingDivide(_vertexCount, tessParams.inControlPointCount) * _instanceCount;
+        uint64_t patchCount = uint64_t(mvkCeilingDivide(_vertexCount, tessParams.inControlPointCount)) * _instanceCount;
+        if (!validateTessPatchCount(cmdEncoder, patchCount, pipeline->usesFloat32TessLevels())) { return; }
+        tessParams.patchCount = uint32_t(patchCount);
     }
     if (pipeline->needsDrawIdBuffer()) {
         tempDrawIDBuff = cmdEncoder->getTempMTLBuffer(sizeof(uint32_t));
@@ -805,7 +821,9 @@ void MVKCmdDrawIndexed::encode(MVKCommandEncoder* cmdEncoder) {
     if (pipeline->isTessellationPipeline()) {
         tessParams.inControlPointCount = cmdEncoder->getVkGraphics().getPatchControlPoints();
         outControlPointCount = pipeline->getOutputControlPointCount();
-        tessParams.patchCount = mvkCeilingDivide(_indexCount, tessParams.inControlPointCount) * _instanceCount;
+        uint64_t patchCount = uint64_t(mvkCeilingDivide(_indexCount, tessParams.inControlPointCount)) * _instanceCount;
+        if (!validateTessPatchCount(cmdEncoder, patchCount, pipeline->usesFloat32TessLevels())) { return; }
+        tessParams.patchCount = uint32_t(patchCount);
     }
     if (pipeline->needsDrawIdBuffer()) {
         tempDrawIDBuff = cmdEncoder->getTempMTLBuffer(sizeof(uint32_t));
@@ -1416,6 +1434,7 @@ void MVKCmdDrawIndirect::encode(MVKCommandEncoder* cmdEncoder) {
         outControlPointCount = pipeline->getOutputControlPointCount();
         vertexCount = kMVKMaxDrawIndirectVertexCount;
         patchCount = mvkCeilingDivide(vertexCount, inControlPointCount);
+        if (!validateTessPatchCount(cmdEncoder, patchCount, pipeline->usesFloat32TessLevels())) { return; }
         VkDeviceSize indirectSize = (2 * sizeof(MTLDispatchThreadgroupsIndirectArguments) + sizeof(MTLDrawPatchIndirectArguments) + sizeof(MTLStageInRegionIndirectArguments)) * _drawCount;
 		paramsIncr = std::max((size_t)dvcLimits.minUniformBufferOffsetAlignment, sizeof(uint32_t) * 2);
 		VkDeviceSize paramsSize = paramsIncr * _drawCount;
@@ -1804,6 +1823,7 @@ void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder, const MVKI
         outControlPointCount = pipeline->getOutputControlPointCount();
         vertexCount = kMVKMaxDrawIndirectVertexCount;
         patchCount = mvkCeilingDivide(vertexCount, inControlPointCount);
+        if (!validateTessPatchCount(cmdEncoder, patchCount, pipeline->usesFloat32TessLevels())) { return; }
         VkDeviceSize indirectSize = (sizeof(MTLDispatchThreadgroupsIndirectArguments) + sizeof(MTLDrawPatchIndirectArguments) + sizeof(MTLStageInRegionIndirectArguments)) * _drawCount;
 		paramsIncr = std::max((size_t)dvcLimits.minUniformBufferOffsetAlignment, sizeof(uint32_t) * 2);
 		VkDeviceSize paramsSize = paramsIncr * _drawCount;
