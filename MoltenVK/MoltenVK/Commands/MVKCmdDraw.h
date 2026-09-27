@@ -242,3 +242,23 @@ protected:
 	id<MTLBuffer> _mtlCountBuffer;
 	VkDeviceSize _mtlCountBufferOffset;
 };
+
+
+#pragma mark -
+#pragma mark MVKCmdDrawMeshTasks
+
+/** Vulkan command to draw mesh workgroups (vkCmdDrawMeshTasksEXT). */
+class MVKCmdDrawMeshTasks : public MVKCommand {
+
+public:
+	VkResult setContent(MVKCommandBuffer* cmdBuff, uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ);
+
+	void encode(MVKCommandEncoder* cmdEncoder) override;
+
+protected:
+	MVKCommandTypePool<MVKCommand>* getTypePool(MVKCommandPool* cmdPool) override;
+
+	uint32_t _groupCountX;
+	uint32_t _groupCountY;
+	uint32_t _groupCountZ;
+};

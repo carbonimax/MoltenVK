@@ -426,11 +426,16 @@ namespace mvk {
 				if (reflect.has_decoration(varID, spv::DecorationComponent)) {
 					cmp = reflect.get_decoration(varID, spv::DecorationComponent);
 				}
+				// Mesh outputs are arrays over the emitted vertices or primitives, and the primitive index builtins
+				// describe connectivity, not varyings.
+				bool meshOutput = model == spv::ExecutionModelMeshEXT && storage == spv::StorageClassOutput;
+				if (meshOutput && (biType == spv::BuiltInPrimitivePointIndicesEXT || biType == spv::BuiltInPrimitiveLineIndicesEXT || biType == spv::BuiltInPrimitiveTriangleIndicesEXT)) { continue; }
 				// For tessellation shaders, peel away the initial array type. SPIRV-Cross adds the array back automatically.
 				// Only some builtins will be arrayed here.
-				if ((model == spv::ExecutionModelTessellationControl || (model == spv::ExecutionModelTessellationEvaluation && storage == spv::StorageClassInput)) && !patch &&
-					(biType == spv::BuiltInMax || biType == spv::BuiltInPosition || biType == spv::BuiltInPointSize ||
-					 biType == spv::BuiltInClipDistance || biType == spv::BuiltInCullDistance))
+				if (((model == spv::ExecutionModelTessellationControl || (model == spv::ExecutionModelTessellationEvaluation && storage == spv::StorageClassInput)) && !patch &&
+					 (biType == spv::BuiltInMax || biType == spv::BuiltInPosition || biType == spv::BuiltInPointSize ||
+					  biType == spv::BuiltInClipDistance || biType == spv::BuiltInCullDistance)) ||
+					(meshOutput && !type->array.empty()))
 					type = &reflect.get_type(type->parent_type);
 
 				// PerVertexKHR's outer array selects a vertex, not additional varying locations.
