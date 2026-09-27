@@ -23,6 +23,8 @@ macOS 27.2 (26B5091g), Xcode 27.1. Bibliothèque Debug arm64 construite depuis l
 
 Les manifestes TES et indirect ont été revérifiés après archivage (`VERIFY.log` dans chaque dossier). Les trois autres dossiers ont aussi des manifestes vérifiés : `mixed` 33/33, `r12-adapted` 25/25 et `preflight` 4/4. Le manifeste indirect original comportait des chemins absolus temporaires : `indirect/EVIDENCE.sha256` reprend les mêmes SHA-256 avec des chemins relatifs ; `indirect/ORIGINAL-EVIDENCE.sha256` conserve l'original. Le runner TES a archivé `git archive HEAD` ; son `dev/PROVENANCE.txt` ne peut donc pas lire le SHA du dépôt et laisse `moltenvk_head` vide. `tes/run.log` enregistre `ae3db2aa`, et `tes/SOURCE-INDEX.txt` indexe les sources. Le harnais r12 historique cherchait l'extension avant d'appeler l'adaptateur de test ; seules ses **copies temporaires** dans `r12-adapted/` ajoutent cet appel. Les sources r12 originales restent intactes.
 
+Une revue Astra indépendante et en lecture seule du merge `ae3db2aa` et du harnais `7fce02ed` n'a relevé aucun défaut fonctionnel P0–P2 dans les conflits examinés : slot 12, statuts, fin de soumission, admission, bindings, génération Metal, cache et adaptateur de test. Elle a vérifié les manifestes TES 487/487, indirect 372/372, préflight 4/4, l'index des 251 sources et l'empreinte de la bibliothèque. Cette revue était **statique** : elle n'a ni compilé ni exécuté le GPU, et ne remplace pas la revue finale upstream.
+
 ## Reproduction
 
 Depuis `MoltenVK-integrated-topology/`, avec `External/SPIRV-Cross` pointant vers le worktree figé au pin :
