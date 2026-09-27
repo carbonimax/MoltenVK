@@ -270,6 +270,7 @@ protected:
 	void finish() override;
 	virtual void submitCommandBuffers() {}
 	virtual void reportPerVertexIndirectFailures() {}
+	virtual void reportPerVertexTessFailures() {}
 
 	MVKCommandEncodingContext _encodingContext;
 	MVKSmallVector<MVKSemaphoreSubmitInfo> _signalSemaphores;
@@ -290,6 +291,7 @@ class MVKQueueFullCommandBufferSubmission : public MVKQueueCommandBufferSubmissi
 public:
 	VkResult reservePerVertexScratch(std::unordered_set<MVKCommandBuffer*>& prefilledExecutions) override;
 	void reportPerVertexIndirectFailures() override;
+	void reportPerVertexTessFailures() override;
 	MVKQueueFullCommandBufferSubmission(MVKQueue* queue, 
 										const VkSubmitInfo2* pSubmit,
 										VkFence fence,
@@ -324,4 +326,3 @@ protected:
 
 	MVKSmallVector<MVKImagePresentInfo, 4> _presentInfo;
 };
-

@@ -146,6 +146,8 @@ public:
 
 	/** Returns the GPU admission and planning pipeline for portable PerVertexKHR indirect draws. */
 	id<MTLComputePipelineState> getPerVertexIndirectMTLComputePipelineState();
+	/** Returns the GPU topology generator for portable PerVertexKHR tessellation. */
+	id<MTLComputePipelineState> getPerVertexTessTopologyMTLComputePipelineState();
 
 	/** Deletes all the internal resources. */
 	void clear();
@@ -190,5 +192,6 @@ protected:
 	id<MTLComputePipelineState> _mtlAccumOcclusionQueryResultsComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlPerVertexRestartComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlPerVertexIndirectComputePipelineState = nil;
+	id<MTLComputePipelineState> _mtlPerVertexTessTopologyComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlConvertUint8IndicesComputePipelineState[2] = {nil, nil};
 };

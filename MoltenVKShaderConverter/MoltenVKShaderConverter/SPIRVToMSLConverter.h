@@ -169,7 +169,7 @@ namespace mvk {
 
 		template<class Archive>
 		void serialize(Archive& archive) {
-			archive(enabled, layout, binding.vertex_buffer_index, binding.primitive_index_buffer_index, binding.primitive_index_location);
+			archive(enabled, layout, binding.vertex_buffer_index, binding.primitive_index_buffer_index, binding.primitive_index_location, binding.primitive_id_buffer_index);
 		}
 	};
 

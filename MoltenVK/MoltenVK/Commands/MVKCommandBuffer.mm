@@ -457,13 +457,7 @@ VkResult MVKCommandBuffer::validateIndexedPerVertexAttachments() {
 
 VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t instanceCount, bool indexed) {
 	if (!_recordedPerVertexPipeline || !vertexCount || !instanceCount) { return VK_SUCCESS; }
-	bool tessEval = _recordedPerVertexPipeline->usesPerVertexTessEval();
-	if (tessEval && (indexed || vertexCount != 6 || instanceCount != 1 || getViewMask())) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "PerVertex TES test requires one direct non-indexed draw of two patches, one instance, no views."); }
-	if (tessEval) {
-		if (_doesContinueRenderPass) { _needsInheritedPerVertexAttachments = true; }
-		VkResult result = validateIndexedPerVertexAttachments();
-		if (result != VK_SUCCESS) { return result; }
-	}
+	if (_recordedPerVertexPipeline->usesPerVertexTessEval()) { return recordPerVertexTessEvalDraw(vertexCount, instanceCount, indexed); }
 	// Dynamic restart can change at execution. Reserve both helper paths before submission.
 	bool dynamicRestart = indexed && _recordedPerVertexPipeline->getDynamicStateFlags().has(MVKRenderStateFlag::PrimitiveRestartEnable);
 	bool restart = mvkPerVertexRequiresRestartAssembly(indexed, dynamicRestart || _recordedPerVertexPipeline->getStaticStateData().enable.has(MVKRenderStateEnableFlag::PrimitiveRestart));
@@ -477,7 +471,7 @@ VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t in
 		VkResult result = validateIndexedPerVertexAttachments();
 		if (result != VK_SUCCESS) { return result; }
 	}
-	auto topology = tessEval ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST : _recordedPerVertexPipeline->getVkPrimitiveTopology();
+	auto topology = _recordedPerVertexPipeline->getVkPrimitiveTopology();
 	uint64_t indexScratchBytes = restart ? mvkPerVertexRestartIndexScratchSize(vertexCount) : indexed && _recordedIndexType == VK_INDEX_TYPE_UINT8 ? uint64_t(vertexCount) * sizeof(uint16_t) : 0;
 	if (indexScratchBytes > getMetalFeatures().maxMTLBufferSize) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR index scratch buffer exceeds Metal limits."); }
 	uint32_t viewMask = getViewMask();
@@ -493,14 +487,6 @@ VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t in
 		uint64_t primitiveCount = uint64_t(mvkPerVertexPrimitiveCount(vertexCount, topology)) * expandedInstances;
 		uint64_t occurrences = primitiveCount * mvkPerVertexReplayVertexCount(topology);
 		requests[pass] = {NSUInteger(uint64_t(vertexCount) * expandedInstances * _recordedPerVertexPipeline->getPerVertexCapturedLayout().stride), NSUInteger(occurrences * 2 * sizeof(uint32_t)), NSUInteger(primitiveCount * 3 * sizeof(uint32_t)), _recordedPerVertexPipeline->usesPortableBarycentrics() ? NSUInteger(occurrences * sizeof(uint32_t)) : 0, NSUInteger(indexScratchBytes), restart, dynamicRestart && _recordedIndexType == VK_INDEX_TYPE_UINT8};
-		if (tessEval) {
-			const auto& limits = getDeviceProperties().limits;
-			uint64_t sizes[] = {16 + uint64_t(vertexCount) * 32, uint64_t(vertexCount) * 4 * limits.maxVertexOutputComponents, uint64_t(vertexCount) * 4 * limits.maxTessellationControlPerVertexOutputComponents, uint64_t(vertexCount / 3) * 4 * limits.maxTessellationControlPerPatchOutputComponents, uint64_t(vertexCount / 3) * sizeof(MTLQuadTessellationFactorsHalf)};
-			for (size_t i = 0; i < std::size(sizes); ++i) {
-				if (sizes[i] > getMetalFeatures().maxMTLBufferSize) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "PerVertex TES scratch exceeds Metal buffer limits."); }
-				requests[pass].tessSizes[i] = NSUInteger(sizes[i]);
-			}
-		}
 	}
 	size_t firstRequest = _perVertexScratchRequests.size();
 	try {
@@ -555,6 +541,40 @@ VkResult MVKCommandBuffer::recordPerVertexIndirectDraw(bool indexed) {
 	return _immediateCmdEncoder ? reservePrefilledPerVertexScratch(firstRequest) : VK_SUCCESS;
 }
 
+// The GPU generator emits at most the uniform level-3 topology per triangle patch: 13 triangles,
+// captured once per corner. Levels outside the proven topologies refuse the draw on the GPU.
+static constexpr uint64_t kMVKPerVertexTessMaxRecordsPerPatch = 39;
+
+VkResult MVKCommandBuffer::recordPerVertexTessEvalDraw(uint32_t vertexCount, uint32_t instanceCount, bool indexed) {
+	if (indexed || instanceCount != 1 || getViewMask()) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "PerVertex TES test requires direct non-indexed draws of one instance without views."); }
+	// Admission fixes three control points. Vertices that do not complete a patch are not tessellated, but
+	// Vulkan still runs the VS for each of them: without a complete patch, only the VS output is reserved.
+	uint64_t patches = vertexCount / 3;
+	// VS/TCS/TES run in compute, which ends and restarts the render encoder.
+	if (_doesContinueRenderPass) { _needsInheritedPerVertexAttachments = true; }
+	VkResult result = validateIndexedPerVertexAttachments();
+	if (result != VK_SUCCESS) { return result; }
+	uint64_t records = patches * kMVKPerVertexTessMaxRecordsPerPatch;
+	uint32_t stride = _recordedPerVertexPipeline->getPerVertexCapturedLayout().stride;
+	if (records > UINT32_MAX || !mvkCanEncodePerVertexDraw(uint32_t(records), 1, stride, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, getMetalFeatures().maxMTLBufferSize)) {
+		return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "PerVertex TES draw exceeds its capture or replay buffer limits.");
+	}
+	MVKPerVertexScratchRequest request = {NSUInteger(records * stride), NSUInteger(records * 2 * sizeof(uint32_t)), NSUInteger(records * sizeof(uint32_t)), _recordedPerVertexPipeline->usesPortableBarycentrics() ? NSUInteger(records * sizeof(uint32_t)) : 0};
+	const auto& limits = getDeviceProperties().limits;
+	// Invocation records, VS output, TCS vertex and patch output, float32 levels (outer[4], inner[2]),
+	// then the generator plan: status, replay arguments and constants, per-patch counts and offsets, patch indices.
+	uint64_t sizes[] = {patches ? 16 + records * 32 : 0, uint64_t(vertexCount) * 4 * limits.maxVertexOutputComponents, patches * 3 * 4 * limits.maxTessellationControlPerVertexOutputComponents, patches * 4 * limits.maxTessellationControlPerPatchOutputComponents, patches * 6 * sizeof(float), patches ? mvkPerVertexTessPlanSize(patches) : 0};
+	for (size_t i = 0; i < std::size(sizes); ++i) {
+		if (sizes[i] > getMetalFeatures().maxMTLBufferSize) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "PerVertex TES scratch exceeds Metal buffer limits."); }
+		request.tessSizes[i] = NSUInteger(sizes[i]);
+	}
+	size_t firstRequest = _perVertexScratchRequests.size();
+	try {
+		_perVertexScratchRequests.push_back(request);
+	} catch (const std::bad_alloc&) { return reportError(VK_ERROR_OUT_OF_HOST_MEMORY, "Portable PerVertexKHR scratch recording allocation failed."); }
+	return _immediateCmdEncoder ? reservePrefilledPerVertexScratch(firstRequest) : VK_SUCCESS;
+}
+
 VkResult MVKCommandBuffer::reservePrefilledPerVertexScratch(size_t firstRequest) {
 	try {
 		std::vector<MVKPerVertexScratchRequest> requests(_perVertexScratchRequests.begin() + firstRequest, _perVertexScratchRequests.end());
@@ -595,6 +615,14 @@ VkResult MVKCommandBuffer::reservePerVertexScratch(const std::vector<MVKPerVerte
 			if (!state || !state.maxTotalThreadsPerThreadgroup || !state.threadExecutionWidth) { return reportError(VK_ERROR_INITIALIZATION_FAILED, "Portable PerVertexKHR indirect planning pipeline is unavailable or has invalid dispatch limits."); }
 			pending[i]->indirectPipeline = [state retain];
 			if (!requests[i].restart) { continue; }
+		}
+		if (requests[i].tessSizes[5]) {
+			id<MTLComputePipelineState> state = pool->getPerVertexTessTopologyMTLComputePipelineState();
+			VkResult result = _device->getConfigurationResult();
+			if (result != VK_SUCCESS) { return result; }
+			if (!state || !state.maxTotalThreadsPerThreadgroup || !state.threadExecutionWidth) { return reportError(VK_ERROR_INITIALIZATION_FAILED, "PerVertex TES topology pipeline is unavailable or has invalid dispatch limits."); }
+			pending[i]->tessTopologyPipeline = [state retain];
+			continue;
 		}
 		if (!requests[i].indexSize) { continue; }
 		// Secondary requests are flattened into the primary. Prepare in its pool

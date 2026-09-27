@@ -2,6 +2,7 @@
 #pragma once
 
 #import <Metal/Metal.h>
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -16,8 +17,8 @@ struct MVKPerVertexScratchRequest {
 	// Indirect draws: dense record capacity checked on the GPU, and the shared plan/status buffer.
 	uint32_t indirectCapacity = 0;
 	NSUInteger planSize = 0;
-	// TES invocation ABI followed by VS, TCS vertex, patch and factor scratch.
-	NSUInteger tessSizes[5] = {};
+	// TES invocation ABI, VS output, TCS vertex and patch output, float32 levels, topology plan.
+	NSUInteger tessSizes[6] = {};
 };
 
 // Individually owned allocations: the shared scratch pool cannot recover from a nil Metal buffer.
@@ -27,14 +28,15 @@ struct MVKPerVertexScratch {
 	id<MTLComputePipelineState> widenUint8Pipeline = nil;
 	id<MTLComputePipelineState> indirectPipeline = nil;
 	uint32_t indirectCapacity = 0;
+	id<MTLComputePipelineState> tessTopologyPipeline = nil;
 	MVKPerVertexScratch() = default;
 	MVKPerVertexScratch(const MVKPerVertexScratch&) = delete;
 	MVKPerVertexScratch& operator=(const MVKPerVertexScratch&) = delete;
-	~MVKPerVertexScratch() { for (auto buffer : buffers) { [buffer release]; } [indexPipeline release]; [widenUint8Pipeline release]; [indirectPipeline release]; }
+	~MVKPerVertexScratch() { for (auto buffer : buffers) { [buffer release]; } [indexPipeline release]; [widenUint8Pipeline release]; [indirectPipeline release]; [tessTopologyPipeline release]; }
 
 	bool reserve(id<MTLDevice> device, const MVKPerVertexScratchRequest& request) {
 		// Indirect dispatch/draw arguments plus replay constants aligned to 256 bytes.
-		NSUInteger lengths[] = {request.captureSize, sizeof(uint32_t), request.occurrenceSize, request.primitiveSize, request.cornerSize, request.indexSize, request.restart ? 68 * sizeof(uint32_t) : 0, request.tessSizes[0], request.tessSizes[1], request.tessSizes[2], request.tessSizes[3], request.tessSizes[4], request.planSize};
+		NSUInteger lengths[] = {request.captureSize, sizeof(uint32_t), request.occurrenceSize, request.primitiveSize, request.cornerSize, request.indexSize, request.restart ? 68 * sizeof(uint32_t) : 0, request.tessSizes[0], request.tessSizes[1], request.tessSizes[2], request.tessSizes[3], request.tessSizes[4], std::max(request.planSize, request.tessSizes[5])};
 		for (size_t i = 0; i < std::size(buffers); ++i) {
 			if (!lengths[i]) { continue; }
 			bool shared = (i > 0 && i < 5) || i == 7 || i == 12;
@@ -50,6 +52,9 @@ struct MVKPerVertexScratch {
 
 	// Admission failures ORed by the GPU into the plan buffer; read only after the work completed.
 	uint32_t getIndirectStatus() const { return indirectCapacity && buffers[12] ? *(volatile const uint32_t*)buffers[12].contents : 0; }
+
+	// Nonzero when the GPU refused a TES draw whose levels have no proven topology. Read after completion.
+	uint32_t getTessEvalStatus() const { return !indirectCapacity && buffers[12] ? *(volatile const uint32_t*)buffers[12].contents : 0; }
 };
 
 using MVKPerVertexScratchReservations = std::vector<std::shared_ptr<MVKPerVertexScratch>>;

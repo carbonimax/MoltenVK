@@ -824,6 +824,7 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
 	}
 
 	// Tessellation - must ignore allowed bad pTessellationState pointer if not tess pipeline
+	_tessReflectData = reflectData;
 	_outputControlPointCount = reflectData.numControlPoints;
 	if (_isTessellationPipeline && pCreateInfo->pTessellationState)
 		_staticStateData.patchControlPoints = pCreateInfo->pTessellationState->patchControlPoints;
@@ -1175,6 +1176,16 @@ void MVKGraphicsPipeline::initMTLRenderPipelineState(const VkGraphicsPipelineCre
 	}
 }
 
+// Whether the stage's entry point statically uses any descriptor-set resource or push constants.
+static bool mvkUsesResources(const std::vector<uint32_t>& spirv, spv::ExecutionModel model) {
+	SPIRV_CROSS_NAMESPACE::Compiler reflect(spirv);
+	reflect.set_entry_point("main", model);
+	auto resources = reflect.get_shader_resources(reflect.get_active_interface_variables());
+	return !resources.uniform_buffers.empty() || !resources.storage_buffers.empty() || !resources.storage_images.empty() ||
+		!resources.sampled_images.empty() || !resources.separate_images.empty() || !resources.separate_samplers.empty() ||
+		!resources.subpass_inputs.empty() || !resources.acceleration_structures.empty() || !resources.push_constant_buffers.empty();
+}
+
 bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCreateInfo* pCreateInfo, const VkPipelineShaderStageCreateInfo* pVertexSS, const VkPipelineShaderStageCreateInfo* pFragmentSS) {
 	if (!_isRasterizing || !pFragmentSS || !_fragmentModule || _fragmentModule->getSPIRV().empty()) { return true; }
 	bool usesPerVertex = false;
@@ -1202,19 +1213,33 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 		return false;
 	};
 	bool testTES = false;
-#ifdef MVK_TEST_TES_PERVERTEX_FIXTURE
+#ifdef MVK_TEST_TES_PERVERTEX_ADMISSION
+	// Test-only admission, never defined by shipping builds. The public extension gate stays closed.
 	if (_isTessellationPipeline) {
-		// Exact test shaders establish factor 1; never infer arbitrary TCS factors on the CPU.
-		testTES = mvkMatchesTESFixture(_vertexModule->getSPIRV(), mvkTESVertex) && mvkMatchesTESFixture(_tessCtlModule->getSPIRV(), mvkTESControl) && mvkMatchesTESFixture(_tessEvalModule->getSPIRV(), mvkTESEvaluation) && (mvkMatchesTESFixture(_fragmentModule->getSPIRV(), mvkTESOrdered) || mvkMatchesTESFixture(_fragmentModule->getSPIRV(), mvkTESSwapped) || mvkMatchesTESFixture(_fragmentModule->getSPIRV(), mvkTESWrongPatch));
-		if (!testTES) { return unsupported("TES test requires the exact VS/TCS/TES/fragment fixture."); }
-		// tese_as_compute is not in the persistent cache format yet. Shader-module memory
-		// caches compare all MSL options, but no serialized cache may enter this pilot.
-		if (_pipelineCache) { return unsupported("TES test disables Vulkan pipeline caches until tese_as_compute is serialized with format compatibility."); }
+		// The GPU generates the topology from the float32 levels the TCS writes; only uniform equal-spacing
+		// triangle levels whose Metal topology is proven are rendered (MVKCmdDraw.mm). Other modes refuse here.
+		const auto& tess = _tessReflectData;
+		if (tess.patchKind != spv::ExecutionModeTriangles || tess.partitionMode != spv::ExecutionModeSpacingEqual || tess.pointMode ||
+			(tess.windingOrder != spv::ExecutionModeVertexOrderCw && tess.windingOrder != spv::ExecutionModeVertexOrderCcw) || tess.numControlPoints != 3) {
+			return unsupported("TES requires triangles, equal spacing, cw or ccw winding, no point mode and three output control points.");
+		}
 		for (uint32_t i = 0; i < pCreateInfo->stageCount; ++i) {
 			const auto& stage = pCreateInfo->pStages[i];
-			if (stage.pSpecializationInfo || stage.pNext || stage.flags || strcmp(stage.pName, "main")) { return unsupported("TES test requires unspecialized fixture entry points."); }
+			if (stage.pSpecializationInfo || stage.pNext || stage.flags || strcmp(stage.pName, "main")) { return unsupported("TES test requires unspecialized main entry points."); }
 		}
-		if (!getMetalFeatures().nonUniformThreadgroups || pCreateInfo->stageCount != 4 || !_dynamicStateFlags.empty() || !pCreateInfo->pTessellationState || pCreateInfo->pTessellationState->patchControlPoints != 3 || pCreateInfo->pTessellationState->pNext || getRenderingCreateInfo(pCreateInfo)->viewMask || pCreateInfo->pMultisampleState->rasterizationSamples != VK_SAMPLE_COUNT_1_BIT || pCreateInfo->pVertexInputState->vertexAttributeDescriptionCount || pCreateInfo->pVertexInputState->vertexBindingDescriptionCount) { return unsupported("TES test requires static single-view, single-sample triangle patches with three control points and no vertex bindings."); }
+		// The float32 TessLevel ABI excludes Metal argument buffers, so TCS and TES must not use descriptors.
+		// Push constants in these stages are not qualified either.
+		if (mvkUsesResources(_tessCtlModule->getSPIRV(), spv::ExecutionModelTessellationControl) ||
+			mvkUsesResources(_tessEvalModule->getSPIRV(), spv::ExecutionModelTessellationEvaluation)) {
+			return unsupported("TES requires TCS and TES stages without descriptors or push constants for the float32 tessellation level ABI.");
+		}
+		// The persistent cache serializes the TES options, but this test path does not qualify cache reuse.
+		if (_pipelineCache) { return unsupported("TES test disables Vulkan pipeline caches."); }
+		// The domain origin extension changes the winding convention of the generated triangles.
+		if (!getMetalFeatures().nonUniformThreadgroups || pCreateInfo->stageCount != 4 || !_dynamicStateFlags.empty() || !pCreateInfo->pTessellationState || pCreateInfo->pTessellationState->patchControlPoints != 3 || pCreateInfo->pTessellationState->pNext || getRenderingCreateInfo(pCreateInfo)->viewMask || pCreateInfo->pMultisampleState->rasterizationSamples != VK_SAMPLE_COUNT_1_BIT || !pCreateInfo->pVertexInputState || pCreateInfo->pVertexInputState->pNext) {
+			return unsupported("TES test requires static single-view, single-sample triangle patches with three control points, an upper-left domain and no vertex divisors.");
+		}
+		testTES = true;
 	}
 #endif
 	if (!pVertexSS || !_vertexModule || _vertexModule->getSPIRV().empty() || (!testTES && (_isTessellationPipeline || pCreateInfo->stageCount != 2))) { return unsupported("requires classic SPIR-V vertex and fragment stages."); }
@@ -1232,7 +1257,9 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 	if (_hasPerVertexInputs) {
 		_perVertexInputBinding.vertex_buffer_index = getImplicitBufferIndex(kMVKShaderStageFragment, 4);
 		_perVertexInputBinding.primitive_index_buffer_index = getImplicitBufferIndex(kMVKShaderStageFragment, 5);
-		if (!mvkPerVertexBufferIndexAvailable(_perVertexInputBinding.primitive_index_buffer_index, _descriptorBufferCounts.stages[kMVKShaderStageFragment], getMetalFeatures().maxPerStageBufferCount)) { return unsupported("has no free fragment capture buffer slots."); }
+		// After tessellation, a fragment PrimitiveId reads the patch index the topology generator stored per triangle.
+		if (testTES) { _perVertexInputBinding.primitive_id_buffer_index = getImplicitBufferIndex(kMVKShaderStageFragment, 6); }
+		if (!mvkPerVertexBufferIndexAvailable(testTES ? _perVertexInputBinding.primitive_id_buffer_index : _perVertexInputBinding.primitive_index_buffer_index, _descriptorBufferCounts.stages[kMVKShaderStageFragment], getMetalFeatures().maxPerStageBufferCount)) { return unsupported("has no free fragment capture buffer slots."); }
 	}
 	// Replay is generated directly from the capture ABI and is not yet a shader-library cache entry.
 	if (shouldFailOnPipelineCompileRequired()) {
@@ -1342,6 +1369,7 @@ bool MVKGraphicsPipeline::addPerVertexReplayShaderToPipeline(MTLRenderPipelineDe
 		auto options = shaderConfig.options.mslOptions;
 		options.capture_output_to_buffer = false;
 		options.tese_as_compute = false;
+		options.tessellation_factors_float32 = false;
 		options.vertex_for_tessellation = false;
 		options.multi_patch_workgroup = false;
 		options.disable_rasterization = false;
@@ -1832,8 +1860,18 @@ bool MVKGraphicsPipeline::addTessCtlShaderToPipeline(MTLComputePipelineDescripto
 	setEmulatedReversedDepthViewportConfig(shaderConfig, implicit, false);
 	addPrevStageOutputToShaderConversionConfig(shaderConfig, vtxOutputs);
 	addNextStageInputToShaderConversionConfig(shaderConfig, teInputs);
+	// The GPU topology generator reads the levels exactly as written; Metal's half factors would round
+	// nextafter(1, +inf) down to level 1. Admission guarantees a descriptor-free TCS. Later stages keep
+	// the pipeline's own options.
+	bool argumentBuffers = shaderConfig.options.mslOptions.argument_buffers;
+	if (usesPerVertexTessEval()) {
+		shaderConfig.options.mslOptions.tessellation_factors_float32 = true;
+		shaderConfig.options.mslOptions.argument_buffers = false;
+	}
 
 	MVKMTLFunction func = getMTLFunction(shaderConfig, pTessCtlSS, pTessCtlFB, _tessCtlModule, "Tessellation control");
+	shaderConfig.options.mslOptions.tessellation_factors_float32 = false;
+	shaderConfig.options.mslOptions.argument_buffers = argumentBuffers;
 	id<MTLFunction> mtlFunc = func.getMTLFunction();
 	if ( !mtlFunc ) { return false; }
 	plDesc.computeFunction = mtlFunc;
@@ -1877,7 +1915,8 @@ bool MVKGraphicsPipeline::addTessEvalShaderToPipeline(MTLRenderPipelineDescripto
 		options.disable_rasterization = true;
 		options.vertex_for_tessellation = false;
 		options.multi_patch_workgroup = false;
-		options.argument_buffers = false; // The exact test fixture has no descriptors.
+		options.argument_buffers = false; // Admission guarantees a descriptor-free TES.
+		options.tessellation_factors_float32 = true;
 		options.emulate_reversed_depth_viewport = false;
 		options.indirect_params_buffer_index = implicit[MVKImplicitBuffer::IndirectParams];
 		options.shader_output_buffer_index = implicit[MVKImplicitBuffer::Output];
@@ -3490,7 +3529,7 @@ void mvkValidateCeralArchiveDefinitions() {
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLShaderInterfaceVariable>(3);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLResourceBinding>(2);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::DescriptorBinding>();
-	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(162);	// Contains collection
+	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(158);	// Contains collection
 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionResultInfo>(75);		// Contains collection
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLSpecializationMacroInfo>(22);			// Contains string
 	missingBytes += mvkValidateCerealArchiveSize<MVKShaderModuleKey>();
