@@ -703,6 +703,7 @@ int main(int argc, char** argv) {
 				r.dependentSubmit = vkQueueSubmit(d.producerQueue, 1, &dependent, dependentFence);
 				r.dependentBeforeSignal = vkGetFenceStatus(d.device, dependentFence);
 				std::printf("dependent submit=%d fence before host signal=%d\n", r.dependentSubmit, r.dependentBeforeSignal);
+				if (r.dependentSubmit != VK_SUCCESS || r.dependentBeforeSignal != VK_NOT_READY) throw std::runtime_error("Dependent submission was not pending before host timeline signal");
 			}
 			if (lateSignal && split && r.submit == VK_SUCCESS) {
 				VkResult beforeSignal = vkGetFenceStatus(d.device, producerFence);
