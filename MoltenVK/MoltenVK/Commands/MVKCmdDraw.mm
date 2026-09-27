@@ -396,7 +396,8 @@ static void encodePerVertexTessEval(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	[compute memoryBarrierWithScope:MTLBarrierScopeBuffers];
 	// Classify patches from the written levels, prefix their triangle counts, then emit ordered corner records.
 	float maxLevel = float(cmdEncoder->getDeviceProperties().limits.maxTessellationGenerationLevel);
-	uint32_t params[] = {patches, *(uint32_t*)&maxLevel, uint32_t(pipeline->perVertexTessReversesCorners()), uint32_t(scratch->buffers[4] != nil), 0};
+	uint32_t primitiveIds = uint32_t(mvkPerVertexTessPrimitiveIdOffset(patches));
+	uint32_t params[] = {patches, *(uint32_t*)&maxLevel, uint32_t(pipeline->perVertexTessReversesCorners()), uint32_t(scratch->buffers[4] != nil), 0, primitiveIds / 4};
 	NSUInteger width = std::min(topology.threadExecutionWidth, topology.maxTotalThreadsPerThreadgroup);
 	computeState.bindPipeline(compute, topology);
 	computeState.bindBuffer(compute, levels, 0, 0);
@@ -435,6 +436,8 @@ static void encodePerVertexTessEval(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	if (fragment.vertex_buffer_index != ~0u) {
 		graphics.bindFragmentBuffer(render, scratch->buffers[0], 0, fragment.vertex_buffer_index);
 		graphics.bindFragmentBuffer(render, scratch->buffers[3], 0, fragment.primitive_index_buffer_index);
+		// Vulkan's fragment PrimitiveId after tessellation is the patch index, not the replayed triangle's.
+		if (fragment.primitive_id_buffer_index != ~0u) { graphics.bindFragmentBuffer(render, plan, primitiveIds, fragment.primitive_id_buffer_index); }
 	}
 	if (cmdEncoder->getPhysicalDevice()->shouldEmulateReversedDepthViewport()) {
 		uint32_t mask = cmdEncoder->getVkGraphics()._implicitBufferData[kMVKShaderStageVertex].emulatedReversedDepthViewportMask;

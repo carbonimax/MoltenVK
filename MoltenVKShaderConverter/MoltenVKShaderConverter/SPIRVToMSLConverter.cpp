@@ -136,7 +136,7 @@ MVK_PUBLIC_SYMBOL bool mvk::MSLPerVertexInputBuffer::matches(const mvk::MSLPerVe
 	if (enabled != other.enabled) { return false; }
 	if (!enabled) { return true; }
 	if (layout.stride != other.layout.stride) { return false; }
-	if (binding.vertex_buffer_index != other.binding.vertex_buffer_index || binding.primitive_index_buffer_index != other.binding.primitive_index_buffer_index || binding.primitive_index_location != other.binding.primitive_index_location) { return false; }
+	if (binding.vertex_buffer_index != other.binding.vertex_buffer_index || binding.primitive_index_buffer_index != other.binding.primitive_index_buffer_index || binding.primitive_index_location != other.binding.primitive_index_location || binding.primitive_id_buffer_index != other.binding.primitive_id_buffer_index) { return false; }
 	if (!std::equal(layout.builtins.begin(), layout.builtins.end(), other.layout.builtins.begin(), other.layout.builtins.end(), [](const auto& a, const auto& b) {
 		return a.builtin == b.builtin && a.array_index == b.array_index && a.component == b.component && a.byte_offset == b.byte_offset && a.scalar_type == b.scalar_type;
 	})) { return false; }

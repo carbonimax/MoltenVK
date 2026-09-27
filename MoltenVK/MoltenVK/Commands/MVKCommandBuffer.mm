@@ -519,8 +519,8 @@ VkResult MVKCommandBuffer::recordPerVertexTessEvalDraw(uint32_t vertexCount, uin
 	MVKPerVertexScratchRequest request = {NSUInteger(records * stride), NSUInteger(records * 2 * sizeof(uint32_t)), NSUInteger(records * sizeof(uint32_t)), _recordedPerVertexPipeline->usesPortableBarycentrics() ? NSUInteger(records * sizeof(uint32_t)) : 0};
 	const auto& limits = getDeviceProperties().limits;
 	// Invocation records, VS output, TCS vertex and patch output, float32 levels (outer[4], inner[2]),
-	// then the generator plan: status, replay arguments and constants, per-patch counts and offsets.
-	uint64_t sizes[] = {patches ? 16 + records * 32 : 0, uint64_t(vertexCount) * 4 * limits.maxVertexOutputComponents, patches * 3 * 4 * limits.maxTessellationControlPerVertexOutputComponents, patches * 4 * limits.maxTessellationControlPerPatchOutputComponents, patches * 6 * sizeof(float), patches ? 512 + patches * 2 * sizeof(uint32_t) : 0};
+	// then the generator plan: status, replay arguments and constants, per-patch counts and offsets, patch indices.
+	uint64_t sizes[] = {patches ? 16 + records * 32 : 0, uint64_t(vertexCount) * 4 * limits.maxVertexOutputComponents, patches * 3 * 4 * limits.maxTessellationControlPerVertexOutputComponents, patches * 4 * limits.maxTessellationControlPerPatchOutputComponents, patches * 6 * sizeof(float), patches ? mvkPerVertexTessPlanSize(patches) : 0};
 	for (size_t i = 0; i < std::size(sizes); ++i) {
 		if (sizes[i] > getMetalFeatures().maxMTLBufferSize) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "PerVertex TES scratch exceeds Metal buffer limits."); }
 		request.tessSizes[i] = NSUInteger(sizes[i]);

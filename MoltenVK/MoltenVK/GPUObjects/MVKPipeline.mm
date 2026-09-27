@@ -1257,7 +1257,9 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 	if (_hasPerVertexInputs) {
 		_perVertexInputBinding.vertex_buffer_index = getImplicitBufferIndex(kMVKShaderStageFragment, 4);
 		_perVertexInputBinding.primitive_index_buffer_index = getImplicitBufferIndex(kMVKShaderStageFragment, 5);
-		if (!mvkPerVertexBufferIndexAvailable(_perVertexInputBinding.primitive_index_buffer_index, _descriptorBufferCounts.stages[kMVKShaderStageFragment], getMetalFeatures().maxPerStageBufferCount)) { return unsupported("has no free fragment capture buffer slots."); }
+		// After tessellation, a fragment PrimitiveId reads the patch index the topology generator stored per triangle.
+		if (testTES) { _perVertexInputBinding.primitive_id_buffer_index = getImplicitBufferIndex(kMVKShaderStageFragment, 6); }
+		if (!mvkPerVertexBufferIndexAvailable(testTES ? _perVertexInputBinding.primitive_id_buffer_index : _perVertexInputBinding.primitive_index_buffer_index, _descriptorBufferCounts.stages[kMVKShaderStageFragment], getMetalFeatures().maxPerStageBufferCount)) { return unsupported("has no free fragment capture buffer slots."); }
 	}
 	// Replay is generated directly from the capture ABI and is not yet a shader-library cache entry.
 	if (shouldFailOnPipelineCompileRequired()) {
@@ -3553,7 +3555,7 @@ void mvkValidateCeralArchiveDefinitions() {
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLShaderInterfaceVariable>(3);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLResourceBinding>(2);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::DescriptorBinding>();
-	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(162);	// Contains collection
+	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(158);	// Contains collection
 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionResultInfo>(75);		// Contains collection
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLSpecializationMacroInfo>(22);			// Contains string
 	missingBytes += mvkValidateCerealArchiveSize<MVKShaderModuleKey>();
