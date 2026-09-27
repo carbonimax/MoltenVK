@@ -218,7 +218,8 @@ int main(int argc, char** argv) {
 			[](auto& value) { value.layout.components.pop_back(); },
 			[](auto& value) { value.binding.vertex_buffer_index--; },
 			[](auto& value) { value.binding.primitive_index_buffer_index--; },
-			[](auto& value) { value.binding.primitive_index_location++; }
+			[](auto& value) { value.binding.primitive_index_location++; },
+			[](auto& value) { value.binding.primitive_id_buffer_index = 27; }
 		};
 		for (auto& change : changes) {
 			auto changed = original;
@@ -281,7 +282,7 @@ int main(int argc, char** argv) {
 		config.perVertexInputBuffer.enabled = false;
 		check(converter.convert(config, result), result.resultLog.c_str());
 		check(result.msl == ordinaryMSL, "Inactive portable input changed ordinary shader");
-		std::cout << "PASS: 10 cache identity/serialization mutations, 4 active variants, 6 rejections, inactive reuse and unchanged ordinary MSL\n";
+		std::cout << "PASS: 11 cache identity/serialization mutations, 4 active variants, 6 rejections, inactive reuse and unchanged ordinary MSL\n";
 		checkCaptureLayout(converter, result, argv[3]);
 		return 0;
 	} catch (const std::exception& error) {
