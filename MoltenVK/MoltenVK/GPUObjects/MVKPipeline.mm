@@ -1252,35 +1252,9 @@ static std::string mvkMeshShaderIncompatibility(const std::vector<uint32_t>& spi
 	return {};
 }
 
-// Returns the Locations of the fragment PerVertexKHR inputs that the mesh corner copies support: arrays of one to three
-// 16- or 32-bit scalars or vectors below Location 32, outside blocks. Returns zero if any other form is read.
-static uint32_t mvkMeshPerVertexCornerLocations(const std::vector<uint32_t>& spirv, const char* entryName) {
-	SPIRV_CROSS_NAMESPACE::CompilerReflection reflect(spirv);
-	reflect.set_entry_point(entryName, spv::ExecutionModelFragment);
-	uint32_t locations = 0;
-	for (auto varID : reflect.get_active_interface_variables()) {
-		if (reflect.get_storage_class(varID) != spv::StorageClassInput) { continue; }
-		const auto& type = reflect.get_type(reflect.get_type_from_variable(varID).parent_type);
-		if (!reflect.has_decoration(varID, spv::DecorationPerVertexKHR)) {
-			if (mvk::hasPerVertexInputMember(reflect, type)) { return 0; }
-			continue;
-		}
-		if (type.array.size() != 1 || !type.array_size_literal[0] || type.array[0] < 1 || type.array[0] > 3) { return 0; }
-		const auto& element = reflect.get_type(type.parent_type);
-		bool scalarOrVector = element.array.empty() && element.columns == 1 &&
-			(element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Float || element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Half ||
-			 element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Int || element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::UInt ||
-			 element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Short || element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::UShort);
-		uint32_t location = reflect.get_decoration(varID, spv::DecorationLocation);
-		if (!scalarOrVector || reflect.has_decoration(varID, spv::DecorationBuiltIn) || !reflect.has_decoration(varID, spv::DecorationLocation) || location >= 32) { return 0; }
-		locations |= 1u << location;
-	}
-	return locations;
-}
-
 // First mesh path: a mesh and a fragment shader drawn with vkCmdDrawMeshTasksEXT, without task shader, mesh-stage
 // resources or specialization, per-primitive outputs, pipeline cache, dynamic state or views. Fragment PerVertexKHR inputs
-// read the corners that the mesh copies per primitive, in index order, for the forms mvkMeshPerVertexCornerLocations accepts.
+// read the corners that the mesh copies per primitive, in index order, for the forms getMeshPerVertexCornerLocations accepts.
 // Anything else is refused at creation. The extension is exposed only to the test device adapter.
 bool MVKGraphicsPipeline::initMeshPipelineState(const VkGraphicsPipelineCreateInfo* pCreateInfo,
 												const VkPipelineShaderStageCreateInfo* pTaskSS,
@@ -1309,7 +1283,7 @@ bool MVKGraphicsPipeline::initMeshPipelineState(const VkGraphicsPipelineCreateIn
 		setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to reflect PerVertexKHR inputs: %s", errorLog.c_str()));
 		return false;
 	}
-	uint32_t perVertexLocations = usesPerVertex ? mvkMeshPerVertexCornerLocations(_fragmentModule->getSPIRV(), pFragmentSS->pName) : 0;
+	uint32_t perVertexLocations = usesPerVertex ? mvk::getMeshPerVertexCornerLocations(_fragmentModule->getSPIRV(), pFragmentSS->pName) : 0;
 	if (usesPerVertex && !perVertexLocations) {
 		return unsupported("reads PerVertexKHR fragment inputs other than arrays of 16- or 32-bit scalars or vectors below Location 32.");
 	}
