@@ -59,12 +59,13 @@ struct TestCommandPool;
 struct TestDevice {
 	atomic<VkResult> result{VK_SUCCESS};
 	Failure failure = Failure::None;
-	atomic<unsigned> creations[3]{};
+	atomic<unsigned> creations[4]{};
 	VkResult getConfigurationResult() { return result.load(); }
 	TestDevice* getCommandResourceFactory() { return this; }
 	id<MTLComputePipelineState> create(unsigned slot);
 	id<MTLComputePipelineState> newPerVertexRestartMTLComputePipelineState(TestCommandPool*) { return create(2); }
 	id<MTLComputePipelineState> newConvertUint8IndicesMTLComputePipelineState(TestCommandPool*, bool preserveValues) { return create(preserveValues ? 1 : 0); }
+	id<MTLComputePipelineState> newPerVertexTessTopologyMTLComputePipelineState(TestCommandPool*) { return create(3); }
 };
 struct TestCommandPool { TestDevice* device; TestDevice* getDevice() { return device; } };
 id<MTLComputePipelineState> TestDevice::create(unsigned slot) {
@@ -85,12 +86,15 @@ struct MVKCommandEncodingPool {
 	mutex _lock;
 	id<MTLComputePipelineState> _mtlPerVertexRestartComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlConvertUint8IndicesComputePipelineState[2] = {};
+	id<MTLComputePipelineState> _mtlPerVertexTessTopologyComputePipelineState = nil;
 	id<MTLComputePipelineState> getPerVertexRestartMTLComputePipelineState();
+	id<MTLComputePipelineState> getPerVertexTessTopologyMTLComputePipelineState();
 	id<MTLComputePipelineState> getConvertUint8IndicesMTLComputePipelineState(bool preserveValues = false);
 	void clear() {
 		lock_guard<mutex> lock(_lock);
 		[_mtlPerVertexRestartComputePipelineState release]; _mtlPerVertexRestartComputePipelineState = nil;
 		for (auto& state : _mtlConvertUint8IndicesComputePipelineState) { [state release]; state = nil; }
+		[_mtlPerVertexTessTopologyComputePipelineState release]; _mtlPerVertexTessTopologyComputePipelineState = nil;
 	}
 	~MVKCommandEncodingPool() { clear(); }
 };
@@ -252,10 +256,41 @@ static void checkConcurrentCache() {
 	assert(results[0][0] != results[0][1]); // Regular UINT8 keeps its sentinel semantics.
 }
 
+#if MVK_TEST_HAS_TES_TOPOLOGY
+// TES scratch prepares the GPU topology generator before submission; failures reject the whole call.
+static void checkTessTopology() {
+	for (Failure failure : {Failure::None, Failure::Missing, Failure::ZeroWidth, Failure::DeviceLostValid}) {
+		TestDevice device;
+		RecordingPool pool{{&device}};
+		auto* metal = [PreflightDevice new];
+		MVKPerVertexScratchRequest tes = {48, 24, 12, 12};
+		NSUInteger sizes[] = {48, 16, 16, 16, 24, 256};
+		std::copy(std::begin(sizes), std::end(sizes), tes.tessSizes);
+		MVKCommandBuffer cb{&device, &pool, (id<MTLDevice>)metal, VK_SUCCESS, false, {tes}, {}};
+		device.failure = failure;
+		unordered_set<MVKCommandBuffer*> prefilled;
+		MVKPerVertexScratchReservations saved;
+		VkResult result = cb.reservePerVertexScratch(saved, prefilled);
+		if (failure == Failure::None) {
+			assert(result == VK_SUCCESS && saved.size() == 1 && saved[0]->tessTopologyPipeline && !saved[0]->indexPipeline);
+			assert(saved[0]->getTessEvalStatus() == 0 && device.creations[3] == 1 && !device.creations[2]);
+		} else {
+			assert(result == (failure == Failure::DeviceLostValid ? VK_ERROR_DEVICE_LOST : VK_ERROR_INITIALIZATION_FAILED) && saved.empty() && !liveBuffers);
+		}
+		saved.clear();
+		[metal release];
+	}
+}
+#endif
+
 int main() {
 	@autoreleasepool {
 		if (!checkRejection()) { return 1; }
 		checkTransactions();
+#if MVK_TEST_HAS_TES_TOPOLOGY
+		checkTessTopology();
+		assert(!liveBuffers && !livePipelines);
+#endif
 		assert(!liveBuffers && !livePipelines);
 		checkConcurrentCache();
 		assert(!liveBuffers && !livePipelines);
