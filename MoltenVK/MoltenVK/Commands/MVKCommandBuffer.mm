@@ -146,7 +146,10 @@ VkResult MVKCommandBuffer::begin(const VkCommandBufferBeginInfo* pBeginInfo) {
 	if (_doesContinueRenderPass) {
 		_currentSubpassInfo.renderpass = (MVKRenderPass*)_secondaryInheritanceInfo.renderPass;
 		_currentSubpassInfo.subpassIndex = _secondaryInheritanceInfo.subpass;
-		_recordedFramebuffer = (MVKFramebuffer*)_secondaryInheritanceInfo.framebuffer;
+		auto* framebuffer = (MVKFramebuffer*)_secondaryInheritanceInfo.framebuffer;
+		auto attachments = framebuffer ? framebuffer->getAttachments() : MVKArrayRef<MVKImageView*>();
+		// An empty inherited framebuffer may be imageless. Its actual views are only known by the primary.
+		recordRenderPass(attachments, attachments.size() != 0);
 		if (!_currentSubpassInfo.renderpass && _hasSecondaryInheritanceRenderingInfo && _secondaryInheritanceRenderingInfo.rasterizationSamples != VK_SAMPLE_COUNT_1_BIT) {
 			_recordedRenderingError = "indexed compute capture requires single-sample attachments.";
 		}
@@ -255,7 +258,7 @@ VkResult MVKCommandBuffer::reset(VkCommandBufferResetFlags flags) {
 	_hasStageCounterTimestampCommand = false;
 	_lastTessellationPipeline = nullptr;
 	_recordedPerVertexPipeline = nullptr;
-	_recordedFramebuffer = nullptr;
+	_recordedAttachmentsKnown = false;
 	_recordedRenderingError = nullptr;
 	_recordedIndexType = VK_INDEX_TYPE_MAX_ENUM;
 	_needsInheritedPerVertexAttachments = false;
@@ -423,9 +426,16 @@ VkResult MVKCommandBuffer::recordExecuteCommands(MVKArrayRef<MVKCommandBuffer*co
 	return _immediateCmdEncoder ? reservePrefilledPerVertexScratch(firstRequest) : VK_SUCCESS;
 }
 
+void MVKCommandBuffer::recordRenderPass(MVKArrayRef<MVKImageView*> attachments, bool attachmentsKnown) {
+	_recordedAttachmentsKnown = attachmentsKnown;
+	_recordedRenderingError = nullptr;
+	for (auto* attachment : attachments) {
+		if (attachment && attachment->getImage()->getMTLStorageMode() == MTLStorageModeMemoryless) { _recordedRenderingError = "indexed compute capture cannot preserve memoryless attachments."; }
+	}
+}
+
 void MVKCommandBuffer::recordRendering(const VkRenderingInfo* renderingInfo) {
-	recordRenderPass(nullptr);
-	if (!renderingInfo->colorAttachmentCount && !renderingInfo->pDepthAttachment && !renderingInfo->pStencilAttachment) { _recordedRenderingError = "indexed compute capture requires explicit framebuffer attachments."; }
+	recordRenderPass({});
 	MVKRenderingAttachmentIterator attachments(renderingInfo);
 	attachments.iterate([&](const VkRenderingAttachmentInfo*, VkImageAspectFlagBits, MVKImageView* attachment, bool isResolveAttachment) {
 		if (!attachment) { return; }
@@ -436,13 +446,8 @@ void MVKCommandBuffer::recordRendering(const VkRenderingInfo* renderingInfo) {
 
 VkResult MVKCommandBuffer::validateIndexedPerVertexAttachments() {
 	const char* error = _recordedRenderingError;
+	if (!_recordedAttachmentsKnown && !_doesContinueRenderPass) { error = "indexed compute capture requires known rendering attachments."; }
 	if (_currentSubpassInfo.renderpass && _currentSubpassInfo.renderpass->getSubpass(_currentSubpassInfo.subpassIndex)->getSampleCount() != VK_SAMPLE_COUNT_1_BIT) { error = "indexed compute capture requires single-sample attachments."; }
-	if (_recordedFramebuffer) {
-		if (_recordedFramebuffer->getAttachments().size() == 0) { error = "indexed compute capture requires explicit framebuffer attachments."; }
-		for (auto* attachment : _recordedFramebuffer->getAttachments()) {
-			if (attachment && attachment->getImage()->getMTLStorageMode() == MTLStorageModeMemoryless) { error = "indexed compute capture cannot preserve memoryless attachments."; }
-		}
-	}
 	return error ? reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR %s", error) : VK_SUCCESS;
 }
 
@@ -457,7 +462,7 @@ VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t in
 		if (!mvkPerVertexIndexSize(_recordedIndexType)) {
 			return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed capture requires uint8, uint16 or uint32 indices.");
 		}
-		// A secondary may omit its framebuffer. Validate the actual attachments again in the primary.
+		// A secondary may omit its framebuffer or inherit an imageless one. Revalidate in every primary.
 		if (_doesContinueRenderPass) { _needsInheritedPerVertexAttachments = true; }
 		VkResult result = validateIndexedPerVertexAttachments();
 		if (result != VK_SUCCESS) { return result; }
@@ -606,6 +611,17 @@ void MVKCommandEncoder::encodeSecondary(MVKCommandBuffer* secondaryCmdBuffer) {
 		cmd->encode(this);
 		cmd = cmd->_next;
 	}
+}
+
+const char* MVKCommandEncoder::getIndexedPerVertexAttachmentError() {
+	if (!isInRenderPass()) { return "indexed compute capture requires known rendering attachments."; }
+	if (getSubpass()->getSampleCount() != VK_SAMPLE_COUNT_1_BIT) { return "indexed compute capture requires single-sample attachments."; }
+	// These are the begin-render-pass views, including imageless and dynamic rendering attachments.
+	// An empty list in an active render pass is valid; there is no image content to preserve.
+	for (auto* attachment : _attachments) {
+		if (attachment && attachment->getImage()->getMTLStorageMode() == MTLStorageModeMemoryless) { return "indexed compute capture cannot preserve memoryless attachments."; }
+	}
+	return nullptr;
 }
 
 MVKPerVertexScratch* MVKCommandEncoder::nextPerVertexScratch() {

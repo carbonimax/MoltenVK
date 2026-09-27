@@ -201,14 +201,7 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 			if (!widenState || !widenState.maxTotalThreadsPerThreadgroup || !widenState.threadExecutionWidth) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "raw uint8 index conversion is unavailable."); return; }
 		}
 		if (!captureState || !captureState.maxTotalThreadsPerThreadgroup || !captureState.threadExecutionWidth) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "indexed compute capture pipeline is unavailable."); return; }
-		// Restrict encoder splitting to inspectable, single-sample attachments.
-		// Imageless framebuffer attachments live only in the encoder's private state.
-		auto* framebuffer = cmdEncoder->_pEncodingContext->getFramebuffer();
-		if (!framebuffer || framebuffer->getAttachments().size() == 0 || cmdEncoder->getSubpass()->getSampleCount() != VK_SAMPLE_COUNT_1_BIT) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "indexed compute capture requires explicit single-sample framebuffer attachments."); return; }
-		// Compute capture interrupts rendering; memoryless attachments cannot survive it.
-		for (auto* attachment : framebuffer->getAttachments()) {
-			if (attachment && attachment->getImage()->getMTLStorageMode() == MTLStorageModeMemoryless) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "indexed compute capture cannot preserve memoryless attachments."); return; }
-		}
+		if (const char* error = cmdEncoder->getIndexedPerVertexAttachmentError()) { reject(VK_ERROR_FEATURE_NOT_PRESENT, error); return; }
 	}
 	const auto& layout = pipeline->getPerVertexCapturedLayout();
 	auto topology = pipeline->getVkPrimitiveTopology();
