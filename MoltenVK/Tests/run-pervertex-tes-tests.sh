@@ -76,7 +76,7 @@ library dev ON ON
 library no-admission OFF ON
 library shipping OFF OFF
 library mutation-winding ON ON 's/uint slot = p\[2\] && corner \? 3 - corner : corner;/uint slot = !p[2] && corner ? 3 - corner : corner;/'
-library mutation-interior ON ON 's/const float t = 2\.0f \/ 9\.0f;/const float t = 0.25f;/'
+library mutation-interior ON ON 's/14563 \* q/16384 * q/g'
 library mutation-offset ON ON 's/uint key = offsets\[i\] \+ triangle;/uint key = triangle;/'
 
 cases=0
