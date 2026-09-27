@@ -7,7 +7,7 @@
 // deterministically. The shipping library must expose neither the extension nor the feature.
 // Usage: mesh-draw <shader-dir> <scenario>
 //   draw | grid | twice | reject-task | reject-descriptor | reject-per-primitive | reject-pervertex | reject-specialization | reject-indirect
-//   | reject-draw-id | reject-buffer-address | no-adapter | public-device-gate
+//   | reject-draw-id | reject-draw-id-uint | reject-buffer-address | no-adapter | public-device-gate
 // The refusal scenarios only create pipelines: nothing they build is ever submitted.
 #define VK_ENABLE_BETA_EXTENSIONS 1
 #include <vulkan/vulkan.h>
@@ -296,13 +296,14 @@ int main(int argc, char** argv) {
 		};
 
 		if (scenario == "reject-task" || scenario == "reject-descriptor" || scenario == "reject-per-primitive" || scenario == "reject-pervertex" || scenario == "reject-specialization" ||
-		    scenario == "reject-draw-id" || scenario == "reject-buffer-address") {
+		    scenario == "reject-draw-id" || scenario == "reject-draw-id-uint" || scenario == "reject-buffer-address") {
 			VkPipeline pipeline = VK_NULL_HANDLE;
 			VkResult result = scenario == "reject-task" ? createPipeline("mesh.mesh.spv", true, emptyLayout, pipeline)
 			                : scenario == "reject-descriptor" ? createPipeline("descriptor.mesh.spv", false, uniformLayout, pipeline)
 			                : scenario == "reject-pervertex" ? createPipeline("mesh.mesh.spv", false, emptyLayout, pipeline, "pervertex.frag.spv")
 			                : scenario == "reject-specialization" ? createPipeline("mesh.mesh.spv", false, emptyLayout, pipeline, "interp.frag.spv", true)
 			                : scenario == "reject-draw-id" ? createPipeline("draw-id.mesh.spv", false, emptyLayout, pipeline)
+			                : scenario == "reject-draw-id-uint" ? createPipeline("draw-id-uint.mesh.spv", false, emptyLayout, pipeline)
 			                : scenario == "reject-buffer-address" ? createPipeline("buffer-address.mesh.spv", false, emptyLayout, pipeline)
 			                : createPipeline("per-primitive.mesh.spv", false, emptyLayout, pipeline);
 			bool pass = result == VK_ERROR_FEATURE_NOT_PRESENT;

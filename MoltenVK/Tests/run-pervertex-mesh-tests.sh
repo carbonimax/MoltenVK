@@ -21,6 +21,12 @@ compile mesh.mesh grid.mesh.spv -DGRID
 compile mesh.mesh descriptor.mesh.spv -DDESCRIPTOR
 compile mesh.mesh per-primitive.mesh.spv -DPER_PRIMITIVE
 compile mesh.mesh draw-id.mesh.spv -DDRAW_ID
+# glslang declares DrawIndex as int, which SPIRV-Cross cannot yet compile for a mesh; HLSL compilers declare it as
+# uint, which compiles and would dereference the unbound spvDrawIndex: build that form too.
+spirv-dis "$output/shaders/draw-id.mesh.spv" | perl -0pe 's/(%gl_DrawIDARB = OpVariable %_ptr_Input_)int/${1}uint/; if (s/(%\w+) = OpLoad %int %gl_DrawIDARB/$1 = OpLoad %uint %gl_DrawIDARB/) { my $id = $1; s/OpConvertSToF %float \Q$id\E\b/OpConvertUToF %float $id/; }' > "$output/shaders/draw-id-uint.spvasm"
+spirv-as --target-env vulkan1.3 "$output/shaders/draw-id-uint.spvasm" -o "$output/shaders/draw-id-uint.mesh.spv"
+spirv-val --target-env vulkan1.3 "$output/shaders/draw-id-uint.mesh.spv"
+grep -q 'OpLoad %uint %gl_DrawIDARB' "$output/shaders/draw-id-uint.spvasm"
 compile mesh.mesh buffer-address.mesh.spv -DBUFFER_ADDRESS
 compile task.task task.task.spv
 compile interp.frag interp.frag.spv
@@ -50,7 +56,7 @@ run() { # library scenario
 	grep -E '^  |^MESH_DRAW|^VK_EXT|^DEVICE' "$log" | sed 's/^/    /' | head -6
 	if [[ $verdict != PASS ]]; then echo "STOP: inspect $log before any further GPU work"; exit 1; fi
 }
-for scenario in draw grid twice reject-task reject-descriptor reject-per-primitive reject-pervertex reject-specialization reject-indirect reject-draw-id reject-buffer-address no-adapter; do run dev "$scenario"; done
+for scenario in draw grid twice reject-task reject-descriptor reject-per-primitive reject-pervertex reject-specialization reject-indirect reject-draw-id reject-draw-id-uint reject-buffer-address no-adapter; do run dev "$scenario"; done
 run shipping public-device-gate
 rm -f "$output"/runs/*.rgba
 ( cd "$output" && shasum -a 256 shaders/* */PROVENANCE.txt runs/* dev/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib shipping/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib > EVIDENCE.sha256 )
