@@ -147,6 +147,14 @@ grep -l 'spvTessellationFactorsFloat' "$output"/dump/shader-tes-*.metal > "$outp
 grep -h 'spvTessLevel\[gl_PrimitiveID\]\.outer\[0\]' "$output"/dump/shader-tcs-*.metal | tee "$output/float32-store.txt"
 if grep -q 'half(' "$output/float32-store.txt"; then echo "FAIL: TCS level store still converts to half"; exit 1; fi
 echo "float32 TessLevel ABI: TCS $(wc -l < "$output/float32-tcs.txt" | tr -d ' ') file(s), TES $(wc -l < "$output/float32-tes.txt" | tr -d ' ') file(s)"
-( cd "$output" && shasum -a 256 shaders/* */PROVENANCE.txt */mutation.diff runs/* dump/* scratch.log float32-*.txt dev/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib > EVIDENCE.sha256 )
+# Unproven ordinary modes keep the half factors: fractional spacing and quads compile their TCS without float32.
+for mode in fractional quads; do
+	mkdir -p "$output/dump-$mode"
+	(cd "$output/runs" && env_run MVK_CONFIG_SHADER_DUMP_DIR="$output/dump-$mode" "$output/dev/topology" "$output/shaders" "reject-$mode" ccw "dump-$mode") > "$output/runs/dump-$mode.log" 2>&1
+	grep -l 'TessellationFactorsHalf\* spvTessLevel' "$output/dump-$mode"/shader-tcs-*.metal > "$output/half-$mode.txt"
+	if grep -l 'spvTessellationFactorsFloat' "$output/dump-$mode"/shader-tcs-*.metal; then echo "FAIL: unproven $mode TCS uses float32 levels"; exit 1; fi
+	echo "half TessLevel ABI kept for ordinary $mode: TCS $(wc -l < "$output/half-$mode.txt" | tr -d ' ') file(s)"
+done
+( cd "$output" && shasum -a 256 shaders/* */PROVENANCE.txt */mutation.diff runs/* dump/* dump-*/* scratch.log float32-*.txt half-*.txt dev/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib > EVIDENCE.sha256 )
 git -C "$root" ls-files -s MoltenVK MoltenVKShaderConverter ExternalRevisions > "$output/SOURCE-INDEX.txt"
 echo "PERVERTEX_TES_TOPOLOGY PASS: $cases cases on $head"
