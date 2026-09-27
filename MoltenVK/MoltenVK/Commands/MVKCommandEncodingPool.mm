@@ -194,12 +194,6 @@ id<MTLComputePipelineState> MVKCommandEncodingPool::getPerVertexTessTopologyMTLC
 	return _mtlPerVertexTessTopologyComputePipelineState;
 }
 
-id<MTLComputePipelineState> MVKCommandEncodingPool::getTessLevelsToHalfFactorsMTLComputePipelineState() {
-	lock_guard<mutex> lock(_lock);
-	if (!_mtlTessLevelsToHalfFactorsComputePipelineState) { _mtlTessLevelsToHalfFactorsComputePipelineState = _commandPool->getDevice()->getCommandResourceFactory()->newTessLevelsToHalfFactorsMTLComputePipelineState(_commandPool); }
-	return _mtlTessLevelsToHalfFactorsComputePipelineState;
-}
-
 void MVKCommandEncodingPool::clear() {
 	lock_guard<mutex> lock(_lock);
 	destroyMetalResources();
@@ -301,6 +295,5 @@ void MVKCommandEncodingPool::destroyMetalResources() {
 	[_mtlPerVertexRestartComputePipelineState release]; _mtlPerVertexRestartComputePipelineState = nil;
 	[_mtlPerVertexIndirectComputePipelineState release]; _mtlPerVertexIndirectComputePipelineState = nil;
 	[_mtlPerVertexTessTopologyComputePipelineState release]; _mtlPerVertexTessTopologyComputePipelineState = nil;
-	[_mtlTessLevelsToHalfFactorsComputePipelineState release]; _mtlTessLevelsToHalfFactorsComputePipelineState = nil;
     for (auto& state : _mtlConvertUint8IndicesComputePipelineState) { [state release]; state = nil; }
 }

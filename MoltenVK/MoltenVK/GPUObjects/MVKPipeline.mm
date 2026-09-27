@@ -921,6 +921,11 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
 		initMTLRenderPipelineState(pCreateInfo, reflectData, pPipelineFB, pVertexSS, pVertexFB, pTessCtlSS, pTessCtlFB, pTessEvalSS, pTessEvalFB, pFragmentSS, pFragmentFB);
 	}
 	if ( !_hasValidMTLPipelineStates ) { return; }
+	if (usesFloat32TessLevels()) {
+		if (shouldFailOnPipelineCompileRequired()) { setConfigurationResult(VK_PIPELINE_COMPILE_REQUIRED); _hasValidMTLPipelineStates = false; return; }
+		_mtlTessLevelsToHalfFactorsState = getDevice()->getCommandResourceFactory()->newTessLevelsToHalfFactorsMTLComputePipelineState(this);
+		if (!_mtlTessLevelsToHalfFactorsState || getConfigurationResult() != VK_SUCCESS) { _hasValidMTLPipelineStates = false; return; }
+	}
 
 	// Blending - must ignore allowed bad pColorBlendState pointer if rasterization disabled or no color attachments
 	if (_isRasterizingColor && pCreateInfo->pColorBlendState) {
@@ -2864,6 +2869,7 @@ MVKGraphicsPipeline::~MVKGraphicsPipeline() {
 		[_mtlTessVertexStageIndex16State release];
 		[_mtlTessVertexStageIndex32State release];
 		[_mtlTessControlStageState release];
+		[_mtlTessLevelsToHalfFactorsState release];
 		[_mtlPerVertexTessEvalState release];
 		for (auto& entry : _perVertexCapturePipelineStates) {
 			[entry.second.direct release];

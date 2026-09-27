@@ -451,11 +451,11 @@ static void encodePerVertexTessEval(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 // Ordinary tessellation that keeps float32 TCS levels: after the TCS, Vulkan classifies them into the separate half
 // factors Metal's tessellator reads (tessLevelsToHalfFactors), while the TES reads the float32 levels. The caller
 // binds the TCS parameters (patch count in word 1) at index 3, then dispatches at least one thread per patch.
-static MVKMetalComputeCommandEncoderState& bindTessLevelsToHalfFactors(MVKCommandEncoder* cmdEncoder, id<MTLComputeCommandEncoder> encoder,
+static MVKMetalComputeCommandEncoderState& bindTessLevelsToHalfFactors(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline, id<MTLComputeCommandEncoder> encoder,
 																	   const MVKMTLBufferAllocation* levels, const MVKMTLBufferAllocation* factors) {
 	[encoder memoryBarrierWithScope: MTLBarrierScopeBuffers];
 	auto& state = cmdEncoder->getMtlCompute();
-	state.bindPipeline(encoder, cmdEncoder->getCommandEncodingPool()->getTessLevelsToHalfFactorsMTLComputePipelineState());
+	state.bindPipeline(encoder, pipeline->getTessLevelsToHalfFactorsPipelineState());
 	state.bindBuffer(encoder, levels->_mtlBuffer, levels->_offset, 0);
 	state.bindBuffer(encoder, factors->_mtlBuffer, factors->_offset, 1);
 	float maxLevel = float(cmdEncoder->getDeviceProperties().limits.maxTessellationGenerationLevel);
@@ -619,7 +619,7 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
 									  threadsPerThreadgroup: MTLSizeMake(wgSize, 1, 1)];
 				}
                 if (tcFloatLevelBuff) {
-                    auto& state = bindTessLevelsToHalfFactors(cmdEncoder, mtlTessCtlEncoder, tcFloatLevelBuff, tcLevelBuff);
+                    auto& state = bindTessLevelsToHalfFactors(cmdEncoder, pipeline, mtlTessCtlEncoder, tcFloatLevelBuff, tcLevelBuff);
                     state.bindBytes(mtlTessCtlEncoder, &tessParams, sizeof(tessParams), 3);
                     [mtlTessCtlEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide(tessParams.patchCount, 64u), 1, 1)
                                       threadsPerThreadgroup: MTLSizeMake(64, 1, 1)];
@@ -913,7 +913,7 @@ void MVKCmdDrawIndexed::encode(MVKCommandEncoder* cmdEncoder) {
 									  threadsPerThreadgroup: MTLSizeMake(wgSize, 1, 1)];
 				}
                 if (tcFloatLevelBuff) {
-                    auto& state = bindTessLevelsToHalfFactors(cmdEncoder, mtlTessCtlEncoder, tcFloatLevelBuff, tcLevelBuff);
+                    auto& state = bindTessLevelsToHalfFactors(cmdEncoder, pipeline, mtlTessCtlEncoder, tcFloatLevelBuff, tcLevelBuff);
                     state.bindBytes(mtlTessCtlEncoder, &tessParams, sizeof(tessParams), 3);
                     [mtlTessCtlEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide(tessParams.patchCount, 64u), 1, 1)
                                       threadsPerThreadgroup: MTLSizeMake(64, 1, 1)];
@@ -1600,7 +1600,7 @@ void MVKCmdDrawIndirect::encode(MVKCommandEncoder* cmdEncoder) {
                     mtlIndBuffOfst += sizeof(MTLDispatchThreadgroupsIndirectArguments);
                     if (tcFloatLevelBuff) {
                         // The TCS grid of this draw has at least one thread per patch.
-                        auto& state = bindTessLevelsToHalfFactors(cmdEncoder, mtlTessCtlEncoder, tcFloatLevelBuff, tcLevelBuff);
+                        auto& state = bindTessLevelsToHalfFactors(cmdEncoder, pipeline, mtlTessCtlEncoder, tcFloatLevelBuff, tcLevelBuff);
                         state.bindBuffer(mtlTessCtlEncoder, tcParamsBuff->_mtlBuffer, mtlParmBuffOfst - paramsIncr, 3);
                         [mtlTessCtlEncoder dispatchThreadgroupsWithIndirectBuffer: mtlIndBuff
                                                              indirectBufferOffset: mtlIndBuffOfst - sizeof(MTLDispatchThreadgroupsIndirectArguments)
@@ -2012,7 +2012,7 @@ void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder, const MVKI
                     mtlTempIndBuffOfst += sizeof(MTLDispatchThreadgroupsIndirectArguments);
                     if (tcFloatLevelBuff) {
                         // The TCS grid of this draw has at least one thread per patch.
-                        auto& state = bindTessLevelsToHalfFactors(cmdEncoder, mtlTessCtlEncoder, tcFloatLevelBuff, tcLevelBuff);
+                        auto& state = bindTessLevelsToHalfFactors(cmdEncoder, pipeline, mtlTessCtlEncoder, tcFloatLevelBuff, tcLevelBuff);
                         state.bindBuffer(mtlTessCtlEncoder, tcParamsBuff->_mtlBuffer, mtlParmBuffOfst - paramsIncr, 3);
                         [mtlTessCtlEncoder dispatchThreadgroupsWithIndirectBuffer: mtlIndBuff
                                                              indirectBufferOffset: mtlTempIndBuffOfst - sizeof(MTLDispatchThreadgroupsIndirectArguments)

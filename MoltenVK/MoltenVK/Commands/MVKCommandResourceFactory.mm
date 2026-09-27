@@ -702,6 +702,10 @@ id<MTLRenderPipelineState> MVKCommandResourceFactory::newMTLRenderPipelineState(
 id<MTLComputePipelineState> MVKCommandResourceFactory::newMTLComputePipelineState(const char* funcName,
 																				  MVKVulkanAPIDeviceObject* owner) {
 	id<MTLFunction> mtlFunc = newFunctionNamed(funcName);							// temp retain
+	if (!mtlFunc) {
+		owner->setConfigurationResult(owner->reportError(VK_ERROR_INITIALIZATION_FAILED, "Could not find support compute shader function %s.", funcName));
+		return nil;
+	}
 	// Providing a function directly may cause issues with Metal shader validation layer object
 	// management for some reason, so create a temporary pipeline descriptor to provide instead.
 	MTLComputePipelineDescriptor* plDesc = [MTLComputePipelineDescriptor new];		// temp retain
