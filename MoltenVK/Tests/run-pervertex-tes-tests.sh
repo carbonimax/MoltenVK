@@ -78,6 +78,7 @@ library shipping OFF OFF
 library mutation-winding ON ON 's/uint slot = p\[2\] && corner \? 3 - corner : corner;/uint slot = !p[2] && corner ? 3 - corner : corner;/'
 library mutation-interior ON ON 's/14563 \* q/16384 * q/g'
 library mutation-offset ON ON 's/uint key = offsets\[i\] \+ triangle;/uint key = triangle;/'
+library mutation-helper-missing ON ON 's/kernel void tessLevelsToHalfFactors\(/kernel void tessLevelsToHalfFactorsUnavailable(/'
 
 cases=0
 check_log() { # log expected-exit actual-exit required...
@@ -144,6 +145,7 @@ topology mutation-winding cull ccw 2 "FAIL PerVertex replay matches ordinary TES
 topology mutation-winding f3 ccw 2 "FAIL ordered PerVertex values match the CPU model"
 topology mutation-interior f3 ccw 2 "FAIL PerVertex coordinates and positions bitwise equal to the hardware tessellator's"
 topology mutation-offset mixed ccw 2 "FAIL PerVertex replay matches ordinary TES coverage"
+topology mutation-helper-missing ordinary-levels-direct ccw 1 "Could not find support compute shader function tessLevelsToHalfFactors" "ERROR: Create pipeline case0-levels: -3"
 # 5. The float32 level ABI is live in the PerVertex TCS and TES compute kernels.
 mkdir -p "$output/dump"
 (cd "$output/runs" && env_run MVK_CONFIG_SHADER_DUMP_DIR="$output/dump" "$output/dev/topology" "$output/shaders" next ccw dump-next) > "$output/runs/dump-next.log" 2>&1

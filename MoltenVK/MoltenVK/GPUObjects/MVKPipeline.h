@@ -264,6 +264,7 @@ public:
 
 	/** Whether the ordinary tessellation path keeps float32 TCS levels and classifies them into Metal half factors. */
 	bool usesFloat32TessLevels() const { return _usesFloat32TessLevels && !usesPerVertexTessEval(); }
+	id<MTLComputePipelineState> getTessLevelsToHalfFactorsPipelineState() const { return _mtlTessLevelsToHalfFactorsState; }
 	id<MTLComputePipelineState> getPerVertexTessEvalPipelineState() const { return _mtlPerVertexTessEvalState; }
 	/** Counter-clockwise TES winding (upper-left domain origin) reverses the generator's clockwise corner order. */
 	bool perVertexTessReversesCorners() const { return _tessReflectData.windingOrder == spv::ExecutionModeVertexOrderCcw; }
@@ -430,6 +431,7 @@ protected:
 	id<MTLComputePipelineState> _mtlTessVertexStageIndex16State = nil;
 	id<MTLComputePipelineState> _mtlTessVertexStageIndex32State = nil;
 	id<MTLComputePipelineState> _mtlTessControlStageState = nil;
+	id<MTLComputePipelineState> _mtlTessLevelsToHalfFactorsState = nil;
 	id<MTLComputePipelineState> _mtlPerVertexTessEvalState = nil;
 	id<MTLRenderPipelineState> _mtlPipelineState = nil;
 	struct PerVertexCapturePipelineStates {
