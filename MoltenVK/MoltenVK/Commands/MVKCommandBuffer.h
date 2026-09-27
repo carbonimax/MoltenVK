@@ -141,6 +141,7 @@ public:
 	 * from the primary command buffer. If this is a primary command buffer, returns 1.
 	 */
 	uint32_t getViewCount() const;
+	uint32_t getViewMask() const;
 
 	/** Updated as renderpass commands are added. */
 	MVKCurrentSubpassInfo _currentSubpassInfo;
@@ -566,6 +567,7 @@ protected:
 
 	VkRect2D _renderArea;
 	MVKCommand* _lastMultiviewPassCmd;
+	size_t _firstSubpassPerVertexScratch = 0;
     MVKActivatedQueries* _pActivatedQueries;
 	MVKSmallVector<GPUCounterQuery, 16> _timestampStageCounterQueries;
 	MVKSmallVector<VkClearValue, kMVKDefaultAttachmentCount> _clearValues;

@@ -103,6 +103,10 @@ struct MVKCommandBuffer {
 	VkCommandBufferInheritanceInfo _secondaryInheritanceInfo{};
 	VkCommandBufferInheritanceRenderingInfo _secondaryInheritanceRenderingInfo{};
 	std::vector<MVKPerVertexScratchRequest> _perVertexScratchRequests;
+	uint32_t getViewMask() const { return 0; }
+	MVKCommandBuffer* getDevice() { return this; }
+	uint32_t getMultiviewMetalPassCount(uint32_t) { return 1; }
+	uint32_t getViewCountInMetalPass(uint32_t, uint32_t) { return 1; }
 	const MVKPhysicalDeviceMetalFeatures& getMetalFeatures() { return testFeatures; }
 	MVKPixelFormats* getPixelFormats() { return &testFormats; }
 	VkResult getConfigurationResult() { return VK_SUCCESS; }
