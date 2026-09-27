@@ -292,7 +292,7 @@ int main(int argc, char** argv) {
         VkSpecializationInfo specialization{};
         if (mode == "reject-specialization") stages[1].pSpecializationInfo = &specialization;
         VkResult pipelineResult = vkCreateGraphicsPipelines(device, cache, 1, &pipelineInfo, nullptr, &pipeline);
-        if (mode == "reject-public" || mode == "reject-factor" || mode == "reject-cache" || mode == "reject-patch-size" || mode == "reject-specialization") {
+        if (mode == "reject-public" || mode == "reject-cache" || mode == "reject-patch-size" || mode == "reject-specialization") {
             std::printf("pipeline rejection: %d (expected %d)\n", pipelineResult, VK_ERROR_FEATURE_NOT_PRESENT);
             if (pipeline) vkDestroyPipeline(device, pipeline, nullptr);
             if (cache) vkDestroyPipelineCache(device, cache, nullptr);
@@ -370,7 +370,7 @@ int main(int argc, char** argv) {
             vkCmdBindIndexBuffer(command, buffer, 0, VK_INDEX_TYPE_UINT16);
             vkCmdDrawIndexed(command, 6, 1, 0, 0, 0);
         } else {
-            vkCmdDraw(command, mode == "reject-count" ? 3 : 6, mode == "reject-instance" ? 2 : 1, mode == "reject-first" || mode == "reject-first-compute" ? 3 : 0, mode == "reject-first-instance-compute" ? 1 : 0);
+            vkCmdDraw(command, 6, mode == "reject-instance" ? 2 : 1, mode == "reject-first" || mode == "reject-first-compute" ? 3 : 0, mode == "reject-first-instance-compute" ? 1 : 0);
         }
         vkCmdEndRenderPass(command);
         VkImageMemoryBarrier imageBarrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -425,7 +425,7 @@ int main(int argc, char** argv) {
             vkDestroyInstance(instance, nullptr);
             return recorded == VK_ERROR_FEATURE_NOT_PRESENT && untouched && blue && rejectedBufferSubmissions == 0 && housekeepingSubmissions == 2 ? 0 : 2;
         }
-        if (mode == "reject-count" || mode == "reject-instance" || mode == "reject-first" || mode == "reject-indexed") {
+        if (mode == "reject-instance" || mode == "reject-first" || mode == "reject-indexed") {
             std::printf("recording rejection: %d (expected %d); no submission\n", recorded, VK_ERROR_FEATURE_NOT_PRESENT);
             vkDestroyDevice(device, nullptr);
             vkDestroyInstance(instance, nullptr);

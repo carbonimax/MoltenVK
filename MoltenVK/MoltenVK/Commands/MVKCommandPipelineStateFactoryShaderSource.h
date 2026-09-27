@@ -725,4 +725,81 @@ kernel void perVertexIndirect(const device uint8_t* args [[buffer(0)]], const de
         if (p[9]) { corners[occurrence] = corner; }
     }
 }
+
+// Portable PerVertexKHR TES topology for triangles with equal spacing, generated from the float32 levels
+// (outer[4], inner[2] per patch) the TCS actually wrote. Vulkan discards a patch whose first three outer
+// levels include one <= 0 or NaN, then clamps levels to [1, maxLevel] and rounds them up. Uniform levels 1,
+// 2 and 3 use the Metal topologies proven by the Vulkan oracles; any other level refuses the whole draw.
+// Levels are decoded from their bits, so NaN and sign tests survive fast math.
+// p: patches, maxLevel bits, reverse corners (counter-clockwise winding), corners output, phase, patch table word.
+// Plan words: 0 status, 4 replay draw, 64 replay constants (byte 256), 128 counts, then offsets; from word p[5],
+// the patch index of each generated triangle, which the fragment reads as Vulkan's PrimitiveId.
+uint perVertexTessLevel(uint bits, float maxLevel) {
+    if ((bits & 0x7fffffffu) > 0x7f800000u) { return 0; }  // NaN
+    if ((bits & 0x80000000u) || !(bits & 0x7fffffffu)) { return 1; }  // <= 0 clamps to 1
+    if (bits >= 0x7f800000u) { return uint(maxLevel); }
+    return uint(ceil(min(max(as_type<float>(bits), 1.0f), maxLevel)));
+}
+kernel void perVertexTessTopology(const device uint* levels [[buffer(0)]], device uint* plan [[buffer(1)]], device uint* invocations [[buffer(2)]], device uint* pairs [[buffer(3)]], device uint* triplets [[buffer(4)]], device uint* corners [[buffer(5)]], constant uint* p [[buffer(6)]], uint i [[thread_position_in_grid]]) {
+    uint patches = p[0];
+    device uint* counts = plan + 128;
+    device uint* offsets = plan + 128 + patches;
+    if (p[4] == 0) {
+        if (i >= patches) { return; }
+        const device uint* f = levels + 6 * ulong(i);
+        bool discarded = false;
+        for (uint k = 0; k < 3; ++k) { discarded |= (f[k] & 0x80000000u) || !(f[k] & 0x7fffffffu) || (f[k] & 0x7fffffffu) > 0x7f800000u; }
+        uint triangles = 0;
+        if (!discarded) {
+            float maxLevel = as_type<float>(p[1]);
+            uint n = perVertexTessLevel(f[0], maxLevel);
+            bool uniform = n && perVertexTessLevel(f[1], maxLevel) == n && perVertexTessLevel(f[2], maxLevel) == n && perVertexTessLevel(f[4], maxLevel) == n;
+            triangles = !uniform ? 0 : n == 1 ? 1 : n == 2 ? 6 : n == 3 ? 13 : 0;
+            if (!triangles) { atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint*>(plan), 1u, memory_order_relaxed); }
+        }
+        counts[i] = triangles;
+        return;
+    }
+    if (p[4] == 1) {
+        if (i) { return; }
+        // ponytail: serial prefix over patches; a parallel scan is needed for very large patch counts.
+        uint total = 0;
+        for (uint patch = 0; patch < patches; ++patch) { offsets[patch] = total; total += counts[patch]; }
+        uint records = plan[0] ? 0 : 3 * total;
+        invocations[0] = records; invocations[1] = 0; invocations[2] = 0; invocations[3] = 0;
+        plan[4] = records; plan[5] = records ? 1 : 0; plan[6] = 0; plan[7] = 0;
+        plan[64] = 0; plan[65] = 0; plan[66] = 0; plan[67] = records;
+        return;
+    }
+    if (i >= patches || plan[0] || !counts[i]) { return; }
+    // Clockwise (u,v) corner orders of the proven Metal topologies; counter-clockwise swaps corners 1 and 2.
+    // Coordinates are the M4 tessellator's, in 1/65536 steps: 1 - x is exact (Vulkan invariance rule 8), each
+    // edge vertex (x, 1-x) has its exact mirror (rule 3), and every edge is subdivided alike (rule 4).
+    const float q = 1.0f / 65536.0f;
+    const float3 points[12] = {
+        float3(1, 0, 0), float3(43691 * q, 21845 * q, 0), float3(21845 * q, 43691 * q, 0), float3(0, 1, 0),
+        float3(0, 43691 * q, 21845 * q), float3(0, 21845 * q, 43691 * q), float3(0, 0, 1),
+        float3(21845 * q, 0, 43691 * q), float3(43691 * q, 0, 21845 * q),
+        float3(36409 * q, 14564 * q, 14563 * q), float3(14563 * q, 36409 * q, 14564 * q), float3(14563 * q, 14563 * q, 36410 * q)};
+    const uint3 level3[13] = {uint3(9, 8, 0), uint3(9, 0, 1), uint3(10, 2, 3), uint3(10, 3, 4), uint3(11, 5, 6), uint3(11, 6, 7), uint3(9, 10, 11),
+        uint3(9, 1, 10), uint3(10, 1, 2), uint3(10, 4, 11), uint3(11, 4, 5), uint3(11, 7, 9), uint3(9, 7, 8)};
+    const float3 level2[7] = {float3(1, 0, 0), float3(0.5f, 0.5f, 0), float3(0, 1, 0), float3(0, 0.5f, 0.5f), float3(0, 0, 1), float3(0.5f, 0, 0.5f), float3(21845 * q, 21845 * q, 21846 * q)};
+    uint triangles = counts[i];
+    for (uint triangle = 0; triangle < triangles; ++triangle) {
+        uint key = offsets[i] + triangle;
+        plan[p[5] + key] = i;
+        for (uint corner = 0; corner < 3; ++corner) {
+            uint slot = p[2] && corner ? 3 - corner : corner;
+            float3 coordinate = triangles == 1 ? points[slot == 0 ? 0 : slot == 1 ? 3 : 6] : triangles == 6 ? level2[slot ? (triangle + slot - 1) % 6 : 6] : points[level3[triangle][slot]];
+            uint record = 3 * key + corner;
+            device uint* words = invocations + 4 + 8 * ulong(record);
+            words[0] = as_type<uint>(coordinate.x); words[1] = as_type<uint>(coordinate.y); words[2] = as_type<uint>(coordinate.z);
+            words[3] = i; words[4] = record; words[5] = 0; words[6] = 0; words[7] = 0;
+            pairs[2 * record] = record;
+            pairs[2 * record + 1] = key;
+            triplets[3 * key + corner] = record;
+            if (p[3]) { corners[record] = corner; }
+        }
+    }
+}
 )";

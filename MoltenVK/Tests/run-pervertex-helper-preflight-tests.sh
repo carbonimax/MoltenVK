@@ -20,13 +20,13 @@ source = read(commands + 'MVKCommandBuffer.mm')
 methods = re.findall(r'VkResult MVKCommandBuffer::reserve(?:Prefilled)?PerVertexScratch\([^\n]*\) \{\n.*?\n\}', source, re.S)
 assert len(methods) in (2, 3), 'Update production-method extraction for changed signatures'
 pool = read(commands + 'MVKCommandEncodingPool.mm')
-getters = re.findall(r'id<MTLComputePipelineState> MVKCommandEncodingPool::get(?:ConvertUint8Indices|PerVertexRestart|PerVertexIndirect)MTLComputePipelineState\([^\n]*\) \{\n.*?\n\}', pool, re.S)
-assert len(getters) in (2, 3)
+getters = re.findall(r'id<MTLComputePipelineState> MVKCommandEncodingPool::get(?:ConvertUint8Indices|PerVertexRestart|PerVertexIndirect|PerVertexTessTopology)MTLComputePipelineState\([^\n]*\) \{\n.*?\n\}', pool, re.S)
+assert len(getters) in (2, 3, 4)
 macro = re.search(r'#define MVK_ENC_REZ_ACCESS.*?(?=\n\n)', pool, re.S).group()
 (output / 'HelperPreflightMethods.inc').write_text(macro + '\n' + '\n'.join(getters + methods))
 scratch = read(commands + 'MVKPerVertexScratch.h')
 (output / 'MVKPerVertexScratch.h').write_text(scratch)
-(output / 'HelperPreflightVersion.inc').write_text('#define MVK_TEST_HAS_PREPARED_HELPER ' + str(int('indexPipeline' in scratch)) + '\n#define MVK_TEST_HAS_INDIRECT ' + str(int('indirectPipeline' in scratch)) + '\n')
+(output / 'HelperPreflightVersion.inc').write_text('#define MVK_TEST_HAS_PREPARED_HELPER ' + str(int('indexPipeline' in scratch)) + '\n#define MVK_TEST_HAS_INDIRECT ' + str(int('indirectPipeline' in scratch)) + '\n#define MVK_TEST_HAS_TES_TOPOLOGY ' + str(int('tessTopologyPipeline' in scratch)) + '\n')
 PY
 xcrun clang++ -std=c++17 -fblocks -arch arm64 -Wall -Wextra -Werror -fsanitize="${MVK_TEST_SANITIZERS:-address,undefined}" -I"$output" -I"$root/MoltenVK/MoltenVK/GPUObjects" -I"$root/External/Vulkan-Headers/include" "$test_dir/PerVertexHelperPreflightTests.mm" -framework Foundation -framework Metal -o "$output/helper-preflight-tests"
 "$output/helper-preflight-tests"

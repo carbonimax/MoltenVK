@@ -163,6 +163,7 @@ public:
 	VkResult recordPerVertexDraw(uint32_t vertexCount, uint32_t instanceCount, bool indexed = false);
 	/** Reserves the bounded scratch of a portable PerVertexKHR indirect command; its arguments are only read on the GPU. */
 	VkResult recordPerVertexIndirectDraw(bool indexed);
+	VkResult recordPerVertexTessEvalDraw(uint32_t vertexCount, uint32_t instanceCount, bool indexed);
 
 	/** Called when a timestamp command is added. */
 	void recordTimestampCommand();
