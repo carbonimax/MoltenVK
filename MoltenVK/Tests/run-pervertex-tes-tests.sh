@@ -23,6 +23,9 @@ tes=$test_dir/PerVertexTES
 compile() { glslangValidator -V --target-env vulkan1.1 "${@:3}" "$tes/$1" -o "$output/shaders/$2" > /dev/null; spirv-val --target-env vulkan1.1 "$output/shaders/$2"; }
 for name in triangle.vert triangle.tesc ordered.tese ordered.frag ordered-swapped.frag wrong-patch.frag control.frag noop.comp; do compile "$name" "$name.spv"; done
 compile topology.vert topology.vert.spv
+compile topology.vert drawid.vert.spv -DDRAWID
+compile topology.vert resources.vert.spv -DRESOURCES
+compile topology.tesc push.tesc.spv -DPUSH
 compile topology.tesc topology.tesc.spv
 compile topology.tesc descriptor.tesc.spv -DDESCRIPTOR
 compile topology.tese ccw.tese.spv
@@ -31,7 +34,9 @@ compile topology.tese quads.tese.spv -DQUADS
 compile topology.tese fractional.tese.spv -DFRACTIONAL
 compile topology.tese points.tese.spv -DPOINTS
 compile ordinary.frag ordinary.frag.spv
+compile ordinary.frag ordinary-resources.frag.spv -DRESOURCES
 compile interp.frag interp.frag.spv
+compile interp.frag interp-resources.frag.spv -DRESOURCES
 compile flat-ordered.frag flat-ordered.frag.spv
 compile flat-ordered.frag flat-swapped.frag.spv -DSWAP
 compile consistency.frag consistency.frag.spv
@@ -95,13 +100,14 @@ pilot() { # library mode fragment [control]
 }
 # 1. Topology from GPU-written float32 levels, both windings, against ordinary TES and the CPU model.
 for winding in ccw cw; do
-	for scenario in f1 f2 f3 next mixed nan fraction cull; do topology dev "$scenario" "$winding" 0 "TES_TOPOLOGY PASS"; done
+	for scenario in f1 f2 f3 next mixed nan fraction cull drawid; do topology dev "$scenario" "$winding" 0 "TES_TOPOLOGY PASS"; done
+	topology dev resources "$winding" 0 "TES_TOPOLOGY PASS" "VS storage counter: expected=9 ordinary=9 pervertex=9"
 	for scenario in level4 nonuniform inner-nan; do topology dev "$scenario" "$winding" 0 "TES_TOPOLOGY PASS" "PerVertex TES draw was not rendered"; done
 done
 PREFILL=1 topology dev mixed ccw 0 "TES_TOPOLOGY PASS"
 PREFILL=2 topology dev mixed cw 0 "TES_TOPOLOGY PASS"
 # 2. Deterministic refusals before submission; ordinary tessellation keeps these modes.
-for scenario in reject-quads reject-fractional reject-point-mode reject-lower-left reject-descriptor reject-cache reject-first-vertex reject-instances; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
+for scenario in reject-quads reject-fractional reject-point-mode reject-lower-left reject-descriptor reject-push-constant reject-cache reject-first-vertex reject-instances; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
 topology no-admission reject-no-admission ccw 0 "TES_TOPOLOGY PASS"
 topology shipping public-device-gate ccw 0 "TES_TOPOLOGY PASS"
 # 3. Pilot guarantees kept: fixture pixels, compute-bind recording guards, refusals.

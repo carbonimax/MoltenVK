@@ -376,6 +376,9 @@ static void encodePerVertexTessEval(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	id<MTLComputeCommandEncoder> compute = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
 	auto& computeState = cmdEncoder->getState().mtlCompute();
 	computeState.bindBuffer(compute, scratch->buffers[8], 0, pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::Output]);
+	// Admitted draws have DrawID 0 (direct draws; nonzero draw indices are refused at recording).
+	uint32_t drawIndex = 0;
+	if (pipeline->needsDrawIdBuffer()) { computeState.bindStructBytes(compute, &drawIndex, pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::DrawId]); }
 	[compute setStageInRegion:MTLRegionMake2D(0, 0, vertexCount, 1)];
 	[compute dispatchThreads:MTLSizeMake(vertexCount, 1, 1) threadsPerThreadgroup:MTLSizeMake(pipeline->getTessVertexStageState().threadExecutionWidth, 1, 1)];
 	[compute memoryBarrierWithScope:MTLBarrierScopeBuffers];
