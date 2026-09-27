@@ -14,6 +14,7 @@ using uint = uint32_t;
 static id<MTLDevice> gpu;
 static id<MTLCommandQueue> queue;
 static id<MTLComputePipelineState> pipeline;
+static id<MTLComputePipelineState> capturePipeline;
 static bool serialBaseline;
 #else
 using std::min;
@@ -53,6 +54,18 @@ static void assemble(const uint8_t* source, uint* compact, uint* pairs, uint* tr
     };
     if (serialBaseline) { width = 1; dispatch(0, 0, 0, 1); }
     else { mvkDispatchPerVertexRestart(p[0], p[1], VkPrimitiveTopology(p[3]), dispatch); }
+    // Exercise the SPIRV-Cross capture ABI with production's original stage-in region
+    // and GPU-compacted indirect dispatch. Metal grid_size comes from the region.
+    id<MTLBuffer> captured = nil;
+    if (capturePipeline && p[0] && p[1]) {
+        captured = [gpu newBufferWithLength:size_t(p[0]) * p[1] * 2 * sizeof(uint) options:MTLResourceStorageModeShared];
+        std::memset(captured.contents, 0xcd, captured.length);
+        [encoder setComputePipelineState:capturePipeline];
+        [encoder setBuffer:buffers[1] offset:4 * guardWords atIndex:0];
+        [encoder setBuffer:captured offset:0 atIndex:1];
+        [encoder setStageInRegion:MTLRegionMake2D(uint(-3), p[5], p[0], p[1])];
+        [encoder dispatchThreadgroupsWithIndirectBuffer:buffers[5] indirectBufferOffset:4 * guardWords threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    }
     [encoder endEncoding];
     id<MTLBlitCommandEncoder> readback = [command blitCommandEncoder];
     for (uint slot : {1u, 5u}) { [readback copyFromBuffer:buffers[slot] sourceOffset:0 toBuffer:staging[slot] destinationOffset:0 size:staging[slot].length]; }
@@ -69,6 +82,20 @@ static void assemble(const uint8_t* source, uint* compact, uint* pairs, uint* tr
         std::exit(1);
     }
     for (uint slot = 1; slot < 6; ++slot) { if (lengths[slot]) { std::memcpy(const_cast<void*>(host[slot]), staging[slot].contents, lengths[slot]); } }
+    if (captured) {
+        const auto* records = static_cast<const uint*>(captured.contents);
+        uint actualPrimitives = args[4] / vertices;
+        for (uint instance = 0; instance < p[1]; ++instance) {
+            for (uint primitive = 0; primitive < actualPrimitives; ++primitive) {
+                for (uint corner = 0; corner < 3; ++corner) {
+                    uint record = triplets[3 * (instance * actualPrimitives + primitive) + corner];
+                    assert(record < p[0] * p[1]);
+                    assert(records[2 * record] == compact[triplets[3 * primitive + corner]] + uint(-3));
+                    assert(records[2 * record + 1] == p[5] + instance);
+                }
+            }
+        }
+    }
     std::printf("GPU: n=%u instances=%u width=%u topology=%u last=%u %.3f ms\n", p[0], p[1], p[2], p[3], p[4], 1000 * (command.GPUEndTime - command.GPUStartTime));
 #else
     (void)guardWords;
@@ -116,15 +143,15 @@ static void check(const std::vector<int64_t>& input, uint bytes, VkPrimitiveTopo
         for (uint primitive = 0; primitive < primitives; ++primitive) {
             uint key = instance * primitives + primitive;
             for (uint corner = 0; corner < 3; ++corner) {
-                uint record = instance * uint(expectedCompact.size()) + expectedTriplets[3 * primitive + corner];
+                uint record = instance * uint(input.size()) + expectedTriplets[3 * primitive + corner];
                 assert(triplets[1 + 3 * key + corner] == record);
                 if (corner >= vertices) { continue; }
                 uint occurrence = key * vertices + corner;
                 assert(pairs[1 + 2 * occurrence] == record && pairs[2 + 2 * occurrence] == key);
                 assert(corners[1 + occurrence] == (withCorners ? corner : guard));
-                // Dense records preserve repeated indices, signed base vertex, and base instance.
-                assert(compact[1 + record % expectedCompact.size()] + uint(-3) == expectedCompact[record % expectedCompact.size()] + uint(-3));
-                assert(record / expectedCompact.size() + 17 == instance + 17);
+                // Compacted occurrences retain the original per-instance capture stride.
+                assert(compact[1 + record % input.size()] + uint(-3) == expectedCompact[record % input.size()] + uint(-3));
+                assert(record / input.size() + 17 == instance + 17);
             }
         }
     }
@@ -158,16 +185,20 @@ int main(int argc, char** argv) {
         NSError* error = nil;
         NSString* source = [NSString stringWithContentsOfFile:[NSString stringWithUTF8String:argv[1]] encoding:NSUTF8StringEncoding error:&error];
         if (!source || serialBaseline != [source containsString:@"for (uint i = 0; i < p[0]; ++i)"]) { std::fputs("FAIL: serial mode requires the pre-parallel restart kernel; parallel mode requires the current kernel\n", stderr); return 1; }
+        source = [source stringByAppendingString:@"\nkernel void testCapture(const device uint* indices [[buffer(0)]], device uint2* records [[buffer(1)]], uint3 gid [[thread_position_in_grid]], uint3 size [[grid_size]], uint3 origin [[grid_origin]]) { if (any(gid >= size)) return; records[gid.y * size.x + gid.x] = uint2(indices[gid.x] + origin.x, gid.y + origin.y); }\n"];
         MTLCompileOptions* options = [MTLCompileOptions new];
         options.languageVersion = MTLLanguageVersion2_4;
         id<MTLLibrary> library = [gpu newLibraryWithSource:source options:options error:&error];
         if (!library) { std::fprintf(stderr, "FAIL: Metal library: %s\n", error.description.UTF8String); return 1; }
         pipeline = [gpu newComputePipelineStateWithFunction:[library newFunctionWithName:@"perVertexRestart"] error:&error];
         if (!pipeline) { std::fprintf(stderr, "FAIL: Metal pipeline: %s\n", error.description.UTF8String); return 1; }
+        capturePipeline = [gpu newComputePipelineStateWithFunction:[library newFunctionWithName:@"testCapture"] error:&error];
+        if (!capturePipeline) { std::fprintf(stderr, "FAIL: capture pipeline: %s\n", error.description.UTF8String); return 1; }
         std::printf("Device: %s\n", gpu.name.UTF8String);
         // Optional comparison stays inside the original serial kernel's admitted boundary.
         if (argc == 3) {
             assert(serialBaseline || std::strcmp(argv[2], "parallel") == 0);
+            capturePipeline = nil; // Keep the optional serial/parallel timings assembly-only.
             std::vector<int64_t> input(65536, 9);
             for (uint i = 127; i < input.size(); i += 257) { input[i] = -1; }
             for (uint repeat = 0; repeat < 6; ++repeat) { check(input, 4, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true, 1, true); }
@@ -175,6 +206,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         checkReexecution();
+        check({7, 8, 9, -1, 10, 11, 12}, 4, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, false, 2, true);
         for (uint topology = 0; topology <= 5; ++topology) {
             @autoreleasepool {
                 check({}, 4, VkPrimitiveTopology(topology), false, 1, true);
