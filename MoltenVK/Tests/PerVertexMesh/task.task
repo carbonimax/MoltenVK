@@ -1,0 +1,7 @@
+#version 450
+// Copyright 2026 Jean-Philippe Meunier
+// SPDX-License-Identifier: Apache-2.0
+// A task shader launching one mesh workgroup: the first MoltenVK mesh path refuses task stages.
+#extension GL_EXT_mesh_shader : require
+layout(local_size_x = 1) in;
+void main() { EmitMeshTasksEXT(1, 1, 1); }
