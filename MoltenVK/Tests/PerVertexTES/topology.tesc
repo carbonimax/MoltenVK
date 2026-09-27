@@ -7,12 +7,18 @@ layout(location = 0) in vec4 vLevels[];
 #ifdef DESCRIPTOR
 layout(set = 0, binding = 0) uniform Scale { float scale; } ubo;
 #endif
+#ifdef PUSH
+layout(push_constant) uniform Push { float scale; } push;
+#endif
 void main() {
 	gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;
 	if (gl_InvocationID == 0) {
 		vec4 levels = vLevels[0];
 #ifdef DESCRIPTOR
 		levels *= ubo.scale;
+#endif
+#ifdef PUSH
+		levels *= push.scale;
 #endif
 		gl_TessLevelOuter[0] = levels.x;
 		gl_TessLevelOuter[1] = levels.y;

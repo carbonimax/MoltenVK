@@ -1176,14 +1176,14 @@ void MVKGraphicsPipeline::initMTLRenderPipelineState(const VkGraphicsPipelineCre
 	}
 }
 
-// Whether the stage's entry point statically uses any descriptor-set resource.
-static bool mvkUsesDescriptors(const std::vector<uint32_t>& spirv, spv::ExecutionModel model) {
+// Whether the stage's entry point statically uses any descriptor-set resource or push constants.
+static bool mvkUsesResources(const std::vector<uint32_t>& spirv, spv::ExecutionModel model) {
 	SPIRV_CROSS_NAMESPACE::Compiler reflect(spirv);
 	reflect.set_entry_point("main", model);
 	auto resources = reflect.get_shader_resources(reflect.get_active_interface_variables());
 	return !resources.uniform_buffers.empty() || !resources.storage_buffers.empty() || !resources.storage_images.empty() ||
 		!resources.sampled_images.empty() || !resources.separate_images.empty() || !resources.separate_samplers.empty() ||
-		!resources.subpass_inputs.empty() || !resources.acceleration_structures.empty();
+		!resources.subpass_inputs.empty() || !resources.acceleration_structures.empty() || !resources.push_constant_buffers.empty();
 }
 
 bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCreateInfo* pCreateInfo, const VkPipelineShaderStageCreateInfo* pVertexSS, const VkPipelineShaderStageCreateInfo* pFragmentSS) {
@@ -1228,9 +1228,10 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 			if (stage.pSpecializationInfo || stage.pNext || stage.flags || strcmp(stage.pName, "main")) { return unsupported("TES test requires unspecialized main entry points."); }
 		}
 		// The float32 TessLevel ABI excludes Metal argument buffers, so TCS and TES must not use descriptors.
-		if (mvkUsesDescriptors(_tessCtlModule->getSPIRV(), spv::ExecutionModelTessellationControl) ||
-			mvkUsesDescriptors(_tessEvalModule->getSPIRV(), spv::ExecutionModelTessellationEvaluation)) {
-			return unsupported("TES requires descriptor-free TCS and TES stages for the float32 tessellation level ABI.");
+		// Push constants in these stages are not qualified either.
+		if (mvkUsesResources(_tessCtlModule->getSPIRV(), spv::ExecutionModelTessellationControl) ||
+			mvkUsesResources(_tessEvalModule->getSPIRV(), spv::ExecutionModelTessellationEvaluation)) {
+			return unsupported("TES requires TCS and TES stages without descriptors or push constants for the float32 tessellation level ABI.");
 		}
 		// The persistent cache serializes the TES options, but this test path does not qualify cache reuse.
 		if (_pipelineCache) { return unsupported("TES test disables Vulkan pipeline caches."); }

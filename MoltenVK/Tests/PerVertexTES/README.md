@@ -8,10 +8,10 @@ A PerVertexKHR pipeline with tessellation is admitted only for:
 
 - triangles, equal spacing, `cw` or `ccw`, no point mode;
 - three input and output control points, and the default upper-left domain origin (no `VkPipelineTessellationDomainOriginStateCreateInfo`);
-- TCS and TES without descriptor resources, because the float32 TessLevel ABI excludes Metal argument buffers;
+- TCS and TES without descriptor resources or push constants, because the float32 TessLevel ABI excludes Metal argument buffers (VS and fragment resources are allowed and use the pipeline's own binding model);
 - vertex inputs without divisors, static state, a single view and a single sample;
 - no pipeline cache and no specialization;
-- direct non-indexed draws of one instance with `firstVertex`, `firstInstance` and DrawID equal to 0.
+- direct non-indexed draws of one instance with `firstVertex`, `firstInstance` and DrawID equal to 0 (the VS reads a bound DrawID of 0).
 
 Any other pipeline mode returns `VK_ERROR_FEATURE_NOT_PRESENT` at `vkCreateGraphicsPipelines`. Any other draw fails at `vkEndCommandBuffer`, before submission.
 
@@ -45,6 +45,8 @@ Scenarios cover:
 - a patch discarded by a zero or a NaN outer level, placed between patches with different levels;
 - clamped fractional levels;
 - back-face culling with a mirrored patch;
+- `gl_DrawID` folded into the VS output;
+- a VS storage-buffer counter and a fragment uniform scale under default argument buffers: the VS runs exactly once per vertex, discarded patches included;
 - both windings;
 - level 4, non-uniform levels and a NaN inner level, which must be refused with `VK_ERROR_DEVICE_LOST` and no pixel.
 
@@ -71,7 +73,7 @@ Proven on one Apple M4 Pro (macOS 27.2, Xcode 27.1) only. Not supported:
 
 - other levels, spacings, domains or domain origins;
 - point mode;
-- descriptors in TCS/TES, instancing, multiview, indexed or indirect draws;
+- descriptors or push constants in TCS/TES, instancing, multiview, indexed or indirect draws;
 - pipeline caches;
 - other GPU families.
 

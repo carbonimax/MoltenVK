@@ -57,6 +57,8 @@ struct Scenario {
 	std::vector<Patch> reference;  // Ordinary pipeline input with the same Vulkan levels.
 	bool expectLost = false;
 	bool cull = false;
+	std::string vertex = "topology.vert.spv";
+	bool resources = false;  // VS storage-buffer counter and fragment uniform scale.
 };
 
 // Vulkan levels after clamp and round-up, or 0 for a discarded patch.
@@ -92,7 +94,7 @@ static std::array<std::array<double, 2>, 3> controlPoints(uint32_t patch, bool m
 	return points;
 }
 
-struct Image { std::vector<uint8_t> rgba; VkResult submit = VK_SUCCESS, wait = VK_SUCCESS; };
+struct Image { std::vector<uint8_t> rgba; VkResult submit = VK_SUCCESS, wait = VK_SUCCESS; uint32_t invocations = 0; };
 
 int main(int argc, char** argv) {
 	try {
@@ -115,6 +117,8 @@ int main(int argc, char** argv) {
 		scenarios["cull"] = {{uniform(three), uniform(three, true), uniform(two)}, {}, false, true};
 		scenarios["level4"] = {{uniform(bits(4.0f)), uniform(two)}, {}, true};
 		scenarios["nonuniform"] = {{{{one, two, one, one}}}, {}, true};
+		scenarios["drawid"] = {{uniform(two), uniform(three)}, {}, false, false, "drawid.vert.spv"};
+		scenarios["resources"] = {{uniform(two), {{0, three, three, three}}, uniform(three)}, {}, false, false, "resources.vert.spv", true};
 		scenarios["inner-nan"] = {{{{two, two, two, nan}}}, {}, true};
 		const bool rejection = scenarioName.rfind("reject-", 0) == 0 || scenarioName == "public-device-gate";
 		if (!rejection && !scenarios.count(scenarioName)) throw std::runtime_error("Unknown scenario");
@@ -168,8 +172,13 @@ int main(int argc, char** argv) {
 		std::vector<VkQueueFamilyProperties> families(count);
 		vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, families.data());
 		while (!(families.at(family).queueFlags & VK_QUEUE_GRAPHICS_BIT)) ++family;
+		VkPhysicalDeviceShaderDrawParametersFeatures drawParameters{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES};
+		barycentric.pNext = &drawParameters;
+		vkGetPhysicalDeviceFeatures2(physical, &features);
+		if (!drawParameters.shaderDrawParameters || !features.features.vertexPipelineStoresAndAtomics) throw std::runtime_error("Draw parameters or vertex stores unavailable");
 		features.features = {};
 		features.features.tessellationShader = VK_TRUE;
+		features.features.vertexPipelineStoresAndAtomics = VK_TRUE;
 		float priority = 1;
 		VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
 		queueInfo.queueFamilyIndex = family;
@@ -222,6 +231,10 @@ int main(int argc, char** argv) {
 		Buffer vertices = makeBuffer(3 * 3 * kVertexStride, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 		Buffer staging = makeBuffer(vertices.size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
 		Buffer readback = makeBuffer(kWidth * kHeight * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+		Buffer counter = makeBuffer(256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+		Buffer scale = makeBuffer(256, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+		const float scaleValue[4] = {1.0f, 0.5f, 1.0f, 1.0f};
+		memcpy(scale.data, scaleValue, sizeof(scaleValue));
 
 		VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
 		imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -285,12 +298,49 @@ int main(int argc, char** argv) {
 		setLayoutInfo.pBindings = &uniformBinding;
 		VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
 		check(vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &setLayout), "Create set layout");
+		// VS storage counter and fragment uniform scale, bound through the default Metal argument buffers.
+		VkDescriptorSetLayoutBinding resourceBindings[2] = {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr}, {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
+		setLayoutInfo.bindingCount = 2;
+		setLayoutInfo.pBindings = resourceBindings;
+		VkDescriptorSetLayout resourceSetLayout = VK_NULL_HANDLE;
+		check(vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &resourceSetLayout), "Create resource set layout");
+		VkDescriptorPoolSize poolSizes[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}, {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}};
+		VkDescriptorPoolCreateInfo descriptorPoolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+		descriptorPoolInfo.maxSets = 1;
+		descriptorPoolInfo.poolSizeCount = 2;
+		descriptorPoolInfo.pPoolSizes = poolSizes;
+		VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+		check(vkCreateDescriptorPool(device, &descriptorPoolInfo, nullptr, &descriptorPool), "Create descriptor pool");
+		VkDescriptorSetAllocateInfo setAllocation{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+		setAllocation.descriptorPool = descriptorPool;
+		setAllocation.descriptorSetCount = 1;
+		setAllocation.pSetLayouts = &resourceSetLayout;
+		VkDescriptorSet resourceSet = VK_NULL_HANDLE;
+		check(vkAllocateDescriptorSets(device, &setAllocation, &resourceSet), "Allocate descriptor set");
+		VkDescriptorBufferInfo bufferInfos[2] = {{counter.buffer, 0, VK_WHOLE_SIZE}, {scale.buffer, 0, VK_WHOLE_SIZE}};
+		VkWriteDescriptorSet writes[2]{};
+		for (uint32_t i = 0; i < 2; ++i) {
+			writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			writes[i].dstSet = resourceSet;
+			writes[i].dstBinding = i;
+			writes[i].descriptorCount = 1;
+			writes[i].descriptorType = i ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			writes[i].pBufferInfo = &bufferInfos[i];
+		}
+		vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
 		VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-		VkPipelineLayout emptyLayout = VK_NULL_HANDLE, uniformLayout = VK_NULL_HANDLE;
+		VkPipelineLayout emptyLayout = VK_NULL_HANDLE, uniformLayout = VK_NULL_HANDLE, resourceLayout = VK_NULL_HANDLE, pushLayout = VK_NULL_HANDLE;
 		check(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &emptyLayout), "Create pipeline layout");
 		layoutInfo.setLayoutCount = 1;
 		layoutInfo.pSetLayouts = &setLayout;
 		check(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &uniformLayout), "Create uniform pipeline layout");
+		layoutInfo.pSetLayouts = &resourceSetLayout;
+		check(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &resourceLayout), "Create resource pipeline layout");
+		VkPushConstantRange pushRange{VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 0, 4};
+		layoutInfo.setLayoutCount = 0;
+		layoutInfo.pushConstantRangeCount = 1;
+		layoutInfo.pPushConstantRanges = &pushRange;
+		check(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pushLayout), "Create push-constant pipeline layout");
 
 		std::map<std::string, VkShaderModule> modules;
 		auto module = [&](const std::string& name) {
@@ -304,11 +354,11 @@ int main(int argc, char** argv) {
 			check(vkCreateShaderModule(device, &info, nullptr, &result), "Create shader module");
 			return modules[name] = result;
 		};
-		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, cache = false, uniform = false; };
+		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, cache = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; };
 		auto createPipeline = [&](const PipelineOptions& o, VkPipeline& pipeline) {
 			VkPipelineShaderStageCreateInfo stages[4]{};
 			const VkShaderStageFlagBits stageBits[4] = {VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, VK_SHADER_STAGE_FRAGMENT_BIT};
-			const std::string names[4] = {"topology.vert.spv", o.tesc, o.tese, o.frag};
+			const std::string names[4] = {o.vert, o.tesc, o.tese, o.frag};
 			for (int i = 0; i < 4; ++i) {
 				stages[i].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 				stages[i].stage = stageBits[i];
@@ -358,7 +408,7 @@ int main(int argc, char** argv) {
 			info.pRasterizationState = &raster;
 			info.pMultisampleState = &multisample;
 			info.pColorBlendState = &blend;
-			info.layout = o.uniform ? uniformLayout : emptyLayout;
+			info.layout = o.uniform ? uniformLayout : o.resources ? resourceLayout : o.push ? pushLayout : emptyLayout;
 			info.renderPass = renderPass;
 			VkPipelineCache cache = VK_NULL_HANDLE;
 			if (o.cache) {
@@ -384,7 +434,7 @@ int main(int argc, char** argv) {
 		check(vkCreateFence(device, &fenceInfo, nullptr, &fence), "Create fence");
 
 		// Records: host zeros the vertex buffer; the GPU copies positions and levels, then draws.
-		auto record = [&](VkPipeline pipeline, const std::vector<Patch>& patches, uint32_t firstVertex, uint32_t instances) {
+		auto record = [&](VkPipeline pipeline, const std::vector<Patch>& patches, uint32_t firstVertex, uint32_t instances, bool resources) {
 			memset(staging.data, 0, staging.size);
 			for (uint32_t p = 0; p < patches.size(); ++p) {
 				auto points = controlPoints(p, patches[p].mirrored);
@@ -419,6 +469,7 @@ int main(int argc, char** argv) {
 			VkClearRect priorRect{{{0, 0}, {2, 2}}, 0, 1};
 			vkCmdClearAttachments(command, 1, &prior, 1, &priorRect);
 			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+			if (resources) vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, resourceLayout, 0, 1, &resourceSet, 0, nullptr);
 			VkDeviceSize offset = 0;
 			vkCmdBindVertexBuffers(command, 0, 1, &vertices.buffer, &offset);
 			vkCmdDraw(command, uint32_t(3 * patches.size()), instances, firstVertex, 0);
@@ -437,16 +488,17 @@ int main(int argc, char** argv) {
 			imageCopy.imageExtent = {kWidth, kHeight, 1};
 			vkCmdCopyImageToBuffer(command, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1, &imageCopy);
 			VkMemoryBarrier toHost{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-			toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
 			toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-			vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, nullptr, 0, nullptr);
+			vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, nullptr, 0, nullptr);
 			return vkEndCommandBuffer(command);
 		};
 		auto render = [&](const PipelineOptions& o, const std::vector<Patch>& patches, const std::string& name) {
 			VkPipeline pipeline = VK_NULL_HANDLE;
 			check(createPipeline(o, pipeline), ("Create pipeline " + name).c_str());
-			check(record(pipeline, patches, 0, 1), ("Record " + name).c_str());
+			check(record(pipeline, patches, 0, 1, o.resources), ("Record " + name).c_str());
 			memset(vertices.data, 0, vertices.size);
+			memset(counter.data, 0, counter.size);
 			memset(readback.data, 0, readback.size);
 			check(vkResetFences(device, 1, &fence), "Reset fence");
 			VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -457,7 +509,8 @@ int main(int argc, char** argv) {
 			result.wait = result.submit == VK_SUCCESS ? vkWaitForFences(device, 1, &fence, VK_TRUE, 20000000000ull) : result.submit;
 			result.rgba.assign(readback.data, readback.data + readback.size);
 			std::ofstream(prefix + "-" + name + ".rgba", std::ios::binary).write(reinterpret_cast<const char*>(result.rgba.data()), result.rgba.size());
-			std::printf("render %s submit=%d wait=%d\n", name.c_str(), result.submit, result.wait);
+			memcpy(&result.invocations, counter.data, 4);
+			std::printf("render %s submit=%d wait=%d vs_counter=%u\n", name.c_str(), result.submit, result.wait, result.invocations);
 			return result;
 		};
 
@@ -473,10 +526,11 @@ int main(int argc, char** argv) {
 			else if (scenarioName == "reject-lower-left") o.lowerLeft = true;
 			else if (scenarioName == "reject-descriptor") { o.tesc = "descriptor.tesc.spv"; o.uniform = true; }
 			else if (scenarioName == "reject-cache") o.cache = true;
+			else if (scenarioName == "reject-push-constant") { o.tesc = "push.tesc.spv"; o.push = true; }
 			else if (scenarioName == "reject-no-admission") {}
 			else if (scenarioName == "reject-first-vertex" || scenarioName == "reject-instances") {
 				check(createPipeline(o, pipeline), "Create admitted pipeline");
-				actual = record(pipeline, {uniform(two)}, scenarioName == "reject-first-vertex" ? 3 : 0, scenarioName == "reject-instances" ? 2 : 1);
+				actual = record(pipeline, {uniform(two)}, scenarioName == "reject-first-vertex" ? 3 : 0, scenarioName == "reject-instances" ? 2 : 1, false);
 				std::printf("TES_TOPOLOGY %s %s: vkEndCommandBuffer=%d expected=%d, nothing submitted\n", actual == expected ? "PASS" : "FAIL", scenarioName.c_str(), actual, expected);
 				return actual == expected ? 0 : 2;
 			} else throw std::runtime_error("Unknown refusal");
@@ -508,13 +562,28 @@ int main(int argc, char** argv) {
 			return pass ? 0 : 2;
 		}
 
-		Image ordinaryImage = render({"topology.tesc.spv", tese, "ordinary.frag.spv", scenario.cull}, scenario.reference, "ordinary");
-		Image interp = render({"topology.tesc.spv", tese, "interp.frag.spv", scenario.cull}, scenario.patches, "interp");
-		Image ordered = render({"topology.tesc.spv", tese, "flat-ordered.frag.spv", scenario.cull}, scenario.patches, "ordered");
-		Image swapped = render({"topology.tesc.spv", tese, "flat-swapped.frag.spv", scenario.cull}, scenario.patches, "swapped");
-		Image consistency = render({"topology.tesc.spv", tese, "consistency.frag.spv", scenario.cull}, scenario.patches, "consistency");
+		auto options = [&](const std::string& frag) {
+			PipelineOptions o{"topology.tesc.spv", tese, frag, scenario.cull};
+			o.vert = scenario.vertex;
+			o.resources = scenario.resources;
+			return o;
+		};
+		const std::string suffix = scenario.resources ? "-resources.frag.spv" : ".frag.spv";
+		Image ordinaryImage = render(options("ordinary" + suffix), scenario.reference, "ordinary");
+		Image interp = render(options("interp" + suffix), scenario.patches, "interp");
+		Image ordered = render(options("flat-ordered.frag.spv"), scenario.patches, "ordered");
+		Image swapped = render(options("flat-swapped.frag.spv"), scenario.patches, "swapped");
+		Image consistency = render(options("consistency.frag.spv"), scenario.patches, "consistency");
 		for (const Image* image : {&ordinaryImage, &interp, &ordered, &swapped, &consistency}) pass &= image->submit == VK_SUCCESS && image->wait == VK_SUCCESS;
 		verdict(pass, "all submissions and fences succeed");
+		if (scenario.resources) {
+			// Vulkan runs the VS for every vertex, discarded patches included; MoltenVK runs it exactly once.
+			uint32_t vertexCount = uint32_t(3 * scenario.patches.size());
+			bool exact = true;
+			for (const Image* image : {&ordinaryImage, &interp, &ordered, &swapped, &consistency}) exact &= image->invocations == vertexCount;
+			std::printf("  VS storage counter: expected=%u ordinary=%u pervertex=%u\n", vertexCount, ordinaryImage.invocations, interp.invocations);
+			verdict(exact, "VS side effects run once per vertex in ordinary and PerVertex pipelines, discarded patch included");
+		}
 
 		// 1. Coverage and interpolated values against the ordinary hardware TES pipeline.
 		uint32_t coverageMismatch = 0, valueMismatch = 0, coveredPixels = 0, maxDifference = 0;
