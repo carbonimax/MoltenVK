@@ -20,7 +20,8 @@ layout(location = 1) out vec3 interpolatedColor;
 layout(location = 2) out vec3 tessCoord;
 layout(location = 3) out vec3 patchPixel;  // TES gl_PrimitiveID, then the pixel position.
 #ifdef CAPTURE
-// Ordinary pipelines only: records the hardware tessellation coordinates of every TES invocation.
+// Ordinary pipelines only: records the hardware tessellation coordinates of every TES invocation, and the levels
+// it reads, which Vulkan defines as the values the TCS wrote.
 layout(set = 0, binding = 0) buffer Capture { uint count; uint words[]; } capture;
 #endif
 void main() {
@@ -33,13 +34,17 @@ void main() {
 	patchPixel = vec3(float(gl_PrimitiveID), pixel);
 #ifdef CAPTURE
 	uint slot = atomicAdd(capture.count, 1u);
-	if (6u * slot + 6u <= uint(capture.words.length())) {
-		capture.words[6u * slot] = uint(gl_PrimitiveID);
-		capture.words[6u * slot + 1u] = floatBitsToUint(gl_TessCoord.x);
-		capture.words[6u * slot + 2u] = floatBitsToUint(gl_TessCoord.y);
-		capture.words[6u * slot + 3u] = floatBitsToUint(gl_TessCoord.z);
-		capture.words[6u * slot + 4u] = floatBitsToUint(pixel.x);
-		capture.words[6u * slot + 5u] = floatBitsToUint(pixel.y);
+	if (10u * slot + 10u <= uint(capture.words.length())) {
+		capture.words[10u * slot] = uint(gl_PrimitiveID);
+		capture.words[10u * slot + 1u] = floatBitsToUint(gl_TessCoord.x);
+		capture.words[10u * slot + 2u] = floatBitsToUint(gl_TessCoord.y);
+		capture.words[10u * slot + 3u] = floatBitsToUint(gl_TessCoord.z);
+		capture.words[10u * slot + 4u] = floatBitsToUint(pixel.x);
+		capture.words[10u * slot + 5u] = floatBitsToUint(pixel.y);
+		capture.words[10u * slot + 6u] = floatBitsToUint(gl_TessLevelOuter[0]);
+		capture.words[10u * slot + 7u] = floatBitsToUint(gl_TessLevelOuter[1]);
+		capture.words[10u * slot + 8u] = floatBitsToUint(gl_TessLevelOuter[2]);
+		capture.words[10u * slot + 9u] = floatBitsToUint(gl_TessLevelInner[0]);
 	}
 #endif
 }

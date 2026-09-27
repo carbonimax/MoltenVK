@@ -9,6 +9,10 @@
 // Every rendered scenario also checks Vulkan's fragment gl_PrimitiveID (the TES patch index) and the
 // tessellation coordinates the fragment receives: invariance rules 3, 4 and 8 and bitwise equality with the
 // coordinates the hardware tessellator gives the ordinary TES. Seam scenarios share one edge between patches.
+// "ordinary-levels-*" scenarios need neither the barycentric extension nor the test adapter, so they also run on
+// the shipping library: for TCS levels that half precision would change (nextafter(1,+inf), underflow, infinity),
+// the ordinary pipeline must render and tessellate exactly like the Vulkan level representative computed on the
+// host, and its TES must read the levels exactly as the TCS wrote them. Each Vulkan draw command is covered.
 #define VK_ENABLE_BETA_EXTENSIONS 1 // VK_KHR_portability_subset
 #include <vulkan/vulkan.h>
 
@@ -109,6 +113,9 @@ using Coordinates = std::map<CoordinateKey, std::array<uint32_t, 2>>;
 
 static float asFloat(uint32_t word) { float value; memcpy(&value, &word, 4); return value; }
 
+// Capture TES record: patch, u, v, w, pixel x, pixel y, then outer[0..2] and inner[0] as the TES read them.
+constexpr uint32_t kCaptureWords = 10;
+
 struct Image { std::vector<uint8_t> rgba; VkResult submit = VK_SUCCESS, wait = VK_SUCCESS; uint32_t invocations = 0; std::vector<uint32_t> tesCapture, fragmentCapture; };
 
 int main(int argc, char** argv) {
@@ -122,8 +129,8 @@ int main(int argc, char** argv) {
 		scenarios["f1"] = {{uniform(one), uniform(one)}, {}};
 		scenarios["f2"] = {{uniform(two), uniform(two)}, {}};
 		scenarios["f3"] = {{uniform(three), uniform(three)}, {}};
-		// nextafter(1, +inf) is level 2 in Vulkan; the ordinary half path renders level 1 (known defect).
-		scenarios["next"] = {{uniform(0x3f800001u), uniform(0x3f800001u)}, {uniform(two), uniform(two)}};
+		// nextafter(1, +inf) is level 2 in Vulkan, on the PerVertex and the ordinary path alike.
+		scenarios["next"] = {{uniform(0x3f800001u), uniform(0x3f800001u)}, {}};
 		// Two patches with different levels around a patch discarded by a zero outer level.
 		scenarios["mixed"] = {{uniform(two), {{0, three, three, three}}, uniform(three)}, {}};
 		scenarios["nan"] = {{uniform(three), {{three, nan, three, three}}, uniform(two)}, {}};
@@ -147,6 +154,12 @@ int main(int argc, char** argv) {
 			scenarios["vertices" + std::to_string(vertexCount)] = partial;
 		}
 		const bool rejection = scenarioName.rfind("reject-", 0) == 0 || scenarioName == "public-device-gate";
+		// Ordinary-only scenarios select the draw command: direct, indexed, indirect or indexed-indirect.
+		const std::string ordinaryPrefix = "ordinary-levels-";
+		const bool ordinaryOnly = scenarioName.rfind(ordinaryPrefix, 0) == 0;
+		const std::string drawMode = ordinaryOnly ? scenarioName.substr(ordinaryPrefix.size()) : "direct";
+		if (drawMode != "direct" && drawMode != "indexed" && drawMode != "indirect" && drawMode != "indexed-indirect") throw std::runtime_error("Unknown draw command");
+		if (ordinaryOnly) scenarios[scenarioName] = {{uniform(two)}, {}};
 		if (!rejection && !scenarios.count(scenarioName)) throw std::runtime_error("Unknown scenario");
 		Scenario scenario = rejection ? Scenario{{uniform(two)}, {}} : scenarios[scenarioName];
 		if (scenario.reference.empty()) scenario.reference = scenario.patches;
@@ -183,8 +196,10 @@ int main(int argc, char** argv) {
 			std::printf("TES_TOPOLOGY %s public-device-gate: barycentric extension and feature closed, test adapter absent\n", closed ? "PASS" : "FAIL");
 			return closed ? 0 : 2;
 		}
-		if (!mvkEnableTESFixtureDevice) throw std::runtime_error("Test device adapter was not linked");
-		mvkEnableTESFixtureDevice(physical);
+		if (!ordinaryOnly) {
+			if (!mvkEnableTESFixtureDevice) throw std::runtime_error("Test device adapter was not linked");
+			mvkEnableTESFixtureDevice(physical);
+		}
 		check(vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, nullptr), "Enumerate device extensions");
 		std::vector<VkExtensionProperties> extensions(count);
 		check(vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, extensions.data()), "Read device extensions");
@@ -192,7 +207,7 @@ int main(int argc, char** argv) {
 		VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 		features.pNext = &barycentric;
 		vkGetPhysicalDeviceFeatures2(physical, &features);
-		if (!barycentric.fragmentShaderBarycentric || !features.features.tessellationShader) throw std::runtime_error("Barycentric or tessellation feature unavailable");
+		if ((!ordinaryOnly && !barycentric.fragmentShaderBarycentric) || !features.features.tessellationShader) throw std::runtime_error("Barycentric or tessellation feature unavailable");
 		uint32_t family = 0;
 		vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, nullptr);
 		std::vector<VkQueueFamilyProperties> families(count);
@@ -200,6 +215,7 @@ int main(int argc, char** argv) {
 		while (!(families.at(family).queueFlags & VK_QUEUE_GRAPHICS_BIT)) ++family;
 		VkPhysicalDeviceShaderDrawParametersFeatures drawParameters{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES};
 		barycentric.pNext = &drawParameters;
+		if (ordinaryOnly) features.pNext = &drawParameters;
 		vkGetPhysicalDeviceFeatures2(physical, &features);
 		if (!drawParameters.shaderDrawParameters || !features.features.vertexPipelineStoresAndAtomics || !features.features.fragmentStoresAndAtomics) throw std::runtime_error("Draw parameters, vertex or fragment stores unavailable");
 		features.features = {};
@@ -211,7 +227,8 @@ int main(int argc, char** argv) {
 		queueInfo.queueFamilyIndex = family;
 		queueInfo.queueCount = 1;
 		queueInfo.pQueuePriorities = &priority;
-		std::vector<const char*> deviceExtensions{VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, VK_KHR_MAINTENANCE_2_EXTENSION_NAME};
+		std::vector<const char*> deviceExtensions{VK_KHR_MAINTENANCE_2_EXTENSION_NAME};
+		if (!ordinaryOnly) deviceExtensions.push_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
 		if (hasExtension(extensions, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) deviceExtensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
 		VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
 		deviceInfo.pNext = &features;
@@ -262,8 +279,12 @@ int main(int argc, char** argv) {
 		Buffer scale = makeBuffer(256, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 		// Tessellation coordinates: every ordinary TES invocation appends six words; the PerVertex fragment
 		// stores three vertices of six words per pixel.
-		constexpr uint32_t kTesCaptureSlots = 4096;
-		Buffer tesCapture = makeBuffer(4 + 24 * kTesCaptureSlots, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+		constexpr uint32_t kTesCaptureSlots = 1 << 16;
+		Buffer tesCapture = makeBuffer(4 + 4 * kCaptureWords * kTesCaptureSlots, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+		// Identity indices and one indirect command for the indexed and indirect draw commands.
+		Buffer indices = makeBuffer(9 * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+		for (uint32_t i = 0; i < 9; ++i) reinterpret_cast<uint32_t*>(indices.data)[i] = i;
+		Buffer indirect = makeBuffer(sizeof(VkDrawIndexedIndirectCommand), VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
 		Buffer fragmentCapture = makeBuffer(kWidth * kHeight * 18 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 		const float scaleValue[4] = {1.0f, 0.5f, 1.0f, 1.0f};
 		memcpy(scale.data, scaleValue, sizeof(scaleValue));
@@ -534,7 +555,21 @@ int main(int argc, char** argv) {
 			if (set) vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout(o), 0, 1, &set, 0, nullptr);
 			VkDeviceSize offset = 0;
 			vkCmdBindVertexBuffers(command, 0, 1, &vertices.buffer, &offset);
-			vkCmdDraw(command, scenario.vertexCount ? scenario.vertexCount : uint32_t(3 * patches.size()), instances, firstVertex, 0);
+			const uint32_t drawCount = scenario.vertexCount ? scenario.vertexCount : uint32_t(3 * patches.size());
+			if (drawMode == "direct") vkCmdDraw(command, drawCount, instances, firstVertex, 0);
+			else {
+				if (drawMode != "indirect") vkCmdBindIndexBuffer(command, indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+				if (drawMode == "indexed") vkCmdDrawIndexed(command, drawCount, instances, 0, int32_t(firstVertex), 0);
+				else if (drawMode == "indirect") {
+					const VkDrawIndirectCommand arguments{drawCount, instances, firstVertex, 0};
+					memcpy(indirect.data, &arguments, sizeof(arguments));
+					vkCmdDrawIndirect(command, indirect.buffer, 0, 1, sizeof(arguments));
+				} else {
+					const VkDrawIndexedIndirectCommand arguments{drawCount, instances, 0, int32_t(firstVertex), 0};
+					memcpy(indirect.data, &arguments, sizeof(arguments));
+					vkCmdDrawIndexedIndirect(command, indirect.buffer, 0, 1, sizeof(arguments));
+				}
+			}
 			vkCmdEndRenderPass(command);
 			VkImageMemoryBarrier toTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
 			toTransfer.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -583,6 +618,65 @@ int main(int argc, char** argv) {
 		};
 
 		const std::string tese = ccw ? "ccw.tese.spv" : "cw.tese.spv";
+		const std::string captureTese = ccw ? "capture-ccw.tese.spv" : "capture-cw.tese.spv";
+		if (ordinaryOnly) {
+			// Vulkan discards a patch when a relevant outer level is <= 0 or NaN; equal spacing otherwise clamps every
+			// level to [1, maxTessellationGenerationLevel] and rounds it up. Each case pairs float32 TCS levels with
+			// their Vulkan representative: both must render and tessellate identically, and the TES must read the
+			// levels exactly as the TCS wrote them.
+			const uint32_t next1 = 0x3f800001u, next2 = 0x40000001u, tiny = 0x0da24260u /* 1e-30 */, inf = 0x7f800000u, negativeZero = 0x80000000u;
+			const uint32_t max = bits(float(properties.limits.maxTessellationGenerationLevel));
+			struct Case { const char* name; std::vector<Patch> levels, representative; };
+			const std::vector<Case> cases = {
+				{"uniform nextafter(1), nextafter(2), 1e-30", {uniform(next1), uniform(next2), uniform(tiny)}, {uniform(two), uniform(three), uniform(one)}},
+				{"inner nextafter(1), one outer nextafter(1), inner 1e-30", {{{one, one, one, next1}}, {{next1, one, one, one}}, {{two, two, two, tiny}}}, {{{one, one, one, two}}, {{two, one, one, one}}, {{two, two, two, one}}}},
+				{"controls: +inf, -0 and NaN outer", {uniform(inf), {{negativeZero, two, two, two}}, {{two, nan, two, two}}}, {uniform(max), {{0, two, two, two}}, {{0, two, two, two}}}},
+			};
+			bool pass = true;
+			auto verdict = [&](bool ok, const char* what) { std::printf("  %s %s\n", ok ? "ok  " : "FAIL", what); pass &= ok; };
+			auto coordinates = [&](const Image& image) {
+				Coordinates result;
+				for (uint32_t slot = 0; slot < std::min(image.tesCapture[0], kTesCaptureSlots); ++slot) {
+					const uint32_t* w = &image.tesCapture[1 + kCaptureWords * slot];
+					result[{w[0], w[1], w[2], w[3]}] = {w[4], w[5]};
+				}
+				return result;
+			};
+			std::printf("draw command: %s\n", drawMode.c_str());
+			for (size_t c = 0; c < cases.size(); ++c) {
+				const Case& test = cases[c];
+				const std::string name = "case" + std::to_string(c);
+				PipelineOptions o{"topology.tesc.spv", tese, "ordinary.frag.spv"};
+				Image image = render(o, test.levels, name + "-levels"), reference = render(o, test.representative, name + "-representative");
+				o.tese = captureTese;
+				o.capture = 1;
+				Image captured = render(o, test.levels, name + "-levels-capture"), referenceCaptured = render(o, test.representative, name + "-representative-capture");
+				bool submitted = true;
+				for (const Image* i : {&image, &reference, &captured, &referenceCaptured}) submitted &= i->submit == VK_SUCCESS && i->wait == VK_SUCCESS;
+				uint32_t pixels = 0;
+				for (uint32_t i = 0; i < kWidth * kHeight; ++i) pixels += image.rgba[4 * i + 3] != 0;
+				// The TES must see the TCS values, not their half conversion nor their Vulkan rounding.
+				uint32_t levelMismatch = 0, invocations = std::min(captured.tesCapture[0], kTesCaptureSlots);
+				for (uint32_t slot = 0; slot < invocations; ++slot) {
+					const uint32_t* w = &captured.tesCapture[1 + kCaptureWords * slot];
+					for (int k = 0; k < 4; ++k) levelMismatch += w[0] >= test.levels.size() || w[6 + k] != test.levels[w[0]].levels[k];
+				}
+				Coordinates mine = coordinates(captured), theirs = coordinates(referenceCaptured);
+				std::printf("  case %zu (%s): covered=%u image_equal=%d vertices=%zu representative_vertices=%zu coordinates_equal=%d tes_invocations=%u tes_level_mismatch=%u\n",
+				            c, test.name, pixels, image.rgba == reference.rgba, mine.size(), theirs.size(), mine == theirs, invocations, levelMismatch);
+				verdict(submitted && captured.tesCapture[0] <= kTesCaptureSlots, "submissions succeed and the TES capture fits");
+				verdict(pixels > 0 && image.rgba == reference.rgba, "image identical to the Vulkan level representative");
+				verdict(!mine.empty() && mine == theirs, "tessellation coordinates and positions identical to the representative's");
+				verdict(invocations > 0 && levelMismatch == 0, "TES reads every level exactly as the TCS wrote it");
+			}
+			// Information only: Vulkan treats an inner level of 1 as 1 + epsilon when an outer level exceeds 1.
+			PipelineOptions o{"topology.tesc.spv", tese, "ordinary.frag.spv"};
+			Image innerOne = render(o, {{{two, two, two, one}}}, "inner-one"), innerTwo = render(o, {{{two, two, two, two}}}, "inner-two");
+			std::printf("  info: outer 2 with inner 1 renders like inner 2 (Vulkan 1 + epsilon rule): %s\n", innerOne.rgba == innerTwo.rgba ? "yes" : "no");
+			std::printf("TES_TOPOLOGY %s %s %s\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), winding.c_str());
+			vkDeviceWaitIdle(device);
+			return pass ? 0 : 2;
+		}
 		if (rejection) {
 			// Every refusal is deterministic and happens before submission.
 			PipelineOptions o{"topology.tesc.spv", tese, "interp.frag.spv"};
@@ -736,7 +830,7 @@ int main(int argc, char** argv) {
 		extra.capture = 2;
 		Image fragmentCoordinates = render(extra, scenario.patches, "coords");
 		extra.frag = "ordinary.frag.spv";
-		extra.tese = ccw ? "capture-ccw.tese.spv" : "capture-cw.tese.spv";
+		extra.tese = captureTese;
 		extra.capture = 1;
 		Image hardwareCoordinates = render(extra, scenario.reference, "hardware-coords");
 		extra.tese = tese;
@@ -756,7 +850,7 @@ int main(int argc, char** argv) {
 			}
 		const uint32_t tesInvocations = hardwareCoordinates.tesCapture[0];
 		for (uint32_t slot = 0; slot < std::min(tesInvocations, kTesCaptureSlots); ++slot) {
-			const uint32_t* w = &hardwareCoordinates.tesCapture[1 + 6 * slot];
+			const uint32_t* w = &hardwareCoordinates.tesCapture[1 + kCaptureWords * slot];
 			hardware[{w[0], w[1], w[2], w[3]}] = {w[4], w[5]};
 		}
 		// Rule 8: 1.0 - x is exact for every component. Rule 3: an edge vertex (x, 1-x) has its exact mirror (1-x, x).
@@ -791,7 +885,7 @@ int main(int argc, char** argv) {
 			for (const auto& entry : perVertex) if (entry.first[0] == p) mine.insert(entry);
 			for (const auto& entry : hardware) if (entry.first[0] == p) theirs.insert(entry);
 			countMismatch += mine.size() != expected;
-			if (culled || scenarioName == "next") continue;  // "next" renders a different level on the ordinary path.
+			if (culled) continue;
 			for (const auto& entry : theirs) {
 				auto found = mine.find(entry.first);
 				if (found == mine.end()) ++coordinateMismatch;
@@ -833,10 +927,10 @@ int main(int argc, char** argv) {
 		if (scenarioName == "next") {
 			// Same Vulkan level 2 as exact 2.0 for PerVertex; the ordinary half path renders level 1 instead.
 			Image twoImage = render({"topology.tesc.spv", tese, "interp.frag.spv"}, {uniform(two), uniform(two)}, "interp-two");
-			Image ordinaryNext = render({"topology.tesc.spv", tese, "ordinary.frag.spv"}, scenario.patches, "ordinary-next");
+			Image ordinaryTwo = render({"topology.tesc.spv", tese, "ordinary.frag.spv"}, {uniform(two), uniform(two)}, "ordinary-two");
 			Image ordinaryOne = render({"topology.tesc.spv", tese, "ordinary.frag.spv"}, {uniform(one), uniform(one)}, "ordinary-one");
 			verdict(twoImage.rgba == interp.rgba, "PerVertex nextafter(1,+inf) image identical to PerVertex level 2.0");
-			verdict(ordinaryNext.rgba == ordinaryOne.rgba && ordinaryNext.rgba != ordinaryImage.rgba, "ordinary half path still renders nextafter as level 1 (documented divergence)");
+			verdict(ordinaryImage.rgba == ordinaryTwo.rgba && ordinaryImage.rgba != ordinaryOne.rgba, "ordinary nextafter(1,+inf) image identical to ordinary level 2.0, not level 1");
 		}
 		std::printf("TES_TOPOLOGY %s %s %s\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), winding.c_str());
 		vkDeviceWaitIdle(device);
