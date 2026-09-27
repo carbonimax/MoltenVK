@@ -1334,6 +1334,9 @@ void MVKCmdDrawIndirect::encode(MVKCommandEncoder* cmdEncoder) {
 				state.bindStructBytes(mtlTessCtlEncoder, &_drawCount,               6);
 				state.bindStructBytes(mtlTessCtlEncoder, &vtxThreadExecWidth,       7);
 				state.bindStructBytes(mtlTessCtlEncoder, &tcWorkgroupSize,          8);
+				// The TCS reads each draw's parameters at this stride, which follows minUniformBufferOffsetAlignment.
+				uint32_t paramsStride = uint32_t(paramsIncr);
+				state.bindStructBytes(mtlTessCtlEncoder, &paramsStride, 9);
 				if (mtlFeats.nonUniformThreadgroups) {
 					[mtlTessCtlEncoder dispatchThreads: MTLSizeMake(_drawCount, 1, 1)
 								 threadsPerThreadgroup: MTLSizeMake(mtlConvertState.threadExecutionWidth, 1, 1)];
@@ -1728,6 +1731,9 @@ void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder, const MVKI
                     state.bindStructBytes(mtlTessCtlEncoder, &_drawCount,               6);
                     state.bindStructBytes(mtlTessCtlEncoder, &vtxThreadExecWidth,       7);
                     state.bindStructBytes(mtlTessCtlEncoder, &tcWorkgroupSize,          8);
+                    // The TCS reads each draw's parameters at this stride, which follows minUniformBufferOffsetAlignment.
+                    uint32_t paramsStride = uint32_t(paramsIncr);
+                    state.bindStructBytes(mtlTessCtlEncoder, &paramsStride, 9);
                     [mtlTessCtlEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(_drawCount, mtlConvertState.threadExecutionWidth), 1, 1)
                                       threadsPerThreadgroup: MTLSizeMake(mtlConvertState.threadExecutionWidth, 1, 1)];
                 }
