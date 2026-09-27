@@ -48,7 +48,7 @@ run() { # library scenario
 	grep -E '^  |^MESH_DRAW|^VK_EXT|^DEVICE' "$log" | sed 's/^/    /' | head -6
 	if [[ $verdict != PASS ]]; then echo "STOP: inspect $log before any further GPU work"; exit 1; fi
 }
-for scenario in draw grid twice reject-task reject-descriptor reject-per-primitive reject-pervertex reject-indirect no-adapter; do run dev "$scenario"; done
+for scenario in draw grid twice reject-task reject-descriptor reject-per-primitive reject-pervertex reject-specialization reject-indirect no-adapter; do run dev "$scenario"; done
 run shipping public-device-gate
 rm -f "$output"/runs/*.rgba
 ( cd "$output" && shasum -a 256 shaders/* */PROVENANCE.txt runs/* dev/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib shipping/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib > EVIDENCE.sha256 )
