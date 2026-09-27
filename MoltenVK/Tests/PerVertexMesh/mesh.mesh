@@ -25,10 +25,11 @@ void main() {
 	position.x = position.x * 0.5 + (gl_WorkGroupID.x == 0u ? -0.5 : 0.5);
 #endif
 	gl_MeshVerticesEXT[i].gl_Position = vec4(position, 0.0, 1.0);
-	color[i] = colors[i];
+	vec4 value = colors[i];
 #ifdef DESCRIPTOR
-	color[i] *= ubo.scale;
+	value *= ubo.scale;
 #endif
+	color[i] = value;
 	if (i < 2) gl_PrimitiveTriangleIndicesEXT[i] = triangles[i];
 #ifdef PER_PRIMITIVE
 	if (i < 2) primitiveColor[i] = vec4(1.0);
