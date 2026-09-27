@@ -30,8 +30,8 @@ compile topology.tese fractional.tese.spv -DFRACTIONAL
 compile topology.tese points.tese.spv -DPOINTS
 compile ordinary.frag ordinary.frag.spv
 compile interp.frag interp.frag.spv
-compile flat-ordered.frag ordered.frag.spv
-compile flat-ordered.frag swapped.frag.spv -DSWAP
+compile flat-ordered.frag flat-ordered.frag.spv
+compile flat-ordered.frag flat-swapped.frag.spv -DSWAP
 compile consistency.frag consistency.frag.spv
 # Host fault injection for the eleven TES scratch allocations.
 xcrun clang++ -std=c++17 -fblocks -Wall -Wextra -Werror -Wno-return-type -I"$root/MoltenVK/MoltenVK/Commands" -I"$root/MoltenVK/MoltenVK/GPUObjects" -I"$root/External/Vulkan-Headers/include" "$tes/ScratchTests.mm" -framework Foundation -framework Metal -o "$output/tes-scratch"
@@ -103,13 +103,13 @@ for scenario in reject-quads reject-fractional reject-point-mode reject-lower-le
 topology no-admission reject-no-admission ccw 0 "TES_TOPOLOGY PASS"
 topology shipping public-device-gate ccw 0 "TES_TOPOLOGY PASS"
 # 3. Pilot guarantees kept: fixture pixels, compute-bind recording guards, refusals.
-pilot dev ordered ordered
-pilot dev swapped ordered-swapped
-pilot dev wrong-patch wrong-patch
-pilot dev control control
-for mode in ordered-compute reject-first-compute reject-first-instance-compute reject-cache reject-patch-size reject-specialization reject-instance reject-first reject-indexed; do pilot dev "$mode" ordered; done
-pilot no-admission reject-public ordered
-pilot no-admission control control
+pilot dev ordered ordered.frag
+pilot dev swapped ordered-swapped.frag
+pilot dev wrong-patch wrong-patch.frag
+pilot dev control control.frag
+for mode in ordered-compute reject-first-compute reject-first-instance-compute reject-cache reject-patch-size reject-specialization reject-instance reject-first reject-indexed; do pilot dev "$mode" ordered.frag; done
+pilot no-admission reject-public ordered.frag
+pilot no-admission control control.frag
 # 4. Generator mutations must be caught: reversed winding, wrong level-3 interior, patch offsets ignored.
 topology mutation-winding cull ccw 2 "FAIL PerVertex replay matches ordinary TES coverage"
 topology mutation-winding f3 ccw 2 "FAIL ordered PerVertex values match the CPU model"

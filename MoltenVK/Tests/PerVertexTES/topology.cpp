@@ -510,8 +510,8 @@ int main(int argc, char** argv) {
 
 		Image ordinaryImage = render({"topology.tesc.spv", tese, "ordinary.frag.spv", scenario.cull}, scenario.reference, "ordinary");
 		Image interp = render({"topology.tesc.spv", tese, "interp.frag.spv", scenario.cull}, scenario.patches, "interp");
-		Image ordered = render({"topology.tesc.spv", tese, "ordered.frag.spv", scenario.cull}, scenario.patches, "ordered");
-		Image swapped = render({"topology.tesc.spv", tese, "swapped.frag.spv", scenario.cull}, scenario.patches, "swapped");
+		Image ordered = render({"topology.tesc.spv", tese, "flat-ordered.frag.spv", scenario.cull}, scenario.patches, "ordered");
+		Image swapped = render({"topology.tesc.spv", tese, "flat-swapped.frag.spv", scenario.cull}, scenario.patches, "swapped");
 		Image consistency = render({"topology.tesc.spv", tese, "consistency.frag.spv", scenario.cull}, scenario.patches, "consistency");
 		for (const Image* image : {&ordinaryImage, &interp, &ordered, &swapped, &consistency}) pass &= image->submit == VK_SUCCESS && image->wait == VK_SUCCESS;
 		verdict(pass, "all submissions and fences succeed");
