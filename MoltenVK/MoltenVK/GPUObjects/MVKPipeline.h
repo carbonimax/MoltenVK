@@ -253,6 +253,9 @@ public:
 	/** Portable PerVertexKHR uses render capture for direct draws and compute capture for indexed draws, followed by replay.
 	 * Vertex stage resources describe capture; replay uses getPerVertexReplayBinding() and the optional implicit reversed-depth mask. */
 	bool usesPerVertexInputBuffer() const { return _usesPerVertexInputBuffer; }
+	// Admission is test-only until GPU topology covers arbitrary TCS factors.
+	bool usesPerVertexTessEval() const { return _usesPerVertexInputBuffer && _isTessellationPipeline; }
+	id<MTLComputePipelineState> getPerVertexTessEvalPipelineState() const { return _mtlPerVertexTessEvalState; }
 	const SPIRV_CROSS_NAMESPACE::MSLCapturedOutputReplayBarycentricBinding& getPerVertexReplayBarycentricBinding() const { return _perVertexReplayBarycentricBinding; }
 	bool usesPortableBarycentrics() const { return _usesPerspectiveBarycentrics || _usesNoPerspectiveBarycentrics; }
 	id<MTLRenderPipelineState> getPerVertexCapturePipelineState(uint32_t viewCount) const {
@@ -415,6 +418,7 @@ protected:
 	id<MTLComputePipelineState> _mtlTessVertexStageIndex16State = nil;
 	id<MTLComputePipelineState> _mtlTessVertexStageIndex32State = nil;
 	id<MTLComputePipelineState> _mtlTessControlStageState = nil;
+	id<MTLComputePipelineState> _mtlPerVertexTessEvalState = nil;
 	id<MTLRenderPipelineState> _mtlPipelineState = nil;
 	struct PerVertexCapturePipelineStates {
 		id<MTLRenderPipelineState> direct = nil;

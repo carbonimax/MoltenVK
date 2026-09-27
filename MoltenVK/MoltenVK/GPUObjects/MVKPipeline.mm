@@ -19,6 +19,10 @@
 #include "MVKPipeline.h"
 #include "MVKPerVertexReplay.h"
 #include "MVKPerVertexCapacity.h"
+#ifdef MVK_TEST_TES_PERVERTEX_FIXTURE
+// Generated solely by MoltenVK/Tests/run-pervertex-tes-tests.sh. Never a shipping option.
+#include MVK_TEST_TES_PERVERTEX_FIXTURE
+#endif
 #include "MVKCommandBuffer.h"
 #include "MVKInlineObjectConstructor.h"
 #include "MVKImage.h"
@@ -1192,15 +1196,31 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 		_usesNoPerspectiveBarycentrics |= input.builtin == spv::BuiltInBaryCoordNoPerspKHR;
 	}
 	if (!usesPerVertex && !usesPortableBarycentrics()) { return true; }
-	if (!usesPortableBarycentrics() && getPhysicalDevice()->getMTLDeviceCapabilities().supportsApple10 && getMetalFeatures().mslVersion >= CompilerMSL::Options::make_msl_version(4, 0) && getPrimitiveTopologyClass() == MTLPrimitiveTopologyClassTriangle) { return true; }
+	if (!_isTessellationPipeline && !usesPortableBarycentrics() && getPhysicalDevice()->getMTLDeviceCapabilities().supportsApple10 && getMetalFeatures().mslVersion >= CompilerMSL::Options::make_msl_version(4, 0) && getPrimitiveTopologyClass() == MTLPrimitiveTopologyClassTriangle) { return true; }
 	auto unsupported = [&](const char* reason) {
 		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR %s", reason));
 		return false;
 	};
-	if (!pVertexSS || !_vertexModule || _vertexModule->getSPIRV().empty() || _isTessellationPipeline || pCreateInfo->stageCount != 2) { return unsupported("requires classic SPIR-V vertex and fragment stages."); }
+	bool testTES = false;
+#ifdef MVK_TEST_TES_PERVERTEX_FIXTURE
+	if (_isTessellationPipeline) {
+		// Exact test shaders establish factor 1; never infer arbitrary TCS factors on the CPU.
+		testTES = mvkMatchesTESFixture(_vertexModule->getSPIRV(), mvkTESVertex) && mvkMatchesTESFixture(_tessCtlModule->getSPIRV(), mvkTESControl) && mvkMatchesTESFixture(_tessEvalModule->getSPIRV(), mvkTESEvaluation) && (mvkMatchesTESFixture(_fragmentModule->getSPIRV(), mvkTESOrdered) || mvkMatchesTESFixture(_fragmentModule->getSPIRV(), mvkTESSwapped) || mvkMatchesTESFixture(_fragmentModule->getSPIRV(), mvkTESWrongPatch));
+		if (!testTES) { return unsupported("TES test requires the exact VS/TCS/TES/fragment fixture."); }
+		// tese_as_compute is not in the persistent cache format yet. Shader-module memory
+		// caches compare all MSL options, but no serialized cache may enter this pilot.
+		if (_pipelineCache) { return unsupported("TES test disables Vulkan pipeline caches until tese_as_compute is serialized with format compatibility."); }
+		for (uint32_t i = 0; i < pCreateInfo->stageCount; ++i) {
+			const auto& stage = pCreateInfo->pStages[i];
+			if (stage.pSpecializationInfo || stage.pNext || stage.flags || strcmp(stage.pName, "main")) { return unsupported("TES test requires unspecialized fixture entry points."); }
+		}
+		if (!getMetalFeatures().nonUniformThreadgroups || pCreateInfo->stageCount != 4 || !_dynamicStateFlags.empty() || !pCreateInfo->pTessellationState || pCreateInfo->pTessellationState->patchControlPoints != 3 || pCreateInfo->pTessellationState->pNext || getRenderingCreateInfo(pCreateInfo)->viewMask || pCreateInfo->pMultisampleState->rasterizationSamples != VK_SAMPLE_COUNT_1_BIT || pCreateInfo->pVertexInputState->vertexAttributeDescriptionCount || pCreateInfo->pVertexInputState->vertexBindingDescriptionCount) { return unsupported("TES test requires static single-view, single-sample triangle patches with three control points and no vertex bindings."); }
+	}
+#endif
+	if (!pVertexSS || !_vertexModule || _vertexModule->getSPIRV().empty() || (!testTES && (_isTessellationPipeline || pCreateInfo->stageCount != 2))) { return unsupported("requires classic SPIR-V vertex and fragment stages."); }
 	if (getMetalFeatures().mslVersion < CompilerMSL::Options::make_msl_version(2, 4)) { return unsupported("requires MSL 2.4."); }
 	const auto* assembly = pCreateInfo->pInputAssemblyState;
-	if (!assembly || !mvkPerVertexReplayVertexCount(assembly->topology) || _dynamicStateFlags.has(MVKRenderStateFlag::PrimitiveTopology)) { return unsupported("requires a static point, line-list/strip, or triangle-list/strip/fan topology."); }
+	if (!assembly || (testTES ? (assembly->topology != VK_PRIMITIVE_TOPOLOGY_PATCH_LIST || assembly->primitiveRestartEnable) : !mvkPerVertexReplayVertexCount(assembly->topology)) || _dynamicStateFlags.has(MVKRenderStateFlag::PrimitiveTopology)) { return unsupported("requires a static point, line-list/strip, or triangle-list/strip/fan topology."); }
 	uint32_t viewMask = getRenderingCreateInfo(pCreateInfo)->viewMask;
 	if ((viewMask & (viewMask - 1)) || mvkIsAnyFlagEnabled(_flags, VK_PIPELINE_CREATE_2_VIEW_INDEX_FROM_DEVICE_INDEX_BIT)) { return unsupported("supports at most one multiview view and no device-index views."); }
 	if (pCreateInfo->pRasterizationState->polygonMode != VK_POLYGON_MODE_FILL || _dynamicStateFlags.has(MVKRenderStateFlag::PolygonMode) || _dynamicStateFlags.has(MVKRenderStateFlag::RasterizerDiscardEnable)) { return unsupported("requires static filled rasterization."); }
@@ -1316,10 +1336,14 @@ bool MVKGraphicsPipeline::addPerVertexReplayShaderToPipeline(MTLRenderPipelineDe
 #ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
 	try {
 #endif
-		CompilerMSL replay(_vertexModule->getSPIRV());
-		replay.set_entry_point(pVertexSS->pName, spv::ExecutionModelVertex);
+		auto executionModel = usesPerVertexTessEval() ? spv::ExecutionModelTessellationEvaluation : spv::ExecutionModelVertex;
+		CompilerMSL replay((usesPerVertexTessEval() ? _tessEvalModule : _vertexModule)->getSPIRV());
+		replay.set_entry_point(pVertexSS->pName, executionModel);
 		auto options = shaderConfig.options.mslOptions;
 		options.capture_output_to_buffer = false;
+		options.tese_as_compute = false;
+		options.vertex_for_tessellation = false;
+		options.multi_patch_workgroup = false;
 		options.disable_rasterization = false;
 		// Layered replay imports the captured synthetic Layer; single-view uses its attachment slice.
 		_perVertexReplayBinding.multiview_layer = options.multiview && options.multiview_layered_rendering;
@@ -1336,7 +1360,7 @@ bool MVKGraphicsPipeline::addPerVertexReplayShaderToPipeline(MTLRenderPipelineDe
 		replay.set_common_options(common);
 		for (const auto& output : shaderConfig.shaderOutputs) { replay.add_msl_shader_output(output.shaderVar); }
 		replayMSL = replay.compile_captured_output_replay(_perVertexCapturedLayout, _perVertexReplayBinding, _perVertexReplayBarycentricBinding, userLocations);
-		replayResults.entryPoint.mtlFunctionName = replay.get_cleansed_entry_point_name(pVertexSS->pName, spv::ExecutionModelVertex);
+		replayResults.entryPoint.mtlFunctionName = replay.get_cleansed_entry_point_name(pVertexSS->pName, executionModel);
 		replayResults.isPositionInvariant = replay.is_position_invariant();
 #ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
 	} catch (const CompilerError& error) {
@@ -1361,6 +1385,14 @@ bool MVKGraphicsPipeline::addPerVertexReplayShaderToPipeline(MTLRenderPipelineDe
 	plDesc.alphaToOneEnabled = NO;
 	// Capture point/line and strip/fan vertices individually.
 	if (pCreateInfo->pInputAssemblyState->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) { plDesc.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint; }
+	if (usesPerVertexTessEval()) {
+		plDesc.inputPrimitiveTopology = getPrimitiveTopologyClass();
+		plDesc.vertexFunction = function;
+		[function release];
+		plDesc.vertexDescriptor = nil;
+		plDesc.rasterizationEnabled = YES;
+		return true;
+	}
 	bool captured = true;
 	uint32_t viewMask = getRenderingCreateInfo(pCreateInfo)->viewMask;
 	uint32_t passCount = viewMask ? getDevice()->getMultiviewMetalPassCount(viewMask) : 1;
@@ -1603,7 +1635,7 @@ MTLRenderPipelineDescriptor* MVKGraphicsPipeline::newMTLTessRasterStageDescripto
 	}
 
 	// Tessellation state
-	addTessellationToPipeline(plDesc, reflectData, pCreateInfo->pTessellationState);
+	if (!usesPerVertexTessEval()) { addTessellationToPipeline(plDesc, reflectData, pCreateInfo->pTessellationState); }
 
 	// Output
 	addFragmentOutputToPipeline(plDesc, pCreateInfo);
@@ -1837,6 +1869,46 @@ bool MVKGraphicsPipeline::addTessEvalShaderToPipeline(MTLRenderPipelineDescripto
 	setEmulatedReversedDepthViewportConfig(shaderConfig, implicit, getPhysicalDevice()->shouldEmulateReversedDepthViewport());
 	addPrevStageOutputToShaderConversionConfig(shaderConfig, tcOutputs);
 
+	if (usesPerVertexTessEval()) {
+		auto captureConfig = shaderConfig;
+		auto& options = captureConfig.options.mslOptions;
+		options.tese_as_compute = true;
+		options.capture_output_to_buffer = true;
+		options.disable_rasterization = true;
+		options.vertex_for_tessellation = false;
+		options.multi_patch_workgroup = false;
+		options.argument_buffers = false; // The exact test fixture has no descriptors.
+		options.emulate_reversed_depth_viewport = false;
+		options.indirect_params_buffer_index = implicit[MVKImplicitBuffer::IndirectParams];
+		options.shader_output_buffer_index = implicit[MVKImplicitBuffer::Output];
+		captureConfig.options.shouldFlipVertexY = false;
+		captureConfig.options.shouldFixupClipSpace = false;
+		captureConfig.exportCapturedVertexLayout = true;
+		MVKMTLFunction capture = getMTLFunction(captureConfig, pTessEvalSS, pTessEvalFB, _tessEvalModule, "PerVertex TES capture");
+		if (!capture.getMTLFunction()) { return false; }
+		auto& results = capture.shaderConversionResults;
+		_perVertexCapturedLayout = results.capturedVertexLayout;
+		if (!_perVertexCapturedLayout.stride || !results.needsOutputBuffer) {
+			setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "PerVertex TES capture requires an exported output layout."));
+			return false;
+		}
+		populateResourceUsage(_stageResources[kMVKShaderStageTessEval], captureConfig, results, spv::ExecutionModelTessellationEvaluation);
+		_stageResources[kMVKShaderStageTessEval].implicitBuffers.needed.add(MVKImplicitBuffer::IndirectParams);
+		_layout->populateBindOperations(_stageResources[kMVKShaderStageTessEval].bindScript, captureConfig, spv::ExecutionModelTessellationEvaluation);
+		if (!verifyImplicitBuffers(kMVKShaderStageTessEval)) { return false; }
+		auto* descriptor = [MTLComputePipelineDescriptor new];
+		descriptor.computeFunction = capture.getMTLFunction();
+		bool compiled = !!getOrCompilePipeline(descriptor, _mtlPerVertexTessEvalState, "PerVertex TES capture");
+		[descriptor release];
+		if (!compiled) { return false; }
+		SPIRVShaderOutputs outputs;
+		std::string error;
+		if (!getShaderOutputs(_tessEvalModule->getSPIRV(), spv::ExecutionModelTessellationEvaluation, pTessEvalSS->pName, outputs, error)) {
+			setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to reflect TES replay outputs: %s", error.c_str()));
+			return false;
+		}
+		return addPerVertexReplayShaderToPipeline(plDesc, pCreateInfo, shaderConfig, pTessEvalSS, pFragmentSS, outputs);
+	}
 	MVKMTLFunction func = getMTLFunction(shaderConfig, pTessEvalSS, pTessEvalFB, _tessEvalModule, "Tessellation evaluation");
 	id<MTLFunction> mtlFunc = func.getMTLFunction();
 	plDesc.vertexFunction = mtlFunc;	// Yeah, you read that right. Tess. eval functions are a kind of vertex function in Metal.
@@ -2590,6 +2662,7 @@ MVKGraphicsPipeline::~MVKGraphicsPipeline() {
 		[_mtlTessVertexStageIndex16State release];
 		[_mtlTessVertexStageIndex32State release];
 		[_mtlTessControlStageState release];
+		[_mtlPerVertexTessEvalState release];
 		for (auto& entry : _perVertexCapturePipelineStates) {
 			[entry.second.direct release];
 			[entry.second.index16 release];
@@ -2806,6 +2879,9 @@ MVKShaderLibraryCache* MVKPipelineCache::getShaderLibraryCache(MVKShaderModuleKe
 
 #if MVK_USE_CEREAL
 static uint32_t kDataHeaderSize = (sizeof(uint32_t) * 4) + VK_UUID_SIZE;
+// Version the private payload independently of the Vulkan header/driver UUID. Old readers
+// stop at this unknown entry type; new readers reject unversioned caches before reading options.
+static constexpr uint32_t kMVKPipelineCacheSchema = 0x4D564B02; // Includes TES compute and float32 factors.
 #endif
 
 // Entry type markers to be inserted into data stream
@@ -2903,6 +2979,7 @@ void MVKPipelineCache::writeData(ostream& outstream, bool isCounting) {
 	writer(NSSwapHostIntToLittle(devProps.vendorID));
 	writer(NSSwapHostIntToLittle(devProps.deviceID));
 	writer(devProps.pipelineCacheUUID);
+	writer(kMVKPipelineCacheSchema);
 
 	// Shader libraries
 	// Output a cache entry for each shader library, including the shader module key in each entry.
@@ -2938,8 +3015,8 @@ void MVKPipelineCache::readData(const VkPipelineCacheCreateInfo* pCreateInfo) {
 		size_t byteCount = pCreateInfo->initialDataSize;
 		uint32_t cacheEntryType;
 
-		// Must be able to read the header and at least one cache entry type.
-		if (byteCount < kDataHeaderSize + sizeof(cacheEntryType)) { return; }
+		// Must be able to read the header, schema, and at least one cache entry type.
+		if (byteCount < kDataHeaderSize + sizeof(uint32_t) + sizeof(cacheEntryType)) { return; }
 
 		mvk::membuf mb((char*)pCreateInfo->pInitialData, byteCount);
 		istream inStream(&mb);
@@ -2964,6 +3041,10 @@ void MVKPipelineCache::readData(const VkPipelineCacheCreateInfo* pCreateInfo) {
 
 		reader(pcUUID);			// Pipeline cache UUID
 		if ( !mvkAreEqual(pcUUID, dvcProps.pipelineCacheUUID, VK_UUID_SIZE) ) { return; }
+
+		uint32_t schema;
+		reader(schema);
+		if (schema != kMVKPipelineCacheSchema) { return; }
 
 		bool done = false;
 		while ( !done ) {
@@ -3097,6 +3178,8 @@ namespace SPIRV_CROSS_NAMESPACE {
 				opt.enable_clip_distance_user_varying,
 				opt.multi_patch_workgroup,
 				opt.raw_buffer_tese_input,
+				opt.tessellation_factors_float32,
+				opt.tese_as_compute,
 				opt.vertex_for_tessellation,
 				opt.arrayed_subpass_input,
 				opt.ios_use_simdgroup_functions,
@@ -3397,17 +3480,17 @@ static size_t mvkValidateCerealArchiveSize(size_t padByteCnt = 0) {
 
 void mvkValidateCeralArchiveDefinitions() {
 	[[maybe_unused]] size_t missingBytes = 0;
-	missingBytes += mvkValidateCerealArchiveSize<SPIRV_CROSS_NAMESPACE::CompilerMSL::Options>(5);
+	missingBytes += mvkValidateCerealArchiveSize<SPIRV_CROSS_NAMESPACE::CompilerMSL::Options>(7);
 	missingBytes += mvkValidateCerealArchiveSize<SPIRV_CROSS_NAMESPACE::MSLShaderInterfaceVariable>();
 	missingBytes += mvkValidateCerealArchiveSize<SPIRV_CROSS_NAMESPACE::MSLResourceBinding>();
 	missingBytes += mvkValidateCerealArchiveSize<SPIRV_CROSS_NAMESPACE::MSLConstexprSampler>();
 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVWorkgroupSizeDimension>(3);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVEntryPoint>(20);						// Contains string
-	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionOptions>(23);			// Contains string
+	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionOptions>(29);			// Contains string
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLShaderInterfaceVariable>(3);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLResourceBinding>(2);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::DescriptorBinding>();
-	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(156);	// Contains collection
+	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(162);	// Contains collection
 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionResultInfo>(75);		// Contains collection
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLSpecializationMacroInfo>(22);			// Contains string
 	missingBytes += mvkValidateCerealArchiveSize<MVKShaderModuleKey>();
