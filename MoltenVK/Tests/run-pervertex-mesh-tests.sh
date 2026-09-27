@@ -3,12 +3,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # First MoltenVK mesh path (VK_EXT_mesh_shader behind the test device adapter) under Metal API and GPU validation.
 # Builds from the committed HEAD of this checkout: a development library with the test adapter and a shipping
-# library. Stops at the first unexpected result.
-# Usage: run-pervertex-mesh-tests.sh <output directory>
+# library. Before any GPU work, a CPU preflight checks that the form models tell their rivals apart and that every
+# PerVertexKHR pipeline links its corner varyings by name and type, in MSL that Metal accepts. Stops at the first
+# unexpected result. --cpu-only stops after the preflight, without the shipping library and without any GPU work.
+# Usage: run-pervertex-mesh-tests.sh <output directory> [--cpu-only]
 set -euo pipefail
 test_dir=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$test_dir/../.." && pwd)
 output=$(mkdir -p "${1:?output directory}" && cd "$1" && pwd)
+cpu_only=$([[ ${2:-} == --cpu-only ]] && echo 1 || true)
 mkdir -p "$output/shaders" "$output/runs"
 exec > >(tee "$output/run.log") 2>&1
 head=$(git -C "$root" rev-parse HEAD)
@@ -39,7 +42,12 @@ compile pervertex.frag barycentric.frag.spv -DBARYCENTRIC
 compile pervertex.frag pervertex-consistency.frag.spv -DCONSISTENCY
 compile pervertex.frag pervertex-block.frag.spv -DBLOCK
 compile pervertex.frag pervertex-matrix.frag.spv -DMATRIX
-for name in dev shipping; do
+compile forms.mesh forms.mesh.spv
+compile forms.mesh forms16.mesh.spv -DSIXTEEN
+compile forms.mesh forms-grid.mesh.spv -DGRID
+forms="uint swapped ivec2 vec3 uvec3 components fewer scalar array1 array2 half int16 uint16 mixed"
+for form in $forms; do compile forms.frag "form-$form.frag.spv" "-D$(tr a-z A-Z <<< "$form")"; done
+for name in dev $([[ $cpu_only ]] || echo shipping); do
 	tree=$output/$name/src
 	rm -rf "$tree" && mkdir -p "$tree/External"
 	git -C "$root" archive HEAD | tar -x -C "$tree"
@@ -50,6 +58,50 @@ for name in dev shipping; do
 	lib=$output/$name/build/moltenvk/MoltenVK
 	xcrun clang++ -std=c++17 -arch arm64 -O1 -Wall -Wextra -Werror -Wno-missing-field-initializers -I"$root/External/Vulkan-Headers/include" "$mesh/mesh-draw.cpp" "$lib/libMoltenVK.1.4.3.dylib" -Wl,-rpath,"$lib" -Wl,-U,_mvkEnableMeshTestDevice -Wl,-U,_mvkEnableTESFixtureDevice -o "$output/$name/mesh-draw"
 done
+
+preflight=$output/preflight
+mkdir -p "$preflight"
+build=$output/dev/build
+xcrun clang++ -std=c++17 -arch arm64 -O1 -Wall -Wextra -Werror -DMVK_EXCLUDE_SPIRV_TOOLS=1 -DSPIRV_CROSS_NAMESPACE_OVERRIDE=MVK_spirv_cross \
+	-I"$root/MoltenVKShaderConverter/MoltenVKShaderConverter" -I"$root/Common" -I"$root/External/SPIRV-Cross" -I"$root/External/cereal/include" "$mesh/corner-link.cpp" \
+	"$build/moltenvk/MoltenVKShaderConverter/MoltenVKShaderConverter/libMoltenVK_ShaderConverter.a" "$build/moltenvk/Common/libMoltenVK_Common.a" \
+	"$build/spirv-cross/libspirv-cross-reflect.a" "$build/spirv-cross/libspirv-cross-msl.a" "$build/spirv-cross/libspirv-cross-glsl.a" "$build/spirv-cross/libspirv-cross-core.a" \
+	-framework Foundation -o "$output/dev/corner-link"
+# CPU only: mesh-draw computes its models without creating a Vulkan instance.
+"$output/dev/mesh-draw" "$output/shaders" model-check > "$preflight/model-check.log" 2>&1 || { cat "$preflight/model-check.log"; echo "STOP: form models before any GPU work"; exit 1; }
+tail -1 "$preflight/model-check.log"
+link() { # name mesh fragment [expected status: 3 for a refused form]
+	local log=$preflight/$1.log rc=0
+	(cd "$preflight" && "$output/dev/corner-link" "$output/shaders/$2" "$output/shaders/$3" "$1") > "$log" 2>&1 || rc=$?
+	if [[ $rc != "${4:-0}" ]]; then cat "$log"; echo "STOP: corner-link $1 exit=$rc before any GPU work"; exit 1; fi
+	tail -1 "$log" | sed 's/^/    /'
+}
+link pervertex mesh.mesh.spv pervertex.frag.spv
+link pervertex-swapped mesh.mesh.spv pervertex-swapped.frag.spv
+link pervertex-permuted permuted.mesh.spv pervertex.frag.spv
+link pervertex-block-output block.mesh.spv pervertex.frag.spv
+link pervertex-consistency permuted.mesh.spv pervertex-consistency.frag.spv
+link reject-pervertex-block block.mesh.spv pervertex-block.frag.spv 3
+link reject-pervertex-matrix matrix.mesh.spv pervertex-matrix.frag.spv 3
+for form in $forms; do
+	case $form in half|int16|uint16) link "form-$form" forms16.mesh.spv "form-$form.frag.spv" ;; *) link "form-$form" forms.mesh.spv "form-$form.frag.spv" ;; esac
+done
+link form-grid forms-grid.mesh.spv form-mixed.frag.spv
+# A mesh translated with a zero workgroup size never leaves its output loops (SPIRV-Cross before 8cd36d69).
+if grep -l 'gl_WorkGroupSize \[\[maybe_unused\]\] = uint3(0, 0, 0)' "$preflight"/*.mesh.metal; then echo "STOP: zero mesh workgroup size would hang the GPU"; exit 1; fi
+syntax=0
+for msl in "$preflight"/*.metal; do
+	xcrun metal -x metal -std=metal3.2 -fsyntax-only "$msl" > "$msl.syntax.log" 2>&1 || { cat "$msl.syntax.log"; echo "STOP: Metal syntax of $msl before any GPU work"; exit 1; }
+	syntax=$((syntax + 1))
+done
+echo "PREFLIGHT PASS: form models, corner links and $syntax Metal 3.2 syntax checks (CPU only)"
+git -C "$root" ls-files -s MoltenVK MoltenVKShaderConverter ExternalRevisions > "$output/SOURCE-INDEX.txt"
+if [[ $cpu_only ]]; then
+	( cd "$output" && shasum -a 256 shaders/* dev/PROVENANCE.txt preflight/* dev/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib > EVIDENCE.sha256 )
+	echo "PERVERTEX_MESH CPU-ONLY PASS on $head: no GPU work"
+	exit 0
+fi
+
 cases=0
 run() { # library scenario
 	local log=$output/runs/$1-$2.log rc=0 verdict=PASS
@@ -64,11 +116,10 @@ run() { # library scenario
 	grep -E '^  |^MESH_DRAW|^VK_EXT|^DEVICE' "$log" | sed 's/^/    /' | head -6
 	if [[ $verdict != PASS ]]; then echo "STOP: inspect $log before any further GPU work"; exit 1; fi
 }
-for scenario in draw grid twice pervertex pervertex-swapped pervertex-permuted barycentric barycentric-permuted pervertex-consistency \
-	reject-task reject-descriptor reject-per-primitive reject-pervertex-block reject-pervertex-matrix reject-specialization reject-indirect \
+for scenario in draw grid twice pervertex pervertex-swapped pervertex-permuted pervertex-block-output barycentric barycentric-permuted pervertex-consistency \
+	$(for form in $forms grid; do echo "form-$form"; done) reject-task reject-descriptor reject-per-primitive reject-pervertex-block reject-pervertex-matrix reject-specialization reject-indirect \
 	reject-draw-id reject-draw-id-uint reject-buffer-address no-adapter; do run dev "$scenario"; done
 run shipping public-device-gate
 rm -f "$output"/runs/*.rgba
-( cd "$output" && shasum -a 256 shaders/* */PROVENANCE.txt runs/* dev/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib shipping/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib > EVIDENCE.sha256 )
-git -C "$root" ls-files -s MoltenVK MoltenVKShaderConverter ExternalRevisions > "$output/SOURCE-INDEX.txt"
+( cd "$output" && shasum -a 256 shaders/* */PROVENANCE.txt preflight/* runs/* dev/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib shipping/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib > EVIDENCE.sha256 )
 echo "PERVERTEX_MESH PASS: $cases cases on $head"
