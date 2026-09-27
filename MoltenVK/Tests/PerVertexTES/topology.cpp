@@ -160,7 +160,9 @@ int main(int argc, char** argv) {
 		const bool ordinaryOnly = scenarioName.rfind(ordinaryPrefix, 0) == 0;
 		const bool indexedScratchLimit = scenarioName == "ordinary-levels-indexed-scratch-limit";
 		const bool scratchLimit = scenarioName == "ordinary-levels-scratch-limit" || indexedScratchLimit;
-		const std::string drawMode = scratchLimit ? (indexedScratchLimit ? "indexed" : "direct") : ordinaryOnly ? scenarioName.substr(ordinaryPrefix.size()) : "direct";
+		std::string drawMode = scratchLimit ? (indexedScratchLimit ? "indexed" : "direct") : ordinaryOnly ? scenarioName.substr(ordinaryPrefix.size()) : "direct";
+		if (scenarioName == "reject-indirect-tes") drawMode = "indirect";
+		if (scenarioName == "reject-indexed-indirect-tes") drawMode = "indexed-indirect";
 		if (drawMode != "direct" && drawMode != "indexed" && drawMode != "indirect" && drawMode != "indexed-indirect") throw std::runtime_error("Unknown draw command");
 		if (ordinaryOnly) scenarios[scenarioName] = {{uniform(two)}, {}};
 		if (!rejection && !scenarios.count(scenarioName)) throw std::runtime_error("Unknown scenario");
@@ -727,6 +729,12 @@ int main(int argc, char** argv) {
 			else if (scenarioName == "reject-cache") o.cache = true;
 			else if (scenarioName == "reject-push-constant") { o.tesc = "push.tesc.spv"; o.push = true; }
 			else if (scenarioName == "reject-no-admission") {}
+			else if (scenarioName == "reject-indirect-tes" || scenarioName == "reject-indexed-indirect-tes") {
+				check(createPipeline(o, pipeline), "Create admitted pipeline");
+				actual = record(pipeline, {uniform(two)}, 0, 1, o);
+				std::printf("TES_TOPOLOGY %s %s: vkEndCommandBuffer=%d expected=%d, nothing submitted\n", actual == expected ? "PASS" : "FAIL", scenarioName.c_str(), actual, expected);
+				return actual == expected ? 0 : 2;
+			}
 			else if (scenarioName == "reject-first-vertex" || scenarioName == "reject-instances") {
 				check(createPipeline(o, pipeline), "Create admitted pipeline");
 				actual = record(pipeline, {uniform(two)}, scenarioName == "reject-first-vertex" ? 3 : 0, scenarioName == "reject-instances" ? 2 : 1, o);
