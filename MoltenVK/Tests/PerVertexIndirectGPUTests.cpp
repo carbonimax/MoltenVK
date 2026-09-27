@@ -1,8 +1,8 @@
 // Copyright 2026 Jean-Philippe Meunier
 // SPDX-License-Identifier: Apache-2.0
 // Standalone Vulkan test for portable PerVertexKHR vkCmdDraw[Indexed]Indirect[Count].
-// Arguments, Count and indices start as host zeros and are written by the GPU earlier in the same
-// command buffer (update, copy or compute, then a barrier). Each indirect result is compared byte for
+// Arguments, Count and indices start as host zeros and are written by the GPU before the draw,
+// optionally in a separate submission and queue family joined by a semaphore. Each result is compared byte for
 // byte with direct PerVertexKHR draws of the same parameters, and every vertex shader invocation is
 // recorded to check DrawID, first/base values, instances and exactly-once side effects.
 #define VK_ENABLE_BETA_EXTENSIONS 1 // VK_KHR_portability_subset
@@ -58,7 +58,9 @@ struct Device {
 	VkPhysicalDevice physical = VK_NULL_HANDLE;
 	VkDevice device = VK_NULL_HANDLE;
 	VkQueue queue = VK_NULL_HANDLE;
+	VkQueue producerQueue = VK_NULL_HANDLE;
 	uint32_t family = 0;
+	uint32_t producerFamily = 0;
 };
 
 struct Buffer {
@@ -83,6 +85,12 @@ static Buffer makeBuffer(const Device& d, VkDeviceSize size, VkBufferUsageFlags 
 	VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
 	info.size = size;
 	info.usage = usage;
+	uint32_t families[2] = {d.family, d.producerFamily};
+	if (d.producerFamily != d.family) {
+		info.sharingMode = VK_SHARING_MODE_CONCURRENT;
+		info.queueFamilyIndexCount = 2;
+		info.pQueueFamilyIndices = families;
+	}
 	check(vkCreateBuffer(d.device, &info, nullptr, &b.buffer), "Create buffer");
 	VkMemoryRequirements requirements{};
 	vkGetBufferMemoryRequirements(d.device, b.buffer, &requirements);
@@ -105,11 +113,17 @@ int main(int argc, char** argv) {
 		const bool withTES = getenv("PERVERTEX_TEST_INCLUDE_TES") != nullptr;
 		const bool tesFirst = getenv("PERVERTEX_TEST_TES_FIRST") != nullptr;
 		const bool tessWrongPatch = getenv("PERVERTEX_TEST_TES_WRONG_PATCH") != nullptr;
+		const bool splitProducer = getenv("PERVERTEX_TEST_SPLIT_PRODUCER") != nullptr;
+		const bool lateSignal = getenv("PERVERTEX_TEST_LATE_SIGNAL") != nullptr;
+		const bool dependentSubmission = getenv("PERVERTEX_TEST_DEPENDENT_SUBMISSION") != nullptr;
+		if (dependentSubmission && (!splitProducer || !lateSignal)) throw std::runtime_error("dependent submission requires split producer and late signal");
 		const bool indexed = form == "indexed" || form == "indexed-count";
 		const bool counted = form == "draw-count" || form == "indexed-count";
 		if (!indexed && form != "draw" && !counted) throw std::runtime_error("Unknown form");
 		if (producer != "update" && producer != "copy" && producer != "compute") throw std::runtime_error("Unknown producer");
 		if (scenarioName == "repeat" && producer == "update") throw std::runtime_error("repeat changes host staging between submissions; use copy or compute");
+		if (splitProducer && (producer != "compute" || scenarioName == "repeat")) throw std::runtime_error("split producer requires compute and a single scenario");
+		if (lateSignal && !splitProducer) throw std::runtime_error("late host signal requires a split producer");
 		const uint32_t indexSize = indexName == "u8" ? 1 : indexName == "u16" ? 2 : indexName == "u32" ? 4 : 0;
 		if (!indexSize) throw std::runtime_error("Unknown index type");
 		const VkIndexType indexType = indexSize == 1 ? VK_INDEX_TYPE_UINT8_KHR : indexSize == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
@@ -155,7 +169,7 @@ int main(int argc, char** argv) {
 		const char* portabilityName = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
 		VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
 		app.pApplicationName = "PerVertexKHR indirect test";
-		app.apiVersion = VK_API_VERSION_1_1;
+		app.apiVersion = lateSignal ? VK_API_VERSION_1_2 : VK_API_VERSION_1_1;
 		VkInstanceCreateInfo instanceInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
 		instanceInfo.pApplicationInfo = &app;
 		instanceInfo.flags = portability ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0;
@@ -184,6 +198,8 @@ int main(int argc, char** argv) {
 				if (!(families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) || !(families[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) continue;
 				d.physical = candidate;
 				d.family = i;
+				d.producerFamily = i;
+				if (splitProducer) for (uint32_t j = 0; j < count; ++j) if (j != i && (families[j].queueFlags & VK_QUEUE_COMPUTE_BIT)) { d.producerFamily = j; break; }
 				if (hasExtension(extensions, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) deviceExtensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
 			}
 			if (d.physical) break;
@@ -193,17 +209,19 @@ int main(int argc, char** argv) {
 		// Feature chain: barycentric -> draw parameters [-> uint8 indices] [-> dynamic restart].
 		VkPhysicalDeviceIndexTypeUint8FeaturesKHR uint8Features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_KHR};
 		VkPhysicalDeviceExtendedDynamicState2FeaturesEXT dynamicState2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT};
+		VkPhysicalDeviceTimelineSemaphoreFeatures timeline{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
 		VkPhysicalDeviceShaderDrawParametersFeatures drawParameters{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES};
 		VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR barycentric{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR};
 		barycentric.pNext = &drawParameters;
 		void** tail = &drawParameters.pNext;
 		if (indexSize == 1) { *tail = &uint8Features; tail = &uint8Features.pNext; }
-		if (dynamicRestart) { *tail = &dynamicState2; }
+		if (dynamicRestart) { *tail = &dynamicState2; tail = &dynamicState2.pNext; }
+		if (lateSignal) { *tail = &timeline; }
 		VkPhysicalDeviceFeatures2 supported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 		supported.pNext = &barycentric;
 		vkGetPhysicalDeviceFeatures2(d.physical, &supported);
 		const auto& core = supported.features;
-		if (!barycentric.fragmentShaderBarycentric || !drawParameters.shaderDrawParameters || !core.drawIndirectFirstInstance || !core.multiDrawIndirect || !core.vertexPipelineStoresAndAtomics || (withTES && !core.tessellationShader) || (indexSize == 1 && !uint8Features.indexTypeUint8) || (dynamicRestart && !dynamicState2.extendedDynamicState2))
+		if (!barycentric.fragmentShaderBarycentric || !drawParameters.shaderDrawParameters || !core.drawIndirectFirstInstance || !core.multiDrawIndirect || !core.vertexPipelineStoresAndAtomics || (withTES && !core.tessellationShader) || (indexSize == 1 && !uint8Features.indexTypeUint8) || (dynamicRestart && !dynamicState2.extendedDynamicState2) || (lateSignal && !timeline.timelineSemaphore))
 			throw std::runtime_error("Required features are unavailable");
 		VkPhysicalDeviceFeatures2 enabled{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 		enabled.pNext = &barycentric;
@@ -216,17 +234,21 @@ int main(int argc, char** argv) {
 		queueInfo.queueFamilyIndex = d.family;
 		queueInfo.queueCount = 1;
 		queueInfo.pQueuePriorities = &priority;
+		VkDeviceQueueCreateInfo producerQueueInfo = queueInfo;
+		producerQueueInfo.queueFamilyIndex = d.producerFamily;
+		VkDeviceQueueCreateInfo queues[2] = {queueInfo, producerQueueInfo};
 		VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
 		deviceInfo.pNext = &enabled;
-		deviceInfo.queueCreateInfoCount = 1;
-		deviceInfo.pQueueCreateInfos = &queueInfo;
+		deviceInfo.queueCreateInfoCount = d.producerFamily == d.family ? 1 : 2;
+		deviceInfo.pQueueCreateInfos = queues;
 		deviceInfo.enabledExtensionCount = uint32_t(deviceExtensions.size());
 		deviceInfo.ppEnabledExtensionNames = deviceExtensions.data();
 		check(vkCreateDevice(d.physical, &deviceInfo, nullptr, &d.device), "Create device");
 		vkGetDeviceQueue(d.device, d.family, 0, &d.queue);
+		vkGetDeviceQueue(d.device, d.producerFamily, 0, &d.producerQueue);
 		VkPhysicalDeviceProperties properties{};
 		vkGetPhysicalDeviceProperties(d.physical, &properties);
-		std::printf("DEVICE=%s form=%s index=%s scenario=%s producer=%s topology=%s\n", properties.deviceName, form.c_str(), indexName.c_str(), scenarioName.c_str(), producer.c_str(), restart ? "triangle-strip" : topologyText.c_str());
+		std::printf("DEVICE=%s form=%s index=%s scenario=%s producer=%s topology=%s draw_family=%u producer_family=%u\n", properties.deviceName, form.c_str(), indexName.c_str(), scenarioName.c_str(), producer.c_str(), restart ? "triangle-strip" : topologyText.c_str(), d.family, d.producerFamily);
 
 		// Colour attachment and readback.
 		VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -459,7 +481,22 @@ int main(int argc, char** argv) {
 		commandInfo.commandBufferCount = 2;
 		VkCommandBuffer commands[2]{};
 		check(vkAllocateCommandBuffers(d.device, &commandInfo, commands), "Allocate command buffers");
-		VkCommandBuffer referenceCommands = commands[0], indirectCommands = commands[1];
+		VkCommandBuffer referenceCommands = commands[0], indirectCommands = commands[1], producerCommands = VK_NULL_HANDLE, dependentCommands = VK_NULL_HANDLE;
+		VkCommandPool producerPool = pool;
+		Buffer dependentMarker;
+		if (dependentSubmission) dependentMarker = makeBuffer(d, sizeof(uint32_t), VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+		if (splitProducer) {
+			if (d.producerFamily != d.family) {
+				poolInfo.queueFamilyIndex = d.producerFamily;
+				check(vkCreateCommandPool(d.device, &poolInfo, nullptr, &producerPool), "Create producer command pool");
+			}
+			commandInfo.commandPool = producerPool;
+			commandInfo.commandBufferCount = dependentSubmission ? 2 : 1;
+			VkCommandBuffer producerBuffers[2]{};
+			check(vkAllocateCommandBuffers(d.device, &commandInfo, producerBuffers), "Allocate producer command buffers");
+			producerCommands = producerBuffers[0];
+			dependentCommands = producerBuffers[1];
+		}
 
 		// Staging layout: indices from byte 16, arguments at 256 (stride 32), Count at 384.
 		auto fillStaging = [&](const Scenario& s) {
@@ -495,11 +532,7 @@ int main(int argc, char** argv) {
 			return records;
 		};
 
-		auto record = [&](VkCommandBuffer cb, bool referenceRun, const Scenario& s) {
-			check(vkResetCommandBuffer(cb, 0), "Reset command buffer");
-			VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-			check(vkBeginCommandBuffer(cb, &begin), "Begin command buffer");
-			const std::string how = referenceRun ? "copy" : producer;
+		auto encodeProducer = [&](VkCommandBuffer cb, const std::string& how, bool barrier) {
 			VkPipelineStageFlags producerStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 			VkAccessFlags producerAccess = VK_ACCESS_TRANSFER_WRITE_BIT;
 			if (how == "update") {
@@ -514,10 +547,18 @@ int main(int argc, char** argv) {
 				producerStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 				producerAccess = VK_ACCESS_SHADER_WRITE_BIT;
 			}
-			VkMemoryBarrier produced{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-			produced.srcAccessMask = producerAccess;
-			produced.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_INDEX_READ_BIT;
-			vkCmdPipelineBarrier(cb, producerStage, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &produced, 0, nullptr, 0, nullptr);
+			if (barrier) {
+				VkMemoryBarrier produced{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+				produced.srcAccessMask = producerAccess;
+				produced.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_INDEX_READ_BIT;
+				vkCmdPipelineBarrier(cb, producerStage, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &produced, 0, nullptr, 0, nullptr);
+			}
+		};
+		auto record = [&](VkCommandBuffer cb, bool referenceRun, const Scenario& s) {
+			check(vkResetCommandBuffer(cb, 0), "Reset command buffer");
+			VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+			check(vkBeginCommandBuffer(cb, &begin), "Begin command buffer");
+			if (referenceRun || !splitProducer) encodeProducer(cb, referenceRun ? "copy" : producer, true);
 			VkClearValue clear{};
 			VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
 			pass.renderPass = renderPass;
@@ -576,22 +617,109 @@ int main(int argc, char** argv) {
 			std::printf("%s vkEndCommandBuffer=%d\n", referenceRun ? "reference" : "indirect", int(end));
 			check(end, "End command buffer");
 		};
+		if (splitProducer) {
+			VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+			check(vkBeginCommandBuffer(producerCommands, &begin), "Begin producer command buffer");
+			encodeProducer(producerCommands, producer, false);
+			check(vkEndCommandBuffer(producerCommands), "End producer command buffer");
+			if (dependentSubmission) {
+				check(vkBeginCommandBuffer(dependentCommands, &begin), "Begin dependent command buffer");
+				vkCmdFillBuffer(dependentCommands, dependentMarker.buffer, 0, sizeof(uint32_t), 0xA55A5AA5);
+				check(vkEndCommandBuffer(dependentCommands), "End dependent command buffer");
+			}
+		}
 		VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
 		VkFence fence = VK_NULL_HANDLE;
 		check(vkCreateFence(d.device, &fenceInfo, nullptr, &fence), "Create fence");
-		struct Result { VkResult submit, wait; std::vector<uint8_t> image; std::vector<std::array<uint32_t, 4>> records; uint32_t invocations; bool produced; };
-		auto run = [&](VkCommandBuffer cb) {
+		VkFence producerFence = VK_NULL_HANDLE;
+		if (lateSignal) check(vkCreateFence(d.device, &fenceInfo, nullptr, &producerFence), "Create producer fence");
+		VkFence dependentFence = VK_NULL_HANDLE;
+		if (dependentSubmission) check(vkCreateFence(d.device, &fenceInfo, nullptr, &dependentFence), "Create dependent fence");
+		VkSemaphore semaphore = VK_NULL_HANDLE;
+		VkSemaphore hostGate = VK_NULL_HANDLE;
+		VkSemaphore dependentSignal = VK_NULL_HANDLE;
+		if (dependentSubmission) {
+			VkSemaphoreCreateInfo signalInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+			check(vkCreateSemaphore(d.device, &signalInfo, nullptr, &dependentSignal), "Create dependent semaphore");
+		}
+		if (splitProducer) {
+			VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+			check(vkCreateSemaphore(d.device, &semaphoreInfo, nullptr, &semaphore), "Create producer semaphore");
+			if (lateSignal) {
+				VkSemaphoreTypeCreateInfo typeInfo{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+				typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+				semaphoreInfo.pNext = &typeInfo;
+				check(vkCreateSemaphore(d.device, &semaphoreInfo, nullptr, &hostGate), "Create host gate");
+			}
+		}
+		struct Result { VkResult submit, wait, dependentSubmit = VK_NOT_READY, dependentBeforeSignal = VK_NOT_READY, dependentWait = VK_NOT_READY; std::vector<uint8_t> image; std::vector<std::array<uint32_t, 4>> records; uint32_t invocations; bool produced; uint32_t dependentMarkerValue = 0; };
+		auto run = [&](VkCommandBuffer cb, bool split = false) {
 			// Host zeros: a CPU read of arguments, Count or indices while encoding would see an empty draw.
 			memset(work.data, 0, kWorkSize);
 			memset(effects.data, 0, effects.size);
 			memset(readback.data, 0, readback.size);
+			if (dependentSubmission) memset(dependentMarker.data, 0, dependentMarker.size);
 			check(vkResetFences(d.device, 1, &fence), "Reset fence");
 			VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
 			submit.commandBufferCount = 1;
 			submit.pCommandBuffers = &cb;
+			if (dependentSubmission && split) { submit.signalSemaphoreCount = 1; submit.pSignalSemaphores = &dependentSignal; }
 			Result r{};
-			r.submit = vkQueueSubmit(d.queue, 1, &submit, fence);
+			VkResult producerSubmit = VK_SUCCESS;
+			VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+			if (split) {
+				VkSubmitInfo source{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+				VkPipelineStageFlags sourceWaitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+				uint64_t sourceWaitValue = 1, sourceSignalValue = 0;
+				VkTimelineSemaphoreSubmitInfo timelineSubmit{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+				source.commandBufferCount = 1;
+				source.pCommandBuffers = &producerCommands;
+				source.signalSemaphoreCount = 1;
+				source.pSignalSemaphores = &semaphore;
+				if (lateSignal) {
+					timelineSubmit.waitSemaphoreValueCount = timelineSubmit.signalSemaphoreValueCount = 1;
+					timelineSubmit.pWaitSemaphoreValues = &sourceWaitValue;
+					timelineSubmit.pSignalSemaphoreValues = &sourceSignalValue;
+					source.pNext = &timelineSubmit;
+					source.waitSemaphoreCount = 1;
+					source.pWaitSemaphores = &hostGate;
+					source.pWaitDstStageMask = &sourceWaitStage;
+				}
+				producerSubmit = vkQueueSubmit(d.producerQueue, 1, &source, producerFence);
+				submit.waitSemaphoreCount = 1;
+				submit.pWaitSemaphores = &semaphore;
+				submit.pWaitDstStageMask = &waitStage;
+				std::printf("producer submit=%d\n", producerSubmit);
+			}
+			r.submit = producerSubmit == VK_SUCCESS ? vkQueueSubmit(d.queue, 1, &submit, fence) : producerSubmit;
+			if (dependentSubmission && split && r.submit == VK_SUCCESS) {
+				VkPipelineStageFlags dependentStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+				VkSubmitInfo dependent{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+				dependent.waitSemaphoreCount = 1;
+				dependent.pWaitSemaphores = &dependentSignal;
+				dependent.pWaitDstStageMask = &dependentStage;
+				dependent.commandBufferCount = 1;
+				dependent.pCommandBuffers = &dependentCommands;
+				r.dependentSubmit = vkQueueSubmit(d.producerQueue, 1, &dependent, dependentFence);
+				r.dependentBeforeSignal = vkGetFenceStatus(d.device, dependentFence);
+				std::printf("dependent submit=%d fence before host signal=%d\n", r.dependentSubmit, r.dependentBeforeSignal);
+			}
+			if (lateSignal && split && r.submit == VK_SUCCESS) {
+				VkResult beforeSignal = vkGetFenceStatus(d.device, producerFence);
+				std::printf("both queue submits returned; producer fence before host signal=%d\n", beforeSignal);
+				if (beforeSignal != VK_NOT_READY) throw std::runtime_error("Producer completed before host timeline signal");
+				VkSemaphoreSignalInfo signal{VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
+				signal.semaphore = hostGate;
+				signal.value = 1;
+				check(vkSignalSemaphore(d.device, &signal), "Host signal timeline");
+			}
 			r.wait = r.submit == VK_SUCCESS ? vkWaitForFences(d.device, 1, &fence, VK_TRUE, 20000000000ull) : r.submit;
+			if (dependentSubmission && split) {
+				r.dependentWait = r.dependentSubmit == VK_SUCCESS ? vkWaitForFences(d.device, 1, &dependentFence, VK_TRUE, 5000000000ull) : r.dependentSubmit;
+				memcpy(&r.dependentMarkerValue, dependentMarker.data, sizeof(uint32_t));
+				std::printf("dependent wait=%d fence status=%d marker=%08x\n", r.dependentWait, vkGetFenceStatus(d.device, dependentFence), r.dependentMarkerValue);
+				if (r.wait == VK_SUCCESS && (r.dependentWait != VK_SUCCESS || r.dependentMarkerValue != 0xA55A5AA5)) throw std::runtime_error("Dependent submission did not complete after the indirect draw");
+			}
 			r.image.assign(readback.data, readback.data + readback.size);
 			memcpy(&r.invocations, effects.data, 4);
 			for (uint32_t i = 0; i < std::min(r.invocations, kMaxRecords); ++i) {
@@ -645,7 +773,7 @@ int main(int argc, char** argv) {
 			// Direct draws are the pixel reference; their recorded invocations must also match the CPU oracle.
 			std::printf("submission=%zu reference submit=%d wait=%d invocations=%u expected=%zu records_match=%d\n", n, ref.submit, ref.wait, ref.invocations, expected.size(), int(ref.records == expected));
 			if (!n || scenarioName != "repeat") record(indirectCommands, false, s);
-			Result got = run(indirectCommands);
+			Result got = run(indirectCommands, splitProducer);
 			VkResult wantWait = s.expectLost ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
 			size_t mismatches = 0;
 			for (size_t i = 0; i < got.image.size(); ++i) mismatches += got.image[i] != ref.image[i];
