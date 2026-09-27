@@ -41,6 +41,11 @@ static inline bool mvkCanEncodePerVertexDraw(uint32_t vertexCount, uint32_t inst
 	return primitiveCount <= UINT32_MAX / 3 && primitiveCount <= maxBufferSize / (3 * sizeof(uint32_t)) && occurrenceCount <= UINT32_MAX / 2 && occurrenceCount <= maxBufferSize / (2 * sizeof(uint32_t));
 }
 
+// PerVertex TES plan: status, replay arguments and constants, per-patch counts and offsets, then, 256-byte
+// aligned for the fragment binding, the patch index of each generated triangle (at most 13 per patch).
+static inline uint64_t mvkPerVertexTessPrimitiveIdOffset(uint64_t patches) { return mvkAlignByteCount(512 + patches * 2 * sizeof(uint32_t), 256); }
+static inline uint64_t mvkPerVertexTessPlanSize(uint64_t patches) { return mvkPerVertexTessPrimitiveIdOffset(patches) + patches * 13 * sizeof(uint32_t); }
+
 
 #pragma mark -
 #pragma mark MVKCmdBindVertexBuffers

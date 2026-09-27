@@ -640,8 +640,9 @@ kernel void perVertexRestart(const device uint8_t* source [[buffer(0)]], device 
 // levels include one <= 0 or NaN, then clamps levels to [1, maxLevel] and rounds them up. Uniform levels 1,
 // 2 and 3 use the Metal topologies proven by the Vulkan oracles; any other level refuses the whole draw.
 // Levels are decoded from their bits, so NaN and sign tests survive fast math.
-// p: patches, maxLevel bits, reverse corners (counter-clockwise winding), corners output, phase.
-// Plan words: 0 status, 4 replay draw, 64 replay constants (byte 256), 128 counts, then offsets.
+// p: patches, maxLevel bits, reverse corners (counter-clockwise winding), corners output, phase, patch table word.
+// Plan words: 0 status, 4 replay draw, 64 replay constants (byte 256), 128 counts, then offsets; from word p[5],
+// the patch index of each generated triangle, which the fragment reads as Vulkan's PrimitiveId.
 uint perVertexTessLevel(uint bits, float maxLevel) {
     if ((bits & 0x7fffffffu) > 0x7f800000u) { return 0; }  // NaN
     if ((bits & 0x80000000u) || !(bits & 0x7fffffffu)) { return 1; }  // <= 0 clamps to 1
@@ -695,6 +696,7 @@ kernel void perVertexTessTopology(const device uint* levels [[buffer(0)]], devic
     uint triangles = counts[i];
     for (uint triangle = 0; triangle < triangles; ++triangle) {
         uint key = offsets[i] + triangle;
+        plan[p[5] + key] = i;
         for (uint corner = 0; corner < 3; ++corner) {
             uint slot = p[2] && corner ? 3 - corner : corner;
             float3 coordinate = triangles == 1 ? points[slot == 0 ? 0 : slot == 1 ? 3 : 6] : triangles == 6 ? level2[slot ? (triangle + slot - 1) % 6 : 6] : points[level3[triangle][slot]];
