@@ -35,12 +35,18 @@ run() {
 	local log=$output/runs/$name.log rc=0
 	(cd "$output/runs" && env -u DYLD_LIBRARY_PATH -u DYLD_INSERT_LIBRARIES MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 \
 		MVK_CONFIG_LOG_LEVEL=2 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS="${PREFILL:-0}" MVK_PERVERTEX_INDIRECT_RECORD_CAPACITY="$capacity" \
-		PERVERTEX_TEST_SWAP_FRAGMENT="$swap" gtimeout -k 2 30 "$output/pervertex-indirect-gpu-$variant" "$shaders" "$@" "$name") > "$log" 2>&1 || rc=$?
+		PERVERTEX_TEST_SWAP_FRAGMENT="$swap" PERVERTEX_TEST_TOPOLOGY="${TOPOLOGY:-triangle-list}" gtimeout -k 2 30 "$output/pervertex-indirect-gpu-$variant" "$shaders" "$@" "$name") > "$log" 2>&1 || rc=$?
 	local verdict=PASS
 	[[ $rc == "$expected" ]] || verdict=FAIL
 	grep -q 'Metal API Validation Enabled' "$log" || verdict=FAIL
 	grep -q 'Metal GPU Validation Enabled' "$log" || verdict=FAIL
-	if grep -qiE 'Shader Validation|GPU Address Sanitizer|validation error|Execution of the command buffer was aborted' "$log"; then verdict=FAIL; fi
+	# A GPU fault also loses the device: only the admission message may explain an expected loss.
+	if grep -qiE 'Shader Validation|GPU Address Sanitizer|validation error|Execution of the command buffer was aborted|execution failed' "$log"; then verdict=FAIL; fi
+	case $* in
+		*index-oob*) grep -q 'reads indices beyond the bound index buffer' "$log" || verdict=FAIL ;;
+		*overflow*|*huge*) grep -q 'exceeds the reserved capture capacity' "$log" || verdict=FAIL ;;
+		*) if grep -q 'indirect command was not executed' "$log"; then verdict=FAIL; fi ;;
+	esac
 	case $expected in
 		0) grep -q '^PERVERTEX_INDIRECT PASS' "$log" || verdict=FAIL ;;
 		2) grep -q '^PERVERTEX_INDIRECT FAIL' "$log" && grep -qE 'pixel_mismatches=[1-9]' "$log" || verdict=FAIL ;;
@@ -88,12 +94,20 @@ for form in indexed indexed-count; do
 	run "capacity16-restart-$form" after 0 16 0 $form u32 restart compute
 	run "capacity15-restart-overflow-$form" after 0 15 0 $form u32 restart-overflow compute
 done
-# 5. Deferred and immediate Metal command buffer prefill.
+# 5. Every other portable topology through the GPU-built replay tables (first-vertex provoking:
+#    last-vertex needs the Metal private API; the host kernel test covers both modes), and two heavy
+#    overlapping draws where draw 1 rewrites the scratch that draw 0's replay reads.
+for topology in point-list line-list line-strip triangle-strip triangle-fan; do
+	for form in draw draw-count indexed indexed-count; do TOPOLOGY=$topology run "topology-$topology-$form" after 0 $big 0 $form u16 decisive compute; done
+	TOPOLOGY=$topology run "topology-$topology-two-indexed-count" after 0 $big 0 indexed-count u32 two copy
+done
+for form in draw draw-count indexed indexed-count; do run "stress-$form" after 0 $big 0 $form u32 stress compute; done
+# 6. Deferred and immediate Metal command buffer prefill.
 for prefill in 1 2; do
 	for form in draw draw-count indexed indexed-count; do PREFILL=$prefill run "prefill$prefill-decisive-$form" after 0 $big 0 $form u32 decisive compute; done
 	PREFILL=$prefill run "prefill$prefill-restart-indexed-count" after 0 $big 0 indexed-count u16 restart compute
 done
-# 6. Negative controls: permuted corners must mismatch; the previous library must refuse at recording.
+# 7. Negative controls: permuted corners must mismatch; the previous library must refuse at recording.
 for form in draw draw-count indexed indexed-count; do
 	run "swap-negative-$form" after 2 $big 1 $form u32 decisive compute
 	run "before-$form" before 1 $big 0 $form u32 decisive compute

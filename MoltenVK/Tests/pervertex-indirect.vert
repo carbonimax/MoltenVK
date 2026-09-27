@@ -17,10 +17,12 @@ const vec2 corners[14] = vec2[14](vec2(4), vec2(4), vec2(4), vec2(4),
 void main() {
 	uint v = uint(gl_VertexIndex), instance = uint(gl_InstanceIndex), drawId = DRAW_ID;
 	uint slot = atomicAdd(effects.count, 1u);
-	if (slot < 256u) { effects.records[slot] = uvec4(v, instance, drawId | (uint(gl_BaseInstance) << 16), uint(gl_BaseVertex)); }
+	if (slot < 262144u) { effects.records[slot] = uvec4(v, instance, drawId | (uint(gl_BaseInstance) << 16), uint(gl_BaseVertex)); }
 	vec2 p = v < 14u ? corners[v] : vec2(4.0);
 	color = vec3(float(v % 5u) * 0.2, float(v % 3u) * 0.4 + 0.1 * float(drawId), 0.25 * float(uint(gl_BaseVertex) & 3u) + 0.05 * float(gl_BaseInstance));
-	if (instance == 3u) { color = color.gbr; }
-	float x = instance == 2u ? -0.5 : instance == 3u ? 0.5 : 4.0;
+	// Instances from 3 on overlap on the right half, so large instance counts stay visible.
+	if (instance >= 3u) { color = color.gbr; }
+	float x = instance == 2u ? -0.5 : instance >= 3u ? 0.5 : 4.0;
 	gl_Position = vec4(p * vec2(0.45, 0.6) + vec2(x, -0.2 + 0.25 * float(drawId)), 0.0, 1.0);
+	gl_PointSize = 1.0;
 }
