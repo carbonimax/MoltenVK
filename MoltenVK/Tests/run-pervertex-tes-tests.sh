@@ -84,7 +84,7 @@ check_log() { # log expected-exit actual-exit required...
 	local log=$1 expected=$2 actual=$3 verdict=PASS; shift 3
 	[[ $actual == "$expected" ]] || verdict=FAIL
 	grep -q 'Metal API Validation Enabled' "$log" || verdict=FAIL
-	grep -q 'Metal GPU Validation Enabled' "$log" || verdict=FAIL
+	[[ ${SHADER_VALIDATION:-1} == 0 ]] || grep -q 'Metal GPU Validation Enabled' "$log" || verdict=FAIL
 	if grep -qiE 'Shader Validation|GPU Address Sanitizer|validation error|Execution of the command buffer was aborted|execution failed' "$log"; then verdict=FAIL; fi
 	for required in "$@"; do grep -qE -- "$required" "$log" || { verdict=FAIL; echo "    missing: $required"; }; done
 	cases=$((cases + 1))
@@ -92,7 +92,7 @@ check_log() { # log expected-exit actual-exit required...
 	grep -E '^  (ordinary vs|barycentric|CPU model|tessellation coordinates|seam|fragment gl_PrimitiveID|VS storage|case|info)|^pipeline rejection|^Pixel|PASS|FAIL' "$log" | grep -v 'Validation Enabled' | sed 's/^/    /' | head -12 || true
 	if [[ $verdict != PASS ]]; then echo "STOP: inspect $log before any further GPU work"; exit 1; fi
 }
-env_run() { env -u DYLD_LIBRARY_PATH -u DYLD_INSERT_LIBRARIES MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MVK_CONFIG_LOG_LEVEL=2 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS="${PREFILL:-0}" "$@"; }
+env_run() { env -u DYLD_LIBRARY_PATH -u DYLD_INSERT_LIBRARIES MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION="${SHADER_VALIDATION:-1}" MVK_CONFIG_LOG_LEVEL=2 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS="${PREFILL:-0}" "$@"; }
 topology() { # library scenario winding expected-exit required...
 	local name=$1-$2-$3 rc=0
 	(cd "$output/runs" && env_run gtimeout -k 2 60 "$output/$1/topology" "$output/shaders" "$2" "$3" "$name") > "$output/runs/$name.log" 2>&1 || rc=$?
@@ -119,8 +119,11 @@ topology no-admission reject-no-admission ccw 0 "TES_TOPOLOGY PASS"
 topology shipping public-device-gate ccw 0 "TES_TOPOLOGY PASS"
 # 2b. Ordinary tessellation keeps float32 TCS levels until Vulkan classification, in every draw command, on the
 # shipping library too: the image, tessellation and TES-visible levels match the Vulkan level representative.
+# Metal shader validation makes ordinary indirect tessellation draw nothing, before and after this change
+# (the VS runs, no TES does): indirect commands run under Metal API validation only.
 for library in dev shipping; do
-	for command in direct indexed indirect indexed-indirect; do topology "$library" "ordinary-levels-$command" ccw 0 "TES_TOPOLOGY PASS"; done
+	for command in direct indexed; do topology "$library" "ordinary-levels-$command" ccw 0 "TES_TOPOLOGY PASS"; done
+	for command in indirect indexed-indirect; do SHADER_VALIDATION=0 topology "$library" "ordinary-levels-$command" ccw 0 "TES_TOPOLOGY PASS"; done
 	topology "$library" ordinary-levels-direct cw 0 "TES_TOPOLOGY PASS"
 done
 # 3. Pilot guarantees kept: fixture pixels, compute-bind recording guards, refusals.
