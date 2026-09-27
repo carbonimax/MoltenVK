@@ -1248,8 +1248,35 @@ static std::string mvkMeshShaderIncompatibility(const std::vector<uint32_t>& spi
 	return {};
 }
 
+// Returns the Locations of the fragment PerVertexKHR inputs that the mesh corner copies support: arrays of one to three
+// 16- or 32-bit scalars or vectors below Location 32, outside blocks. Returns zero if any other form is read.
+static uint32_t mvkMeshPerVertexCornerLocations(const std::vector<uint32_t>& spirv, const char* entryName) {
+	SPIRV_CROSS_NAMESPACE::CompilerReflection reflect(spirv);
+	reflect.set_entry_point(entryName, spv::ExecutionModelFragment);
+	uint32_t locations = 0;
+	for (auto varID : reflect.get_active_interface_variables()) {
+		if (reflect.get_storage_class(varID) != spv::StorageClassInput) { continue; }
+		const auto& type = reflect.get_type(reflect.get_type_from_variable(varID).parent_type);
+		if (!reflect.has_decoration(varID, spv::DecorationPerVertexKHR)) {
+			if (mvk::hasPerVertexInputMember(reflect, type)) { return 0; }
+			continue;
+		}
+		if (type.array.size() != 1 || !type.array_size_literal[0] || type.array[0] < 1 || type.array[0] > 3) { return 0; }
+		const auto& element = reflect.get_type(type.parent_type);
+		bool scalarOrVector = element.array.empty() && element.columns == 1 &&
+			(element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Float || element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Half ||
+			 element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Int || element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::UInt ||
+			 element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Short || element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::UShort);
+		uint32_t location = reflect.get_decoration(varID, spv::DecorationLocation);
+		if (!scalarOrVector || reflect.has_decoration(varID, spv::DecorationBuiltIn) || !reflect.has_decoration(varID, spv::DecorationLocation) || location >= 32) { return 0; }
+		locations |= 1u << location;
+	}
+	return locations;
+}
+
 // First mesh path: a mesh and a fragment shader drawn with vkCmdDrawMeshTasksEXT, without task shader, mesh-stage
-// resources or specialization, per-primitive outputs, PerVertexKHR fragment inputs, pipeline cache, dynamic state or views.
+// resources or specialization, per-primitive outputs, pipeline cache, dynamic state or views. Fragment PerVertexKHR inputs
+// read the corners that the mesh copies per primitive, in index order, for the forms mvkMeshPerVertexCornerLocations accepts.
 // Anything else is refused at creation. The extension is exposed only to the test device adapter.
 bool MVKGraphicsPipeline::initMeshPipelineState(const VkGraphicsPipelineCreateInfo* pCreateInfo,
 												const VkPipelineShaderStageCreateInfo* pTaskSS,
@@ -1278,10 +1305,15 @@ bool MVKGraphicsPipeline::initMeshPipelineState(const VkGraphicsPipelineCreateIn
 		setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to reflect PerVertexKHR inputs: %s", errorLog.c_str()));
 		return false;
 	}
-	if (usesPerVertex) { return unsupported("reads PerVertexKHR fragment inputs."); }
+	uint32_t perVertexLocations = usesPerVertex ? mvkMeshPerVertexCornerLocations(_fragmentModule->getSPIRV(), pFragmentSS->pName) : 0;
+	if (usesPerVertex && !perVertexLocations) {
+		return unsupported("reads PerVertexKHR fragment inputs other than arrays of 16- or 32-bit scalars or vectors below Location 32.");
+	}
 
 	SPIRVToMSLConversionConfiguration shaderConfig;
 	initShaderConversionConfig(shaderConfig, pCreateInfo, _tessReflectData);
+	// The mesh copies these per-vertex outputs per primitive, and the fragment reads its PerVertexKHR inputs from them.
+	shaderConfig.options.mslOptions.mesh_per_vertex_corner_locations = perVertexLocations;
 	shaderConfig.options.entryPointStage = spv::ExecutionModelMeshEXT;
 	shaderConfig.options.entryPointName = pMeshSS->pName;
 	MVKMTLFunction mesh = getMTLFunction(shaderConfig, pMeshSS, pMeshFB, _meshModule, "Mesh");
@@ -3059,7 +3091,7 @@ MVKShaderLibraryCache* MVKPipelineCache::getShaderLibraryCache(MVKShaderModuleKe
 static uint32_t kDataHeaderSize = (sizeof(uint32_t) * 4) + VK_UUID_SIZE;
 // Version the private payload independently of the Vulkan header/driver UUID. Old readers
 // stop at this unknown entry type; new readers reject unversioned caches before reading options.
-static constexpr uint32_t kMVKPipelineCacheSchema = 0x4D564B02; // Includes TES compute and float32 factors.
+static constexpr uint32_t kMVKPipelineCacheSchema = 0x4D564B03; // Includes TES compute, float32 factors and mesh PerVertexKHR corners.
 #endif
 
 // Entry type markers to be inserted into data stream
@@ -3322,6 +3354,7 @@ namespace SPIRV_CROSS_NAMESPACE {
 				opt.device_index,
 				opt.enable_frag_output_mask,
 				opt.additional_fixed_sample_mask,
+				opt.mesh_per_vertex_corner_locations,
 				opt.enable_point_size_builtin,
 				opt.enable_point_size_default,
 				opt.default_point_size,
@@ -3664,11 +3697,11 @@ void mvkValidateCeralArchiveDefinitions() {
 	missingBytes += mvkValidateCerealArchiveSize<SPIRV_CROSS_NAMESPACE::MSLConstexprSampler>();
 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVWorkgroupSizeDimension>(3);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVEntryPoint>(20);						// Contains string
-	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionOptions>(29);			// Contains string
+	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionOptions>(25);			// Contains string
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLShaderInterfaceVariable>(3);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLResourceBinding>(2);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::DescriptorBinding>();
-	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(158);	// Contains collection
+	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(154);	// Contains collection
 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionResultInfo>(75);		// Contains collection
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLSpecializationMacroInfo>(22);			// Contains string
 	missingBytes += mvkValidateCerealArchiveSize<MVKShaderModuleKey>();
