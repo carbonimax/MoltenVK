@@ -1,4 +1,4 @@
-/* Copyright (c) 2026 The Brenwill Workshop Ltd. Licensed under Apache License, Version 2.0. */
+/* Copyright (c) 2026 Jean-Philippe Meunier. Licensed under the Apache License, Version 2.0. */
 #import <Metal/Metal.h>
 #include <vulkan/vulkan.h>
 #include <cstdio>
