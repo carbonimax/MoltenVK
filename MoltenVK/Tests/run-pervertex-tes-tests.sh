@@ -136,6 +136,9 @@ for scenario in ordinary-levels-scratch-limit ordinary-levels-indexed-scratch-li
 	PREFILL=1 topology shipping "$scenario" ccw 0 "TES_TOPOLOGY PASS" "nothing submitted"
 	for sync in 1 0; do SYNC=$sync topology shipping "$scenario" ccw 0 "TES_TOPOLOGY PASS" "nothing submitted"; done
 done
+for scenario in ordinary-levels-count-overflow ordinary-levels-indexed-count-overflow; do
+	PREFILL=0 SYNC=0 topology shipping "$scenario" ccw 0 "TES_TOPOLOGY PASS" "nothing submitted"
+done
 # 3. Pilot guarantees kept: fixture pixels, compute-bind recording guards, refusals.
 pilot dev ordered ordered.frag
 pilot dev swapped ordered-swapped.frag

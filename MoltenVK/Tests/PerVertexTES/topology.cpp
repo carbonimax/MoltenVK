@@ -160,10 +160,11 @@ int main(int argc, char** argv) {
 		const bool ordinaryOnly = scenarioName.rfind(ordinaryPrefix, 0) == 0;
 		// Scratch-limit draws, direct or indexed, recorded in the primary or in a secondary command buffer.
 		const bool secondaryScratchLimit = scenarioName == "ordinary-levels-secondary-scratch-limit" || scenarioName == "ordinary-levels-indexed-secondary-scratch-limit";
-		const bool indexedScratchLimit = scenarioName == "ordinary-levels-indexed-scratch-limit" || scenarioName == "ordinary-levels-indexed-secondary-scratch-limit";
+		const bool countOverflow = scenarioName == "ordinary-levels-count-overflow" || scenarioName == "ordinary-levels-indexed-count-overflow";
+		const bool indexedScratchLimit = scenarioName == "ordinary-levels-indexed-scratch-limit" || scenarioName == "ordinary-levels-indexed-secondary-scratch-limit" || scenarioName == "ordinary-levels-indexed-count-overflow";
 		// Dynamic control points: the pipeline declares 3, the command buffer sets 1 before drawing.
 		const bool dynamicScratchLimit = scenarioName == "ordinary-levels-dynamic-scratch-limit";
-		const bool scratchLimit = scenarioName == "ordinary-levels-scratch-limit" || indexedScratchLimit || secondaryScratchLimit || dynamicScratchLimit;
+		const bool scratchLimit = scenarioName == "ordinary-levels-scratch-limit" || indexedScratchLimit || secondaryScratchLimit || dynamicScratchLimit || countOverflow;
 		std::string drawMode = scratchLimit ? (indexedScratchLimit ? "indexed" : "direct") : ordinaryOnly ? scenarioName.substr(ordinaryPrefix.size()) : "direct";
 		if (scenarioName == "reject-indirect-tes") drawMode = "indirect";
 		if (scenarioName == "reject-indexed-indirect-tes") drawMode = "indexed-indirect";
@@ -171,6 +172,7 @@ int main(int argc, char** argv) {
 		if (ordinaryOnly) scenarios[scenarioName] = {{uniform(two)}, {}};
 		if (!rejection && !scenarios.count(scenarioName)) throw std::runtime_error("Unknown scenario");
 		Scenario scenario = rejection ? Scenario{{uniform(two)}, {}} : scenarios[scenarioName];
+		if (countOverflow) scenario.vertexCount = UINT32_MAX;
 		if (scenario.reference.empty()) scenario.reference = scenario.patches;
 
 		uint32_t count = 0;
@@ -677,8 +679,8 @@ int main(int argc, char** argv) {
 			// With one dynamic control point, each instance of 3 vertices draws 3 patches: the draw exceeds the limit only
 			// with the dynamic value, not with the 3 control points the pipeline declares.
 			const uint64_t patchLimit = props11.maxMemoryAllocationSize / levelBytesPerPatch;
-			uint64_t instances = dynamicScratchLimit ? patchLimit / 3 + 1 : patchLimit + 1;
-			uint64_t patches = dynamicScratchLimit ? 3 * instances : instances;
+			uint64_t instances = countOverflow ? 4 : dynamicScratchLimit ? patchLimit / 3 + 1 : patchLimit + 1;
+			uint64_t patches = countOverflow ? ((uint64_t(UINT32_MAX) + 2) / 3) * instances : dynamicScratchLimit ? 3 * instances : instances;
 			if (instances > UINT32_MAX) { std::printf("TES_TOPOLOGY SKIP %s: buffer limit exceeds addressable patch count\n", scenarioName.c_str()); return 0; }
 			PipelineOptions o{"topology.tesc.spv", tese, "ordinary.frag.spv"};
 			o.dynamicControlPoints = dynamicScratchLimit;
@@ -695,6 +697,10 @@ int main(int argc, char** argv) {
 				bool pass = actual == VK_ERROR_OUT_OF_DEVICE_MEMORY;
 				std::printf("TES_TOPOLOGY %s %s: vkEndCommandBuffer=%d expected=%d, patches=%llu limit=%llu, nothing submitted\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), actual, VK_ERROR_OUT_OF_DEVICE_MEMORY, (unsigned long long)patches, (unsigned long long)props11.maxMemoryAllocationSize);
 				return pass ? 0 : 2;
+			}
+			if (countOverflow) {
+				std::printf("TES_TOPOLOGY FAIL %s: oversized patch count accepted; not submitted\n", scenarioName.c_str());
+				return 2;
 			}
 			// With prefill, recording encoded the command buffer: a successful recording means the draw itself was encoded.
 			const char* prefill = getenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS");

@@ -497,7 +497,7 @@ static VkResult recordTessPatchCount(MVKCommandBuffer* cmdBuff, uint32_t vertexC
 	auto* pipeline = cmdBuff->getRecordedTessellationPipeline();
 	uint32_t controlPoints = cmdBuff->getRecordedPatchControlPoints();
 	if (!pipeline || !controlPoints || !vertexCount || !instanceCount) { return VK_SUCCESS; }
-	uint64_t patchCount = uint64_t(mvkCeilingDivide(vertexCount, controlPoints)) * instanceCount;
+	uint64_t patchCount = mvkCeilingDivide(uint64_t(vertexCount), controlPoints) * instanceCount;
 	if (mvkFitsTessPatchCount(patchCount, pipeline->usesFloat32TessLevels(), cmdBuff->getMetalFeatures().maxMTLBufferSize)) { return VK_SUCCESS; }
 	return cmdBuff->reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Tessellation level scratch exceeds Metal buffer limits.");
 }
@@ -551,7 +551,7 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
     if (pipeline->isTessellationPipeline()) {
         tessParams.inControlPointCount = cmdEncoder->getVkGraphics().getPatchControlPoints();
         outControlPointCount = pipeline->getOutputControlPointCount();
-        uint64_t patchCount = uint64_t(mvkCeilingDivide(_vertexCount, tessParams.inControlPointCount)) * _instanceCount;
+        uint64_t patchCount = mvkCeilingDivide(uint64_t(_vertexCount), tessParams.inControlPointCount) * _instanceCount;
         if (!validateTessPatchCount(cmdEncoder, patchCount, pipeline->usesFloat32TessLevels())) { return; }
         tessParams.patchCount = uint32_t(patchCount);
     }
@@ -843,7 +843,7 @@ void MVKCmdDrawIndexed::encode(MVKCommandEncoder* cmdEncoder) {
     if (pipeline->isTessellationPipeline()) {
         tessParams.inControlPointCount = cmdEncoder->getVkGraphics().getPatchControlPoints();
         outControlPointCount = pipeline->getOutputControlPointCount();
-        uint64_t patchCount = uint64_t(mvkCeilingDivide(_indexCount, tessParams.inControlPointCount)) * _instanceCount;
+        uint64_t patchCount = mvkCeilingDivide(uint64_t(_indexCount), tessParams.inControlPointCount) * _instanceCount;
         if (!validateTessPatchCount(cmdEncoder, patchCount, pipeline->usesFloat32TessLevels())) { return; }
         tessParams.patchCount = uint32_t(patchCount);
     }
