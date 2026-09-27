@@ -13,7 +13,8 @@
 // through float, floats through half, half bits read as an integer, 16-bit integers with the other extension) and,
 // on two workgroups, from a rival where each workgroup reads the other's values.
 // Usage: mesh-draw <shader-dir> <scenario>
-//   draw | grid | twice | pervertex | pervertex-swapped | pervertex-permuted | barycentric | barycentric-permuted
+//   draw | grid | twice | pervertex | pervertex-swapped | pervertex-permuted | pervertex-block-output | barycentric
+//   | barycentric-permuted
 //   | pervertex-consistency | form-uint | form-swapped | form-ivec2 | form-vec3 | form-uvec3 | form-components
 //   | form-fewer | form-scalar | form-array1 | form-array2 | form-half | form-int16 | form-uint16 | form-mixed
 //   | form-grid | reject-task | reject-descriptor | reject-per-primitive | reject-pervertex-block
@@ -159,7 +160,7 @@ static const std::vector<Form> kForms = {
 	{"form-scalar", "forms.mesh.spv", "form-scalar.frag.spv", 3, {{6, 0, 1, F32}}, false, false},
 	{"form-array1", "forms.mesh.spv", "form-array1.frag.spv", 1, {{6, 0, 1, F32}}, false, false},
 	{"form-array2", "forms.mesh.spv", "form-array2.frag.spv", 2, {{6, 0, 1, F32}}, false, false},
-	{"form-half", "forms16.mesh.spv", "form-half.frag.spv", 3, {{7, 0, 2, F16}}, false, false},
+	{"form-half", "forms16.mesh.spv", "form-half.frag.spv", 3, {{7, 2, 2, F16}}, false, false},
 	{"form-int16", "forms16.mesh.spv", "form-int16.frag.spv", 3, {{8, 0, 3, I16}}, false, false},
 	{"form-uint16", "forms16.mesh.spv", "form-uint16.frag.spv", 3, {{30, 0, 1, U16}}, false, false},
 	{"form-mixed", "forms.mesh.spv", "form-mixed.frag.spv", 3, {{0, 0, 1, U32}, {2, 0, 3, F32}, {3, 0, 1, F32}, {3, 1, 2, F32}, {3, 3, 1, F32}, {6, 0, 1, F32}}, false, false},
@@ -482,6 +483,7 @@ int main(int argc, char** argv) {
 			{"pervertex", "mesh.mesh.spv", "pervertex.frag.spv", Ordered, false, Swapped, false},
 			{"pervertex-swapped", "mesh.mesh.spv", "pervertex-swapped.frag.spv", Swapped, false, Ordered, false},
 			{"pervertex-permuted", "permuted.mesh.spv", "pervertex.frag.spv", Ordered, true, Ordered, false},
+			{"pervertex-block-output", "block.mesh.spv", "pervertex.frag.spv", Ordered, false, Swapped, false},
 			{"barycentric", "mesh.mesh.spv", "barycentric.frag.spv", Barycentric, false, Barycentric, true},
 			{"barycentric-permuted", "permuted.mesh.spv", "barycentric.frag.spv", Barycentric, true, Barycentric, false},
 			{"pervertex-consistency", "permuted.mesh.spv", "pervertex-consistency.frag.spv", Interpolated, true, None, false},

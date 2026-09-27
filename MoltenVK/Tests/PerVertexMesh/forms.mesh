@@ -24,7 +24,7 @@ layout(location = 4) out vec4 wide[];
 layout(location = 5) out uvec3 u3[];
 layout(location = 6) out float s1[];
 #ifdef SIXTEEN
-layout(location = 7) out f16vec2 h2[];
+layout(location = 7, component = 2) out f16vec2 h2[];
 layout(location = 8) out i16vec3 s3[];
 layout(location = 30) out uint16_t w1[];  // A high Location: bit 30 of the corner mask.
 #endif
@@ -62,7 +62,7 @@ void main()
 	u3[v] = uvec3(U(n, 40u), U(n, 41u), U(n, 42u));
 	s1[v] = F(n, 48u);
 #ifdef SIXTEEN
-	h2[v] = f16vec2(H(n, 56u), H(n, 57u));
+	h2[v] = f16vec2(H(n, 58u), H(n, 59u));
 	s3[v] = i16vec3(S(n, 64u), S(n, 65u), S(n, 66u));
 	w1[v] = W(n, 240u);
 #endif

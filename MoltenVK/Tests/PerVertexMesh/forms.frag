@@ -6,7 +6,7 @@
 // Corners beyond the array size read as zero. One macro selects the form:
 //   UINT, IVEC2, VEC3, UVEC3: 32-bit integers and floats; COMPONENTS: float, vec2 and float sharing Location 3;
 //   FEWER: vec2 read from a vec4 output; SCALAR, ARRAY1, ARRAY2: float read as 3, 1 and 2 corners;
-//   HALF, INT16, UINT16: 16-bit forms, UINT16 at Location 30; MIXED: UINT, VEC3, COMPONENTS and SCALAR together;
+//   HALF, INT16, UINT16: 16-bit forms, HALF at Component 2, UINT16 at Location 30; MIXED: UINT, VEC3, COMPONENTS and SCALAR together;
 //   SWAPPED: the UINT form with corners 0 and 1 written in each other's place, a witness that must match the swapped
 //   model and not the ordered one.
 #extension GL_EXT_fragment_shader_barycentric : require
@@ -41,7 +41,7 @@ layout(location = 6) pervertexEXT in float s1[1];
 layout(location = 6) pervertexEXT in float s1[2];
 #endif
 #ifdef HALF
-layout(location = 7) pervertexEXT in f16vec2 h2[3];
+layout(location = 7, component = 2) pervertexEXT in f16vec2 h2[3];
 #endif
 #ifdef INT16
 layout(location = 8) pervertexEXT in i16vec3 s3[3];
