@@ -486,7 +486,9 @@ int main(int argc, char** argv) {
 			ordinary.frag = "ordinary.frag.spv";
 			VkPipeline ordinaryPipeline = VK_NULL_HANDLE;
 			VkResult ordinaryResult = createPipeline(ordinary, ordinaryPipeline);
-			bool pass = actual == expected && (ordinaryResult == VK_SUCCESS || scenarioName == "reject-quads");
+			// Ordinary point-mode TES pipelines already fail in MoltenVK (point size with a triangle input
+			// topology), independently of this path; only the PerVertex refusal is asserted for that mode.
+			bool pass = actual == expected && (ordinaryResult == VK_SUCCESS || scenarioName == "reject-point-mode");
 			std::printf("TES_TOPOLOGY %s %s: PerVertex pipeline=%d expected=%d, ordinary pipeline=%d\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), actual, expected, ordinaryResult);
 			return pass ? 0 : 2;
 		}
