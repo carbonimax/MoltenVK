@@ -502,9 +502,9 @@ static constexpr uint64_t kMVKPerVertexTessMaxRecordsPerPatch = 39;
 
 VkResult MVKCommandBuffer::recordPerVertexTessEvalDraw(uint32_t vertexCount, uint32_t instanceCount, bool indexed) {
 	if (indexed || instanceCount != 1 || getViewMask()) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "PerVertex TES test requires direct non-indexed draws of one instance without views."); }
-	// Admission fixes three control points; trailing vertices that do not form a patch generate nothing.
+	// Admission fixes three control points. Vertices that do not complete a patch are not tessellated, but
+	// Vulkan still runs the VS for each of them: without a complete patch, only the VS output is reserved.
 	uint64_t patches = vertexCount / 3;
-	if (!patches) { return VK_SUCCESS; }
 	// VS/TCS/TES run in compute, which ends and restarts the render encoder.
 	if (_doesContinueRenderPass) { _needsInheritedPerVertexAttachments = true; }
 	VkResult result = validateIndexedPerVertexAttachments();
@@ -518,7 +518,7 @@ VkResult MVKCommandBuffer::recordPerVertexTessEvalDraw(uint32_t vertexCount, uin
 	const auto& limits = getDeviceProperties().limits;
 	// Invocation records, VS output, TCS vertex and patch output, float32 levels (outer[4], inner[2]),
 	// then the generator plan: status, replay arguments and constants, per-patch counts and offsets.
-	uint64_t sizes[] = {16 + records * 32, uint64_t(vertexCount) * 4 * limits.maxVertexOutputComponents, patches * 3 * 4 * limits.maxTessellationControlPerVertexOutputComponents, patches * 4 * limits.maxTessellationControlPerPatchOutputComponents, patches * 6 * sizeof(float), 512 + patches * 2 * sizeof(uint32_t)};
+	uint64_t sizes[] = {patches ? 16 + records * 32 : 0, uint64_t(vertexCount) * 4 * limits.maxVertexOutputComponents, patches * 3 * 4 * limits.maxTessellationControlPerVertexOutputComponents, patches * 4 * limits.maxTessellationControlPerPatchOutputComponents, patches * 6 * sizeof(float), patches ? 512 + patches * 2 * sizeof(uint32_t) : 0};
 	for (size_t i = 0; i < std::size(sizes); ++i) {
 		if (sizes[i] > getMetalFeatures().maxMTLBufferSize) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "PerVertex TES scratch exceeds Metal buffer limits."); }
 		request.tessSizes[i] = NSUInteger(sizes[i]);
