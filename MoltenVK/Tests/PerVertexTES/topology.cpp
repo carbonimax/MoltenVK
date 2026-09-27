@@ -158,8 +158,10 @@ int main(int argc, char** argv) {
 		// Ordinary-only scenarios select the draw command: direct, indexed, indirect or indexed-indirect.
 		const std::string ordinaryPrefix = "ordinary-levels-";
 		const bool ordinaryOnly = scenarioName.rfind(ordinaryPrefix, 0) == 0;
-		const bool indexedScratchLimit = scenarioName == "ordinary-levels-indexed-scratch-limit";
-		const bool scratchLimit = scenarioName == "ordinary-levels-scratch-limit" || indexedScratchLimit;
+		// Scratch-limit draws, direct or indexed, recorded in the primary or in a secondary command buffer.
+		const bool secondaryScratchLimit = scenarioName == "ordinary-levels-secondary-scratch-limit" || scenarioName == "ordinary-levels-indexed-secondary-scratch-limit";
+		const bool indexedScratchLimit = scenarioName == "ordinary-levels-indexed-scratch-limit" || scenarioName == "ordinary-levels-indexed-secondary-scratch-limit";
+		const bool scratchLimit = scenarioName == "ordinary-levels-scratch-limit" || indexedScratchLimit || secondaryScratchLimit;
 		std::string drawMode = scratchLimit ? (indexedScratchLimit ? "indexed" : "direct") : ordinaryOnly ? scenarioName.substr(ordinaryPrefix.size()) : "direct";
 		if (scenarioName == "reject-indirect-tes") drawMode = "indirect";
 		if (scenarioName == "reject-indexed-indirect-tes") drawMode = "indexed-indirect";
@@ -522,8 +524,9 @@ int main(int argc, char** argv) {
 		VkFence fence = VK_NULL_HANDLE;
 		check(vkCreateFence(device, &fenceInfo, nullptr, &fence), "Create fence");
 
-		// Records: host zeros the vertex buffer; the GPU copies pixel positions and levels, then draws.
-		auto record = [&](VkPipeline pipeline, const std::vector<Patch>& patches, uint32_t firstVertex, uint32_t instances, const PipelineOptions& o) {
+		// Records: host zeros the vertex buffer; the GPU copies pixel positions and levels, then draws. With a secondary
+		// command buffer, the render pass contents are recorded there and executed by the primary.
+		auto record = [&](VkPipeline pipeline, const std::vector<Patch>& patches, uint32_t firstVertex, uint32_t instances, const PipelineOptions& o, VkCommandBuffer secondary = VK_NULL_HANDLE) {
 			memset(staging.data, 0, staging.size);
 			for (uint32_t p = 0; p < patches.size(); ++p) {
 				auto points = controlPoints(p, patches[p].mirrored, scenario.seam);
@@ -549,34 +552,51 @@ int main(int argc, char** argv) {
 			pass.renderArea = {{0, 0}, {kWidth, kHeight}};
 			pass.clearValueCount = 1;
 			pass.pClearValues = &clear;
-			vkCmdBeginRenderPass(command, &pass, VK_SUBPASS_CONTENTS_INLINE);
+			vkCmdBeginRenderPass(command, &pass, secondary ? VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : VK_SUBPASS_CONTENTS_INLINE);
+			VkCommandBuffer target = secondary ? secondary : command;
+			if (secondary) {
+				VkCommandBufferInheritanceInfo inheritance{VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO};
+				inheritance.renderPass = renderPass;
+				inheritance.framebuffer = framebuffer;
+				VkCommandBufferBeginInfo continueInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+				continueInfo.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
+				continueInfo.pInheritanceInfo = &inheritance;
+				check(vkBeginCommandBuffer(secondary, &continueInfo), "Begin secondary command buffer");
+			}
 			// An earlier write in the same render pass must survive the compute stages.
 			VkClearAttachment prior{VK_IMAGE_ASPECT_COLOR_BIT, 0, {}};
 			prior.clearValue.color.float32[0] = 1.0f;
 			prior.clearValue.color.float32[2] = 1.0f;
 			prior.clearValue.color.float32[3] = 1.0f;
 			VkClearRect priorRect{{{0, 0}, {2, 2}}, 0, 1};
-			vkCmdClearAttachments(command, 1, &prior, 1, &priorRect);
-			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+			vkCmdClearAttachments(target, 1, &prior, 1, &priorRect);
+			vkCmdBindPipeline(target, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 			VkDescriptorSet set = descriptorSet(o);
-			if (set) vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout(o), 0, 1, &set, 0, nullptr);
+			if (set) vkCmdBindDescriptorSets(target, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout(o), 0, 1, &set, 0, nullptr);
 			VkDeviceSize offset = 0;
-			vkCmdBindVertexBuffers(command, 0, 1, &vertices.buffer, &offset);
+			vkCmdBindVertexBuffers(target, 0, 1, &vertices.buffer, &offset);
 			const uint32_t drawCount = scenario.vertexCount ? scenario.vertexCount : uint32_t(3 * patches.size());
 			const uint32_t parts = splitDraw ? 2 : 1, counts[2] = {splitDraw ? 3 : drawCount, drawCount - 3}, starts[2] = {0, 3};
-			if (drawMode == "direct") for (uint32_t part = 0; part < parts; ++part) vkCmdDraw(command, counts[part], instances, firstVertex + starts[part], 0);
+			if (drawMode == "direct") for (uint32_t part = 0; part < parts; ++part) vkCmdDraw(target, counts[part], instances, firstVertex + starts[part], 0);
 			else {
-				if (drawMode != "indirect") vkCmdBindIndexBuffer(command, indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-				if (drawMode == "indexed") for (uint32_t part = 0; part < parts; ++part) vkCmdDrawIndexed(command, counts[part], instances, starts[part], int32_t(firstVertex), 0);
+				if (drawMode != "indirect") vkCmdBindIndexBuffer(target, indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+				if (drawMode == "indexed") for (uint32_t part = 0; part < parts; ++part) vkCmdDrawIndexed(target, counts[part], instances, starts[part], int32_t(firstVertex), 0);
 				else if (drawMode == "indirect") {
 					const VkDrawIndirectCommand arguments[2] = {{counts[0], instances, firstVertex, 0}, {counts[1], instances, firstVertex + 3, 0}};
 					memcpy(indirect.data, arguments, sizeof(arguments));
-					vkCmdDrawIndirect(command, indirect.buffer, 0, parts, sizeof(VkDrawIndirectCommand));
+					vkCmdDrawIndirect(target, indirect.buffer, 0, parts, sizeof(VkDrawIndirectCommand));
 				} else {
 					const VkDrawIndexedIndirectCommand arguments[2] = {{counts[0], instances, 0, int32_t(firstVertex), 0}, {counts[1], instances, 3, int32_t(firstVertex), 0}};
 					memcpy(indirect.data, arguments, sizeof(arguments));
-					vkCmdDrawIndexedIndirect(command, indirect.buffer, 0, parts, sizeof(VkDrawIndexedIndirectCommand));
+					vkCmdDrawIndexedIndirect(target, indirect.buffer, 0, parts, sizeof(VkDrawIndexedIndirectCommand));
 				}
+			}
+			if (secondary) {
+				// An application stops at a secondary that failed to record.
+				VkResult ended = vkEndCommandBuffer(secondary);
+				std::printf("secondary vkEndCommandBuffer=%d\n", ended);
+				if (ended != VK_SUCCESS) return ended;
+				vkCmdExecuteCommands(command, 1, &secondary);
 			}
 			vkCmdEndRenderPass(command);
 			VkImageMemoryBarrier toTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -628,7 +648,10 @@ int main(int argc, char** argv) {
 		const std::string tese = ccw ? "ccw.tese.spv" : "cw.tese.spv";
 		const std::string captureTese = ccw ? "capture-ccw.tese.spv" : "capture-cw.tese.spv";
 		if (scratchLimit) {
-			// One patch per instance. Exceed the advertised Metal-backed allocation limit without submitting a draw.
+			// One patch per instance. Exceed the advertised Metal-backed allocation limit: the draw must be refused before
+			// the application can submit it, or at vkQueueSubmit without side effects. When recording succeeds, submit as an
+			// application would and report what became of the draw. Every MoltenVK revision tested checks the same limit
+			// when encoding and omits the draw there, so these patches never reach the GPU.
 			VkPhysicalDeviceVulkan11Properties props11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES};
 			VkPhysicalDeviceProperties2 props2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
 			props2.pNext = &props11;
@@ -639,9 +662,40 @@ int main(int argc, char** argv) {
 			PipelineOptions o{"topology.tesc.spv", tese, "ordinary.frag.spv"};
 			VkPipeline pipeline = VK_NULL_HANDLE;
 			check(createPipeline(o, pipeline), "Create ordinary float32 pipeline");
-			VkResult actual = record(pipeline, {uniform(two)}, 0, uint32_t(instances), o);
-			bool pass = actual == VK_ERROR_OUT_OF_DEVICE_MEMORY;
-			std::printf("TES_TOPOLOGY %s %s: vkEndCommandBuffer=%d expected=%d, patches=%llu limit=%llu, nothing submitted\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), actual, VK_ERROR_OUT_OF_DEVICE_MEMORY, (unsigned long long)instances, (unsigned long long)props11.maxMemoryAllocationSize);
+			VkCommandBuffer secondary = VK_NULL_HANDLE;
+			if (secondaryScratchLimit) {
+				commandInfo.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+				check(vkAllocateCommandBuffers(device, &commandInfo, &secondary), "Allocate secondary command buffer");
+			}
+			VkResult actual = record(pipeline, {uniform(two)}, 0, uint32_t(instances), o, secondary);
+			if (actual != VK_SUCCESS) {
+				bool pass = actual == VK_ERROR_OUT_OF_DEVICE_MEMORY;
+				std::printf("TES_TOPOLOGY %s %s: vkEndCommandBuffer=%d expected=%d, patches=%llu limit=%llu, nothing submitted\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), actual, VK_ERROR_OUT_OF_DEVICE_MEMORY, (unsigned long long)instances, (unsigned long long)props11.maxMemoryAllocationSize);
+				return pass ? 0 : 2;
+			}
+			memset(readback.data, 0, readback.size);
+			check(vkResetFences(device, 1, &fence), "Reset fence");
+			VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+			submit.commandBufferCount = 1;
+			submit.pCommandBuffers = &command;
+			VkResult submitted = vkQueueSubmit(queue, 1, &submit, fence);
+			// Bounded wait: a refused submission leaves the fence unsignalled.
+			VkResult waited = vkWaitForFences(device, 1, &fence, VK_TRUE, 2000000000ull);
+			vkDeviceWaitIdle(device);
+			// The batch clears the image, writes the 2x2 prior block, then draws: count the pixels the draw wrote.
+			uint32_t rendered = 0;
+			bool prior = true;
+			for (uint32_t y = 0; y < kHeight; ++y) for (uint32_t x = 0; x < kWidth; ++x) {
+				const uint8_t* p = readback.data + 4 * (y * kWidth + x);
+				if (x < 2 && y < 2) prior &= p[0] == 255 && p[1] == 0 && p[2] == 255 && p[3] == 255;
+				else rendered += p[0] || p[1] || p[2] || p[3];
+			}
+			bool executed = waited == VK_SUCCESS;
+			bool pass = submitted != VK_SUCCESS && !executed;
+			const char* outcome = submitted == VK_SUCCESS ? (rendered ? "the draw ran" : "the draw was omitted and the submission accepted")
+			                    : executed ? "vkQueueSubmit failed after the batch executed and signalled its fence" : "vkQueueSubmit refused the batch without side effects";
+			std::printf("TES_TOPOLOGY %s %s: vkEndCommandBuffer=0 vkQueueSubmit=%d fence=%s prior_block=%s rendered_pixels=%u, %s, patches=%llu limit=%llu\n", pass ? "PASS" : "FAIL", scenarioName.c_str(),
+			            submitted, executed ? "signalled" : "unsignalled", prior ? "present" : "absent", rendered, outcome, (unsigned long long)instances, (unsigned long long)props11.maxMemoryAllocationSize);
 			return pass ? 0 : 2;
 		}
 		if (ordinaryOnly) {
