@@ -182,6 +182,12 @@ id<MTLComputePipelineState> MVKCommandEncodingPool::getPerVertexRestartMTLComput
 	return _mtlPerVertexRestartComputePipelineState;
 }
 
+id<MTLComputePipelineState> MVKCommandEncodingPool::getPerVertexIndirectMTLComputePipelineState() {
+	lock_guard<mutex> lock(_lock);
+	if (!_mtlPerVertexIndirectComputePipelineState) { _mtlPerVertexIndirectComputePipelineState = _commandPool->getDevice()->getCommandResourceFactory()->newPerVertexIndirectMTLComputePipelineState(_commandPool); }
+	return _mtlPerVertexIndirectComputePipelineState;
+}
+
 void MVKCommandEncodingPool::clear() {
 	lock_guard<mutex> lock(_lock);
 	destroyMetalResources();
@@ -281,5 +287,6 @@ void MVKCommandEncodingPool::destroyMetalResources() {
     _mtlAccumOcclusionQueryResultsComputePipelineState = nil;
 
 	[_mtlPerVertexRestartComputePipelineState release]; _mtlPerVertexRestartComputePipelineState = nil;
+	[_mtlPerVertexIndirectComputePipelineState release]; _mtlPerVertexIndirectComputePipelineState = nil;
     for (auto& state : _mtlConvertUint8IndicesComputePipelineState) { [state release]; state = nil; }
 }

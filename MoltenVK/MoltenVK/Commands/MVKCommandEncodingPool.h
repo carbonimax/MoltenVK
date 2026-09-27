@@ -144,6 +144,9 @@ public:
 
 	id<MTLComputePipelineState> getPerVertexRestartMTLComputePipelineState();
 
+	/** Returns the GPU admission and planning pipeline for portable PerVertexKHR indirect draws. */
+	id<MTLComputePipelineState> getPerVertexIndirectMTLComputePipelineState();
+
 	/** Deletes all the internal resources. */
 	void clear();
 
@@ -186,5 +189,6 @@ protected:
 	id<MTLComputePipelineState> _mtlCopyQueryPoolResultsComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlAccumOcclusionQueryResultsComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlPerVertexRestartComputePipelineState = nil;
+	id<MTLComputePipelineState> _mtlPerVertexIndirectComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlConvertUint8IndicesComputePipelineState[2] = {nil, nil};
 };
