@@ -753,6 +753,16 @@ void MVKPhysicalDevice::getFeatures(VkPhysicalDeviceFeatures2* features) {
 				legacyDitheringFeatures->legacyDithering = getMVKConfig().useMetalPrivateAPI;
 				break;
 			}
+			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT: {
+				auto* meshFeatures = (VkPhysicalDeviceMeshShaderFeaturesEXT*)next;
+				// The first mesh path draws mesh and fragment stages only, and is exposed to the test adapter only.
+				meshFeatures->taskShader = false;
+				meshFeatures->meshShader = _supportedExtensions.vk_EXT_mesh_shader.enabled;
+				meshFeatures->multiviewMeshShader = false;
+				meshFeatures->primitiveFragmentShadingRateMeshShader = false;
+				meshFeatures->meshShaderQueries = false;
+				break;
+			}
 			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTI_DRAW_FEATURES_EXT: {
 				auto* multiDrawFeatures = (VkPhysicalDeviceMultiDrawFeaturesEXT*)next;
 				multiDrawFeatures->multiDraw = true;
@@ -1310,6 +1320,39 @@ void MVKPhysicalDevice::getProperties(VkPhysicalDeviceProperties2* properties) {
 				auto* nestedCmdBuffProps = (VkPhysicalDeviceNestedCommandBufferPropertiesEXT*)next;
 				// Nesting is handled by recursion on the host, so no limit is imposed.
 				nestedCmdBuffProps->maxCommandBufferNestingLevel = std::numeric_limits<uint32_t>::max();
+				break;
+			}
+			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT: {
+				auto* meshProps = (VkPhysicalDeviceMeshShaderPropertiesEXT*)next;
+				// ponytail: provisional Vulkan minimum limits, not measured Metal mesh limits; measure them before exposing the extension.
+				// Task shaders are not supported, so their limits are zero.
+				meshProps->maxTaskWorkGroupTotalCount = 0;
+				mvkClear(meshProps->maxTaskWorkGroupCount, 3);
+				meshProps->maxTaskWorkGroupInvocations = 0;
+				mvkClear(meshProps->maxTaskWorkGroupSize, 3);
+				meshProps->maxTaskPayloadSize = 0;
+				meshProps->maxTaskSharedMemorySize = 0;
+				meshProps->maxTaskPayloadAndSharedMemorySize = 0;
+				meshProps->maxMeshWorkGroupTotalCount = 1u << 22;
+				for (uint32_t i = 0; i < 3; i++) { meshProps->maxMeshWorkGroupCount[i] = 65535; meshProps->maxMeshWorkGroupSize[i] = 128; }
+				meshProps->maxMeshWorkGroupInvocations = 128;
+				meshProps->maxMeshSharedMemorySize = 28 * KIBI;
+				meshProps->maxMeshPayloadAndSharedMemorySize = 28 * KIBI;
+				meshProps->maxMeshOutputMemorySize = 32 * KIBI;
+				meshProps->maxMeshPayloadAndOutputMemorySize = 47 * KIBI;
+				meshProps->maxMeshOutputComponents = 128;
+				meshProps->maxMeshOutputVertices = 256;
+				meshProps->maxMeshOutputPrimitives = 256;
+				meshProps->maxMeshOutputLayers = 8;
+				meshProps->maxMeshMultiviewViewCount = 1;
+				meshProps->meshOutputPerVertexGranularity = 1;
+				meshProps->meshOutputPerPrimitiveGranularity = 1;
+				meshProps->maxPreferredTaskWorkGroupInvocations = 0;
+				meshProps->maxPreferredMeshWorkGroupInvocations = 32;
+				meshProps->prefersLocalInvocationVertexOutput = true;
+				meshProps->prefersLocalInvocationPrimitiveOutput = true;
+				meshProps->prefersCompactVertexOutput = false;
+				meshProps->prefersCompactPrimitiveOutput = false;
 				break;
 			}
 			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTI_DRAW_PROPERTIES_EXT: {
@@ -3591,6 +3634,9 @@ void MVKPhysicalDevice::initExtensions() {
 		pWritableExtns->vk_KHR_fragment_shader_barycentric.enabled = false;
 		pWritableExtns->vk_NV_fragment_shader_barycentric.enabled = false;
 	}
+	// The first mesh path (mesh and fragment stages, direct draws, no mesh-stage resources) is exposed only
+	// to the test device adapter.
+	pWritableExtns->vk_EXT_mesh_shader.enabled = false;
 	if (!_metalFeatures.arrayOfTextures || !_metalFeatures.arrayOfSamplers) {
 		pWritableExtns->vk_EXT_descriptor_indexing.enabled = false;
 	}

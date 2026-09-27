@@ -713,6 +713,22 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
 										 const VkGraphicsPipelineCreateInfo* pCreateInfo) :
 	MVKPipeline(device, pipelineCache, (MVKPipelineLayout*)pCreateInfo->layout, getPipelineCreateFlags(pCreateInfo), parent)
 {
+	// Mesh pipelines ignore vertex input and input assembly, which may then hold anything. The shared code below
+	// reads them, so give it no vertex input and the triangle lists that admitted mesh shaders emit.
+	VkGraphicsPipelineCreateInfo meshCreateInfo;
+	VkPipelineVertexInputStateCreateInfo meshVertexInput = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+	VkPipelineInputAssemblyStateCreateInfo meshInputAssembly = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+	for (uint32_t i = 0; i < pCreateInfo->stageCount; i++) {
+		_isMeshPipeline |= mvkIsAnyFlagEnabled(pCreateInfo->pStages[i].stage, VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT);
+	}
+	if (_isMeshPipeline) {
+		meshCreateInfo = *pCreateInfo;
+		meshInputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+		meshCreateInfo.pVertexInputState = &meshVertexInput;
+		meshCreateInfo.pInputAssemblyState = &meshInputAssembly;
+		pCreateInfo = &meshCreateInfo;
+	}
+
 	// Extract dynamic state first, as it can affect many configurations.
 	initDynamicState(pCreateInfo);
 
@@ -761,6 +777,9 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
 	const VkPipelineShaderStageCreateInfo* pTessCtlSS = nullptr;
 	const VkPipelineShaderStageCreateInfo* pTessEvalSS = nullptr;
 	const VkPipelineShaderStageCreateInfo* pFragmentSS = nullptr;
+	const VkPipelineShaderStageCreateInfo* pTaskSS = nullptr;
+	const VkPipelineShaderStageCreateInfo* pMeshSS = nullptr;
+	VkPipelineCreationFeedback* pMeshFB = nullptr;
 	VkPipelineCreationFeedback* pVertexFB = nullptr;
 	VkPipelineCreationFeedback* pTessCtlFB = nullptr;
 	VkPipelineCreationFeedback* pTessEvalFB = nullptr;
@@ -792,6 +811,15 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
 					pFragmentFB = &pFeedbackInfo->pPipelineStageCreationFeedbacks[i];
 				}
 				break;
+			case VK_SHADER_STAGE_TASK_BIT_EXT:
+				pTaskSS = pSS;
+				break;
+			case VK_SHADER_STAGE_MESH_BIT_EXT:
+				pMeshSS = pSS;
+				if (pFeedbackInfo && pFeedbackInfo->pPipelineStageCreationFeedbacks) {
+					pMeshFB = &pFeedbackInfo->pPipelineStageCreationFeedbacks[i];
+				}
+				break;
 			default:
 				break;
 		}
@@ -801,6 +829,7 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
 	_tessCtlModule = getOrCreateShaderModule(device, pTessCtlSS, _ownsTessCtlModule);
 	_tessEvalModule = getOrCreateShaderModule(device, pTessEvalSS, _ownsTessEvalModule);
 	_fragmentModule = getOrCreateShaderModule(device, pFragmentSS, _ownsFragmentModule);
+	_meshModule = getOrCreateShaderModule(device, pMeshSS, _ownsMeshModule);
 
 	warnIfUnsupportedRobustnessEnabled(this, pVertexSS);
 	warnIfUnsupportedRobustnessEnabled(this, pTessCtlSS);
@@ -883,11 +912,18 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
 	}
 
 	// Render pipeline state. Do this as early as possible, to fail fast if pipeline requires a fail on cache-miss.
-	if (!initPerVertexInputPipeline(pCreateInfo, pVertexSS, pFragmentSS)) {
-		_hasValidMTLPipelineStates = false;
-		return;
+	if (_isMeshPipeline) {
+		if (!initMeshPipelineState(pCreateInfo, pTaskSS, pMeshSS, pMeshFB, pFragmentSS, pFragmentFB)) {
+			_hasValidMTLPipelineStates = false;
+			return;
+		}
+	} else {
+		if (!initPerVertexInputPipeline(pCreateInfo, pVertexSS, pFragmentSS)) {
+			_hasValidMTLPipelineStates = false;
+			return;
+		}
+		initMTLRenderPipelineState(pCreateInfo, reflectData, pPipelineFB, pVertexSS, pVertexFB, pTessCtlSS, pTessCtlFB, pTessEvalSS, pTessEvalFB, pFragmentSS, pFragmentFB);
 	}
-	initMTLRenderPipelineState(pCreateInfo, reflectData, pPipelineFB, pVertexSS, pVertexFB, pTessCtlSS, pTessCtlFB, pTessEvalSS, pTessEvalFB, pFragmentSS, pFragmentFB);
 	if ( !_hasValidMTLPipelineStates ) { return; }
 
 	// Blending - must ignore allowed bad pColorBlendState pointer if rasterization disabled or no color attachments
@@ -1195,13 +1231,147 @@ void MVKGraphicsPipeline::initMTLRenderPipelineState(const VkGraphicsPipelineCre
 }
 
 // Whether the stage's entry point statically uses any descriptor-set resource or push constants.
-static bool mvkUsesResources(const std::vector<uint32_t>& spirv, spv::ExecutionModel model) {
+static bool mvkUsesResources(const std::vector<uint32_t>& spirv, spv::ExecutionModel model, const char* entryName = "main") {
 	SPIRV_CROSS_NAMESPACE::Compiler reflect(spirv);
-	reflect.set_entry_point("main", model);
+	reflect.set_entry_point(entryName, model);
 	auto resources = reflect.get_shader_resources(reflect.get_active_interface_variables());
 	return !resources.uniform_buffers.empty() || !resources.storage_buffers.empty() || !resources.storage_images.empty() ||
 		!resources.sampled_images.empty() || !resources.separate_images.empty() || !resources.separate_samplers.empty() ||
 		!resources.subpass_inputs.empty() || !resources.acceleration_structures.empty() || !resources.push_constant_buffers.empty();
+}
+
+// Checks the mesh shader forms the first mesh path supports: triangle output and no per-primitive outputs.
+// Returns the workgroup size, read through LocalSize or LocalSizeId, or an empty reason.
+static std::string mvkMeshShaderIncompatibility(const std::vector<uint32_t>& spirv, const char* entryName, MTLSize& workgroupSize) {
+	SPIRV_CROSS_NAMESPACE::Compiler reflect(spirv);
+	reflect.set_entry_point(entryName, spv::ExecutionModelMeshEXT);
+	if (!reflect.get_execution_mode_bitset().get(spv::ExecutionModeOutputTrianglesEXT)) { return "emits points or lines."; }
+	// The mesh stage binds no implicit buffer and tracks no device-address residency yet.
+	for (auto capability : reflect.get_declared_capabilities()) {
+		if (capability == spv::CapabilityPhysicalStorageBufferAddresses) { return "uses physical storage buffer addresses."; }
+	}
+	reflect.update_active_builtins();
+	if (reflect.has_active_builtin(spv::BuiltInDrawIndex, spv::StorageClassInput)) { return "reads gl_DrawID."; }
+	for (auto varID : reflect.get_active_interface_variables()) {
+		if (reflect.get_storage_class(varID) != spv::StorageClassOutput) { continue; }
+		bool perPrimitive = reflect.has_decoration(varID, spv::DecorationPerPrimitiveEXT);
+		const auto& type = reflect.get_type(reflect.get_type_from_variable(varID).parent_type);
+		const auto& element = type.array.empty() ? type : reflect.get_type(type.parent_type);
+		for (uint32_t i = 0; i < element.member_types.size(); i++) { perPrimitive |= reflect.has_member_decoration(element.self, i, spv::DecorationPerPrimitiveEXT); }
+		if (perPrimitive) { return "writes per-primitive outputs."; }
+	}
+	workgroupSize = MTLSizeMake(reflect.get_execution_mode_argument(spv::ExecutionModeLocalSize, 0),
+								reflect.get_execution_mode_argument(spv::ExecutionModeLocalSize, 1),
+								reflect.get_execution_mode_argument(spv::ExecutionModeLocalSize, 2));
+	return {};
+}
+
+// Returns the Locations of the fragment PerVertexKHR inputs that the mesh corner copies support: arrays of one to three
+// 16- or 32-bit scalars or vectors below Location 32, outside blocks. Returns zero if any other form is read.
+static uint32_t mvkMeshPerVertexCornerLocations(const std::vector<uint32_t>& spirv, const char* entryName) {
+	SPIRV_CROSS_NAMESPACE::CompilerReflection reflect(spirv);
+	reflect.set_entry_point(entryName, spv::ExecutionModelFragment);
+	uint32_t locations = 0;
+	for (auto varID : reflect.get_active_interface_variables()) {
+		if (reflect.get_storage_class(varID) != spv::StorageClassInput) { continue; }
+		const auto& type = reflect.get_type(reflect.get_type_from_variable(varID).parent_type);
+		if (!reflect.has_decoration(varID, spv::DecorationPerVertexKHR)) {
+			if (mvk::hasPerVertexInputMember(reflect, type)) { return 0; }
+			continue;
+		}
+		if (type.array.size() != 1 || !type.array_size_literal[0] || type.array[0] < 1 || type.array[0] > 3) { return 0; }
+		const auto& element = reflect.get_type(type.parent_type);
+		bool scalarOrVector = element.array.empty() && element.columns == 1 &&
+			(element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Float || element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Half ||
+			 element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Int || element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::UInt ||
+			 element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Short || element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::UShort);
+		uint32_t location = reflect.get_decoration(varID, spv::DecorationLocation);
+		if (!scalarOrVector || reflect.has_decoration(varID, spv::DecorationBuiltIn) || !reflect.has_decoration(varID, spv::DecorationLocation) || location >= 32) { return 0; }
+		locations |= 1u << location;
+	}
+	return locations;
+}
+
+// First mesh path: a mesh and a fragment shader drawn with vkCmdDrawMeshTasksEXT, without task shader, mesh-stage
+// resources or specialization, per-primitive outputs, pipeline cache, dynamic state or views. Fragment PerVertexKHR inputs
+// read the corners that the mesh copies per primitive, in index order, for the forms mvkMeshPerVertexCornerLocations accepts.
+// Anything else is refused at creation. The extension is exposed only to the test device adapter.
+bool MVKGraphicsPipeline::initMeshPipelineState(const VkGraphicsPipelineCreateInfo* pCreateInfo,
+												const VkPipelineShaderStageCreateInfo* pTaskSS,
+												const VkPipelineShaderStageCreateInfo* pMeshSS,
+												VkPipelineCreationFeedback* pMeshFB,
+												const VkPipelineShaderStageCreateInfo* pFragmentSS,
+												VkPipelineCreationFeedback* pFragmentFB) {
+	auto unsupported = [&](const std::string& reason) {
+		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCreateGraphicsPipelines(): This mesh pipeline %s", reason.c_str()));
+		return false;
+	};
+	if (!getEnabledMeshShaderFeatures().meshShader || ![getMTLDevice() supportsFamily:MTLGPUFamilyMetal3]) { return unsupported("needs the meshShader feature and a Metal 3 GPU."); }
+	if (pTaskSS) { return unsupported("uses a task shader."); }
+	if (!pMeshSS || !_meshModule || _meshModule->getSPIRV().empty() || !pFragmentSS || !_fragmentModule || pCreateInfo->stageCount != 2) { return unsupported("needs exactly a SPIR-V mesh and a fragment shader."); }
+	if (getPipelineCache() || !_dynamicStateFlags.empty() || getRenderingCreateInfo(pCreateInfo)->viewMask || !_isRasterizing || isDepthClipNegativeOneToOne(pCreateInfo)) {
+		return unsupported("uses a pipeline cache, dynamic state, views, rasterizer discard or a [-1, 1] depth range.");
+	}
+	if (mvkUsesResources(_meshModule->getSPIRV(), spv::ExecutionModelMeshEXT, pMeshSS->pName)) { return unsupported("uses mesh-stage descriptors or push constants."); }
+	// The draw dispatches the workgroup size of the unspecialized module.
+	if (pMeshSS->pSpecializationInfo) { return unsupported("specializes its mesh shader."); }
+	std::string reason = mvkMeshShaderIncompatibility(_meshModule->getSPIRV(), pMeshSS->pName, _meshThreadgroupSize);
+	if (!reason.empty()) { return unsupported("mesh shader " + reason); }
+	bool usesPerVertex = false;
+	std::string errorLog;
+	if (!mvk::getFragmentShaderUsesPerVertexInput(_fragmentModule->getSPIRV(), pFragmentSS->pName, usesPerVertex, errorLog)) {
+		setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to reflect PerVertexKHR inputs: %s", errorLog.c_str()));
+		return false;
+	}
+	uint32_t perVertexLocations = usesPerVertex ? mvkMeshPerVertexCornerLocations(_fragmentModule->getSPIRV(), pFragmentSS->pName) : 0;
+	if (usesPerVertex && !perVertexLocations) {
+		return unsupported("reads PerVertexKHR fragment inputs other than arrays of 16- or 32-bit scalars or vectors below Location 32.");
+	}
+
+	SPIRVToMSLConversionConfiguration shaderConfig;
+	initShaderConversionConfig(shaderConfig, pCreateInfo, _tessReflectData);
+	// The mesh copies these per-vertex outputs per primitive, and the fragment reads its PerVertexKHR inputs from them.
+	shaderConfig.options.mslOptions.mesh_per_vertex_corner_locations = perVertexLocations;
+	shaderConfig.options.entryPointStage = spv::ExecutionModelMeshEXT;
+	shaderConfig.options.entryPointName = pMeshSS->pName;
+	MVKMTLFunction mesh = getMTLFunction(shaderConfig, pMeshSS, pMeshFB, _meshModule, "Mesh");
+	if (!mesh.getMTLFunction()) { return false; }
+	const auto& meshResults = mesh.shaderConversionResults;
+	if (meshResults.needsSwizzleBuffer || meshResults.needsBufferSizeBuffer || meshResults.needsDynamicOffsetBuffer || meshResults.needsViewRangeBuffer ||
+		meshResults.needsDrawId || meshResults.needsDispatchBaseBuffer || meshResults.needsOutputBuffer || meshResults.needsPatchOutputBuffer ||
+		meshResults.usesPhysicalStorageBufferAddressesCapability) {
+		return unsupported("mesh shader needs an implicit buffer or device-address residency, which the mesh stage does not provide.");
+	}
+	SPIRVShaderOutputs meshOutputs;
+	if (!getShaderOutputs(_meshModule->getSPIRV(), spv::ExecutionModelMeshEXT, pMeshSS->pName, meshOutputs, errorLog)) {
+		setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to get mesh outputs: %s", errorLog.c_str()));
+		return false;
+	}
+
+	// The fragment side is built as for a vertex pipeline, then carried over to the mesh descriptor.
+	MTLRenderPipelineDescriptor* fragmentDesc = [MTLRenderPipelineDescriptor new];	// temp retain
+	bool compiled = addFragmentShaderToPipeline(fragmentDesc, pCreateInfo, shaderConfig, meshOutputs, pFragmentSS, pFragmentFB);
+	if (compiled) { addFragmentOutputToPipeline(fragmentDesc, pCreateInfo); }
+	MTLMeshRenderPipelineDescriptor* meshDesc = [MTLMeshRenderPipelineDescriptor new];	// temp retain
+	meshDesc.meshFunction = mesh.getMTLFunction();
+	meshDesc.fragmentFunction = fragmentDesc.fragmentFunction;
+	for (NSUInteger i = 0; i < kMVKMaxColorAttachmentCount; i++) { meshDesc.colorAttachments[i] = fragmentDesc.colorAttachments[i]; }
+	meshDesc.depthAttachmentPixelFormat = fragmentDesc.depthAttachmentPixelFormat;
+	meshDesc.stencilAttachmentPixelFormat = fragmentDesc.stencilAttachmentPixelFormat;
+	meshDesc.rasterSampleCount = fragmentDesc.rasterSampleCount;
+	meshDesc.alphaToCoverageEnabled = fragmentDesc.alphaToCoverageEnabled;
+	meshDesc.alphaToOneEnabled = fragmentDesc.alphaToOneEnabled;
+	meshDesc.rasterizationEnabled = fragmentDesc.rasterizationEnabled;
+	setMetalObjectLabel(meshDesc, ((MVKPipelineLayout*)pCreateInfo->layout)->getDebugName());
+	[fragmentDesc release];
+	if (compiled) {
+		// ponytail: synchronous compile; route through MVKRenderPipelineCompiler for timeouts once mesh leaves the test gate.
+		NSError* error = nil;
+		_mtlPipelineState = [getMTLDevice() newRenderPipelineStateWithMeshDescriptor:meshDesc options:MTLPipelineOptionNone reflection:nil error:&error];	// retained
+		if (!_mtlPipelineState) { setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Could not create the mesh pipeline: %s", error.localizedDescription.UTF8String)); }
+	}
+	[meshDesc release];
+	return compiled && _mtlPipelineState;
 }
 
 bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCreateInfo* pCreateInfo, const VkPipelineShaderStageCreateInfo* pVertexSS, const VkPipelineShaderStageCreateInfo* pFragmentSS) {
@@ -2760,6 +2930,7 @@ MVKGraphicsPipeline::~MVKGraphicsPipeline() {
 		if (_ownsTessCtlModule) delete _tessCtlModule;
 		if (_ownsTessEvalModule) delete _tessEvalModule;
 		if (_ownsFragmentModule) delete _fragmentModule;
+		if (_ownsMeshModule) delete _meshModule;
 	}
 }
 
@@ -2968,7 +3139,7 @@ MVKShaderLibraryCache* MVKPipelineCache::getShaderLibraryCache(MVKShaderModuleKe
 static uint32_t kDataHeaderSize = (sizeof(uint32_t) * 4) + VK_UUID_SIZE;
 // Version the private payload independently of the Vulkan header/driver UUID. Old readers
 // stop at this unknown entry type; new readers reject unversioned caches before reading options.
-static constexpr uint32_t kMVKPipelineCacheSchema = 0x4D564B02; // Includes TES compute and float32 factors.
+static constexpr uint32_t kMVKPipelineCacheSchema = 0x4D564B03; // Includes TES compute, float32 factors and mesh PerVertexKHR corners.
 #endif
 
 // Entry type markers to be inserted into data stream
@@ -3231,6 +3402,7 @@ namespace SPIRV_CROSS_NAMESPACE {
 				opt.device_index,
 				opt.enable_frag_output_mask,
 				opt.additional_fixed_sample_mask,
+				opt.mesh_per_vertex_corner_locations,
 				opt.enable_point_size_builtin,
 				opt.enable_point_size_default,
 				opt.default_point_size,
@@ -3574,11 +3746,11 @@ void mvkValidateCeralArchiveDefinitions() {
 	missingBytes += mvkValidateCerealArchiveSize<SPIRV_CROSS_NAMESPACE::MSLConstexprSampler>();
 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVWorkgroupSizeDimension>(3);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVEntryPoint>(20);						// Contains string
-	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionOptions>(29);			// Contains string
+	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionOptions>(25);			// Contains string
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLShaderInterfaceVariable>(3);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLResourceBinding>(2);
 	missingBytes += mvkValidateCerealArchiveSize<mvk::DescriptorBinding>();
-	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(158);	// Contains collection
+	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionConfiguration>(154);	// Contains collection
 	missingBytes += mvkValidateCerealArchiveSize<mvk::SPIRVToMSLConversionResultInfo>(75);		// Contains collection
 	missingBytes += mvkValidateCerealArchiveSize<mvk::MSLSpecializationMacroInfo>(22);			// Contains string
 	missingBytes += mvkValidateCerealArchiveSize<MVKShaderModuleKey>();
