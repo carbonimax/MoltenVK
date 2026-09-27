@@ -45,6 +45,9 @@ struct MVKPerVertexScratch {
 		indirectCapacity = request.indirectCapacity;
 		return true;
 	}
+
+	// Admission failures ORed by the GPU into the plan buffer; read only after the work completed.
+	uint32_t getIndirectStatus() const { return buffers[7] ? *(volatile const uint32_t*)buffers[7].contents : 0; }
 };
 
 using MVKPerVertexScratchReservations = std::vector<std::shared_ptr<MVKPerVertexScratch>>;

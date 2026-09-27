@@ -579,6 +579,9 @@ VkResult MVKQueueCommandBufferSubmission::commitActiveMTLCommandBuffer(bool sign
 // and the app immediately destroys objects. Rare, but it has been encountered.
 void MVKQueueCommandBufferSubmission::finish() {
 
+	// Before any fence signals: an indirect command refused on the GPU loses the device.
+	reportPerVertexIndirectFailures();
+
 	// Performed here instead of as part of execute() for rare case where app destroys queue
 	// immediately after a waitIdle() is cleared by fence below, taking the capture scope with it.
 	_queue->_submissionCaptureScope->endScope();
@@ -679,6 +682,21 @@ VkResult MVKQueueFullCommandBufferSubmission<N>::reservePerVertexScratch(std::un
 		if (result != VK_SUCCESS) { return result; }
 	}
 	return VK_SUCCESS;
+}
+
+// Every Metal command buffer of this submission has completed, so GPU admission statuses are final.
+// Checked here rather than in a per-command completion handler, whose order Metal does not document.
+template <size_t N>
+void MVKQueueFullCommandBufferSubmission<N>::reportPerVertexIndirectFailures() {
+	for (auto& cbInfo : _cmdBuffers) {
+		for (auto& scratch : cbInfo.perVertexScratch) {
+			uint32_t status = scratch->getIndirectStatus();
+			if (!status) { continue; }
+			reportError(VK_ERROR_DEVICE_LOST, "Portable PerVertexKHR indirect command was not executed: %s.", (status & 1) ? "a draw exceeds the reserved capture capacity" : "a draw reads indices beyond the bound index buffer");
+			getDevice()->markLost();
+			return;
+		}
+	}
 }
 
 template <size_t N>
