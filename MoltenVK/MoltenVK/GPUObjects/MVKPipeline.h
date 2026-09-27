@@ -255,6 +255,9 @@ public:
 	bool usesPerVertexInputBuffer() const { return _usesPerVertexInputBuffer; }
 	// Admission is test-only until GPU topology covers arbitrary TCS factors.
 	bool usesPerVertexTessEval() const { return _usesPerVertexInputBuffer && _isTessellationPipeline; }
+
+	/** Whether the ordinary tessellation path keeps float32 TCS levels and classifies them into Metal half factors. */
+	bool usesFloat32TessLevels() const { return _usesFloat32TessLevels && !usesPerVertexTessEval(); }
 	id<MTLComputePipelineState> getPerVertexTessEvalPipelineState() const { return _mtlPerVertexTessEvalState; }
 	/** Counter-clockwise TES winding (upper-left domain origin) reverses the generator's clockwise corner order. */
 	bool perVertexTessReversesCorners() const { return _tessReflectData.windingOrder == spv::ExecutionModeVertexOrderCcw; }
@@ -455,6 +458,7 @@ protected:
 	bool _isRasterizing = false;
 	bool _isRasterizingColor = false;
 	bool _isTessellationPipeline = false;
+	bool _usesFloat32TessLevels = false;
 	bool _inputAttachmentIsDSAttachment = false;
 	bool _hasRemappedAttachmentLocations = false;
 };

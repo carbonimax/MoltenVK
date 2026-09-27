@@ -149,6 +149,9 @@ public:
 	/** Returns the GPU topology generator for portable PerVertexKHR tessellation. */
 	id<MTLComputePipelineState> getPerVertexTessTopologyMTLComputePipelineState();
 
+	/** Returns a compute pipeline state that classifies float32 TCS levels into Metal half tessellation factors. */
+	id<MTLComputePipelineState> getTessLevelsToHalfFactorsMTLComputePipelineState();
+
 	/** Deletes all the internal resources. */
 	void clear();
 
@@ -193,5 +196,6 @@ protected:
 	id<MTLComputePipelineState> _mtlPerVertexRestartComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlPerVertexIndirectComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlPerVertexTessTopologyComputePipelineState = nil;
+	id<MTLComputePipelineState> _mtlTessLevelsToHalfFactorsComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlConvertUint8IndicesComputePipelineState[2] = {nil, nil};
 };

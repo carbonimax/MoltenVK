@@ -386,11 +386,12 @@ kernel void cmdDrawIndirectTessConvertBuffers(const device char* srcBuff [[buffe
                                               constant uint32_t& drawCount [[buffer(6)]],
                                               constant uint32_t& vtxThreadExecWidth [[buffer(7)]],
                                               constant uint32_t& tcWorkgroupSize [[buffer(8)]],
+                                              constant uint32_t& paramsStride [[buffer(9)]],
                                               uint idx [[thread_position_in_grid]]) {
 	if (idx >= drawCount) { return; }
 	const device auto& src = *reinterpret_cast<const device MTLDrawPrimitivesIndirectArguments*>(srcBuff + idx * srcStride);
 	device char* dest;
-	device auto* params = reinterpret_cast<device uint32_t*>(paramsBuff + idx * 256);
+	device auto* params = reinterpret_cast<device uint32_t*>(paramsBuff + idx * paramsStride);
 	dest = destBuff + idx * (sizeof(MTLStageInRegionIndirectArguments) + sizeof(MTLDispatchThreadgroupsIndirectArguments) * 2 + sizeof(MTLDrawPatchIndirectArguments));
 	device auto& destSI = *(device MTLStageInRegionIndirectArguments*)dest;
 	dest += sizeof(MTLStageInRegionIndirectArguments);
@@ -425,11 +426,12 @@ kernel void cmdDrawIndexedIndirectTessConvertBuffers(const device char* srcBuff 
                                                      constant uint32_t& drawCount [[buffer(6)]],
                                                      constant uint32_t& vtxThreadExecWidth [[buffer(7)]],
                                                      constant uint32_t& tcWorkgroupSize [[buffer(8)]],
+                                                     constant uint32_t& paramsStride [[buffer(9)]],
                                                      uint idx [[thread_position_in_grid]]) {
 	if (idx >= drawCount) { return; }
 	const device auto& src = *reinterpret_cast<const device MTLDrawIndexedPrimitivesIndirectArguments*>(srcBuff + idx * srcStride);
 	device char* dest;
-	device auto* params = reinterpret_cast<device uint32_t*>(paramsBuff + idx * 256);
+	device auto* params = reinterpret_cast<device uint32_t*>(paramsBuff + idx * paramsStride);
 	dest = destBuff + idx * (sizeof(MTLStageInRegionIndirectArguments) + sizeof(MTLDispatchThreadgroupsIndirectArguments) * 2 + sizeof(MTLDrawPatchIndirectArguments));
 	device auto& destSI = *(device MTLStageInRegionIndirectArguments*)dest;
 	dest += sizeof(MTLStageInRegionIndirectArguments);
@@ -801,5 +803,19 @@ kernel void perVertexTessTopology(const device uint* levels [[buffer(0)]], devic
             if (p[3]) { corners[record] = corner; }
         }
     }
+}
+// Ordinary tessellation of triangles with equal spacing keeps the TCS levels in float32 (outer[4], inner[2] per
+// patch) and classifies them as Vulkan does into the half factors Metal's tessellator reads: a patch whose first
+// three outer levels include one <= 0 or NaN is discarded (all factors 0); otherwise each level is clamped to
+// [1, maxLevel] and rounded up, which half represents exactly. A NaN inner level stays NaN, as half conversion
+// gave it before. params: the TCS indirect parameters, patch count in word 1.
+kernel void tessLevelsToHalfFactors(const device uint* levels [[buffer(0)]], device MTLTriangleTessellationFactorsHalf* factors [[buffer(1)]], constant float& maxLevel [[buffer(2)]], constant uint* params [[buffer(3)]], uint i [[thread_position_in_grid]]) {
+    if (i >= params[1]) { return; }
+    const device uint* f = levels + 6 * ulong(i);
+    bool discarded = false;
+    for (uint k = 0; k < 3; ++k) { discarded |= (f[k] & 0x80000000u) || !(f[k] & 0x7fffffffu) || (f[k] & 0x7fffffffu) > 0x7f800000u; }
+    for (uint k = 0; k < 3; ++k) { factors[i].edgeTessellationFactor[k] = discarded ? half(0) : half(perVertexTessLevel(f[k], maxLevel)); }
+    bool innerNaN = (f[4] & 0x7fffffffu) > 0x7f800000u;
+    factors[i].insideTessellationFactor = discarded ? half(0) : innerNaN ? as_type<half>(ushort(0x7e00)) : half(perVertexTessLevel(f[4], maxLevel));
 }
 )";

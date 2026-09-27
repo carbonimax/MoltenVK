@@ -22,6 +22,7 @@
 #include <spirv.hpp>
 #include <spirv_common.hpp>
 #include <spirv_parser.hpp>
+#include <spirv_msl.hpp>
 #include <spirv_reflect.hpp>
 #include <string>
 #include <unordered_map>
@@ -52,6 +53,9 @@ namespace mvk {
 
 		/** The number of control points output by the tessellation control shader. */
 		uint32_t numControlPoints = 0;
+
+		/** Whether both shaders can exchange float32 tessellation levels (SPIRV-Cross tessellation_factors_float32). */
+		bool float32TessLevels = false;
 	};
 
 #pragma mark -
@@ -240,6 +244,16 @@ namespace mvk {
 				errorLog = "Neither tessellation shader specifies the number of output control points.";
 				return false;
 			}
+
+			// Same execution modes as the MSL conversion, which sets the patch kind and control points on both stages.
+			SPIRV_CROSS_NAMESPACE::CompilerMSL tescMSL(tesc), teseMSL(tese);
+			if (!tescEntryName.empty()) { tescMSL.set_entry_point(tescEntryName, spv::ExecutionModelTessellationControl); }
+			if (!teseEntryName.empty()) { teseMSL.set_entry_point(teseEntryName, spv::ExecutionModelTessellationEvaluation); }
+			for (auto* compiler : {&tescMSL, &teseMSL}) {
+				compiler->set_execution_mode(reflectData.patchKind);
+				compiler->set_execution_mode(spv::ExecutionModeOutputVertices, reflectData.numControlPoints);
+			}
+			reflectData.float32TessLevels = tescMSL.get_tessellation_factors_float32_incompatibility().empty() && teseMSL.get_tessellation_factors_float32_incompatibility().empty();
 
 			return true;
 
