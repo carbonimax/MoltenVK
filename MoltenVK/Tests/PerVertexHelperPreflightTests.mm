@@ -290,6 +290,13 @@ static void checkIndirect() {
 		for (unsigned i = 0; i < 256; ++i) { assert(!bytes[i]); }
 	}
 	assert(saved[0]->buffers[7] != saved[1]->buffers[7] && device.creations[3] == 1 && !device.creations[1] && !device.creations[2]);
+	// Restart-capable indirect scratch also retains the restart assembly helper.
+	auto restart = indirectRequest();
+	restart.restart = true;
+	cb._perVertexScratchRequests = {restart};
+	MVKPerVertexScratchReservations restarted;
+	assert(cb.reservePerVertexScratch(restarted, prefilled) == VK_SUCCESS && restarted.size() == 1);
+	assert(restarted[0]->indirectPipeline && restarted[0]->indexPipeline && restarted[0]->buffers[6] && device.creations[2] == 1 && !device.creations[1]);
 	[metal release];
 }
 #endif
