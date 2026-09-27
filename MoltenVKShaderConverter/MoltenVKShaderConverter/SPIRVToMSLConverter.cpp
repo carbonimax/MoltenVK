@@ -362,7 +362,9 @@ MVK_PUBLIC_SYMBOL bool SPIRVToMSLConverter::convert(SPIRVToMSLConversionConfigur
 			}
 		}
 		conversionResult.msl = pMSLCompiler->compile();
-		if (shaderConfig.exportCapturedVertexLayout && pMSLCompiler->get_execution_model() == ExecutionModelVertex && pMSLCompiler->needs_output_buffer()) {
+		if (shaderConfig.exportCapturedVertexLayout && pMSLCompiler->needs_output_buffer() &&
+			(pMSLCompiler->get_execution_model() == ExecutionModelVertex ||
+			 (pMSLCompiler->get_execution_model() == ExecutionModelTessellationEvaluation && shaderConfig.options.mslOptions.tese_as_compute))) {
 			conversionResult.resultInfo.capturedVertexLayout = pMSLCompiler->get_msl_captured_vertex_layout();
 		}
 

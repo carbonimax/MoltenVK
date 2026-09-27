@@ -457,6 +457,13 @@ VkResult MVKCommandBuffer::validateIndexedPerVertexAttachments() {
 
 VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t instanceCount, bool indexed) {
 	if (!_recordedPerVertexPipeline || !vertexCount || !instanceCount) { return VK_SUCCESS; }
+	bool tessEval = _recordedPerVertexPipeline->usesPerVertexTessEval();
+	if (tessEval && (indexed || vertexCount != 6 || instanceCount != 1 || getViewMask())) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "PerVertex TES test requires one direct non-indexed draw of two patches, one instance, no views."); }
+	if (tessEval) {
+		if (_doesContinueRenderPass) { _needsInheritedPerVertexAttachments = true; }
+		VkResult result = validateIndexedPerVertexAttachments();
+		if (result != VK_SUCCESS) { return result; }
+	}
 	// Dynamic restart can change at execution. Reserve both helper paths before submission.
 	bool dynamicRestart = indexed && _recordedPerVertexPipeline->getDynamicStateFlags().has(MVKRenderStateFlag::PrimitiveRestartEnable);
 	bool restart = mvkPerVertexRequiresRestartAssembly(indexed, dynamicRestart || _recordedPerVertexPipeline->getStaticStateData().enable.has(MVKRenderStateEnableFlag::PrimitiveRestart));
@@ -470,7 +477,7 @@ VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t in
 		VkResult result = validateIndexedPerVertexAttachments();
 		if (result != VK_SUCCESS) { return result; }
 	}
-	auto topology = _recordedPerVertexPipeline->getVkPrimitiveTopology();
+	auto topology = tessEval ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST : _recordedPerVertexPipeline->getVkPrimitiveTopology();
 	uint64_t indexScratchBytes = restart ? mvkPerVertexRestartIndexScratchSize(vertexCount) : indexed && _recordedIndexType == VK_INDEX_TYPE_UINT8 ? uint64_t(vertexCount) * sizeof(uint16_t) : 0;
 	if (indexScratchBytes > getMetalFeatures().maxMTLBufferSize) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR index scratch buffer exceeds Metal limits."); }
 	uint32_t viewMask = getViewMask();
@@ -486,6 +493,14 @@ VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t in
 		uint64_t primitiveCount = uint64_t(mvkPerVertexPrimitiveCount(vertexCount, topology)) * expandedInstances;
 		uint64_t occurrences = primitiveCount * mvkPerVertexReplayVertexCount(topology);
 		requests[pass] = {NSUInteger(uint64_t(vertexCount) * expandedInstances * _recordedPerVertexPipeline->getPerVertexCapturedLayout().stride), NSUInteger(occurrences * 2 * sizeof(uint32_t)), NSUInteger(primitiveCount * 3 * sizeof(uint32_t)), _recordedPerVertexPipeline->usesPortableBarycentrics() ? NSUInteger(occurrences * sizeof(uint32_t)) : 0, NSUInteger(indexScratchBytes), restart, dynamicRestart && _recordedIndexType == VK_INDEX_TYPE_UINT8};
+		if (tessEval) {
+			const auto& limits = getDeviceProperties().limits;
+			uint64_t sizes[] = {16 + uint64_t(vertexCount) * 32, uint64_t(vertexCount) * 4 * limits.maxVertexOutputComponents, uint64_t(vertexCount) * 4 * limits.maxTessellationControlPerVertexOutputComponents, uint64_t(vertexCount / 3) * 4 * limits.maxTessellationControlPerPatchOutputComponents, uint64_t(vertexCount / 3) * sizeof(MTLQuadTessellationFactorsHalf)};
+			for (size_t i = 0; i < std::size(sizes); ++i) {
+				if (sizes[i] > getMetalFeatures().maxMTLBufferSize) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "PerVertex TES scratch exceeds Metal buffer limits."); }
+				requests[pass].tessSizes[i] = NSUInteger(sizes[i]);
+			}
+		}
 	}
 	size_t firstRequest = _perVertexScratchRequests.size();
 	try {
@@ -612,6 +627,9 @@ void MVKCommandBuffer::recordTimestampCommand() {
 
 #pragma mark -
 #pragma mark Tessellation constituent command management
+
+// Compute binds preserve the graphics pipeline used to validate recorded draws.
+bool MVKCommandBuffer::recordedGraphicsPipelineUsesPerVertexTessEval() const { return _recordedPerVertexPipeline && _recordedPerVertexPipeline->usesPerVertexTessEval(); }
 
 void MVKCommandBuffer::recordBindPipeline(MVKCmdBindPipeline* mvkBindPipeline) {
 	_lastTessellationPipeline = mvkBindPipeline->isTessellationPipeline() ? mvkBindPipeline : nullptr;

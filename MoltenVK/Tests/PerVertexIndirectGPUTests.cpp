@@ -101,6 +101,8 @@ int main(int argc, char** argv) {
 	try {
 		if (argc != 7) throw std::runtime_error("Usage: pervertex-indirect-gpu shader-dir draw|indexed|draw-count|indexed-count u8|u16|u32 decisive|zero|two|repeat|overflow|overflow-second|huge|index-oob|restart|restart-two|restart-overflow|restart-dynamic-on|restart-dynamic-off|stress update|copy|compute output-prefix");
 		const std::string shaders = argv[1], form = argv[2], indexName = argv[3], scenarioName = argv[4], producer = argv[5], prefix = argv[6];
+		const bool withTES = getenv("PERVERTEX_TEST_INCLUDE_TES") != nullptr;
+		const bool tesFirst = getenv("PERVERTEX_TEST_TES_FIRST") != nullptr;
 		const bool indexed = form == "indexed" || form == "indexed-count";
 		const bool counted = form == "draw-count" || form == "indexed-count";
 		if (!indexed && form != "draw" && !counted) throw std::runtime_error("Unknown form");
@@ -197,13 +199,14 @@ int main(int argc, char** argv) {
 		supported.pNext = &barycentric;
 		vkGetPhysicalDeviceFeatures2(d.physical, &supported);
 		const auto& core = supported.features;
-		if (!barycentric.fragmentShaderBarycentric || !drawParameters.shaderDrawParameters || !core.drawIndirectFirstInstance || !core.multiDrawIndirect || !core.vertexPipelineStoresAndAtomics || (indexSize == 1 && !uint8Features.indexTypeUint8) || (dynamicRestart && !dynamicState2.extendedDynamicState2))
+		if (!barycentric.fragmentShaderBarycentric || !drawParameters.shaderDrawParameters || !core.drawIndirectFirstInstance || !core.multiDrawIndirect || !core.vertexPipelineStoresAndAtomics || (withTES && !core.tessellationShader) || (indexSize == 1 && !uint8Features.indexTypeUint8) || (dynamicRestart && !dynamicState2.extendedDynamicState2))
 			throw std::runtime_error("Required features are unavailable");
 		VkPhysicalDeviceFeatures2 enabled{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 		enabled.pNext = &barycentric;
 		enabled.features.drawIndirectFirstInstance = VK_TRUE;
 		enabled.features.multiDrawIndirect = VK_TRUE;
 		enabled.features.vertexPipelineStoresAndAtomics = VK_TRUE;
+		enabled.features.tessellationShader = withTES ? VK_TRUE : VK_FALSE;
 		float priority = 1;
 		VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
 		queueInfo.queueFamilyIndex = d.family;
@@ -404,6 +407,36 @@ int main(int argc, char** argv) {
 		const char* swap = getenv("PERVERTEX_TEST_SWAP_FRAGMENT");
 		if (swap && !strcmp(swap, "1")) fragment = module("pervertex-swap.frag.spv");
 		VkPipeline indirectPipeline = graphicsPipeline(indirectVertex);
+		VkPipeline tessPipeline = VK_NULL_HANDLE;
+		if (withTES) {
+			VkShaderModule tessVertex = module("tes-triangle.vert.spv"), tessControl = module("tes-triangle.tesc.spv"), tessEvaluation = module("tes-ordered.tese.spv"), tessFragment = module("tes-ordered.frag.spv");
+			VkPipelineShaderStageCreateInfo stages[4]{};
+			VkShaderStageFlagBits kinds[4] = {VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, VK_SHADER_STAGE_FRAGMENT_BIT};
+			VkShaderModule modules[4] = {tessVertex, tessControl, tessEvaluation, tessFragment};
+			for (uint32_t i = 0; i < 4; ++i) { stages[i].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; stages[i].stage = kinds[i]; stages[i].module = modules[i]; stages[i].pName = "main"; }
+			VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+			VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+			assembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+			VkPipelineTessellationStateCreateInfo tessellation{VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO};
+			tessellation.patchControlPoints = 3;
+			VkViewport viewport{0, 0, float(kSide), float(kSide), 0, 1};
+			VkRect2D scissor{{0, 0}, {kSide, kSide}};
+			VkPipelineViewportStateCreateInfo viewportState{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+			viewportState.viewportCount = 1; viewportState.pViewports = &viewport; viewportState.scissorCount = 1; viewportState.pScissors = &scissor;
+			VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+			raster.polygonMode = VK_POLYGON_MODE_FILL; raster.cullMode = VK_CULL_MODE_NONE; raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; raster.lineWidth = 1;
+			VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+			multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+			VkPipelineColorBlendAttachmentState blendAttachment{};
+			blendAttachment.colorWriteMask = 0xF;
+			VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+			blend.attachmentCount = 1; blend.pAttachments = &blendAttachment;
+			VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+			info.stageCount = 4; info.pStages = stages; info.pVertexInputState = &vertexInput; info.pInputAssemblyState = &assembly; info.pTessellationState = &tessellation;
+			info.pViewportState = &viewportState; info.pRasterizationState = &raster; info.pMultisampleState = &multisample; info.pColorBlendState = &blend;
+			info.layout = graphicsLayout; info.renderPass = renderPass;
+			check(vkCreateGraphicsPipelines(d.device, VK_NULL_HANDLE, 1, &info, nullptr, &tessPipeline), "Create merged TES pipeline");
+		}
 		VkComputePipelineCreateInfo computeInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
 		computeInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, producerShader, "main", nullptr};
 		computeInfo.layout = computeLayout;
@@ -495,6 +528,7 @@ int main(int argc, char** argv) {
 			prior.clearValue.color.float32[3] = 1.0f;
 			VkClearRect priorRect{{{0, 0}, {2, 2}}, 0, 1};
 			vkCmdClearAttachments(cb, 1, &prior, 1, &priorRect);
+			if (withTES && tesFirst) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, tessPipeline); vkCmdDraw(cb, 6, 1, 0, 0); }
 			vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, referenceRun ? referencePipeline : indirectPipeline);
 			vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsLayout, 0, 1, &sets[0], 0, nullptr);
 			if (indexed) vkCmdBindIndexBuffer(cb, work.buffer, kIndexOffset, indexType);
@@ -514,6 +548,7 @@ int main(int argc, char** argv) {
 			} else {
 				vkCmdDrawIndexedIndirectCountKHR(cb, work.buffer, kArgsOffset, work.buffer, kCountOffset, 2, kStride);
 			}
+			if (withTES && !tesFirst) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, tessPipeline); vkCmdDraw(cb, 6, 1, 0, 0); }
 			vkCmdEndRenderPass(cb);
 			VkImageMemoryBarrier toTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
 			toTransfer.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;

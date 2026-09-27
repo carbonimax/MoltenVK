@@ -131,6 +131,7 @@ VkResult MVKCmdDraw::setContent(MVKCommandBuffer* cmdBuff,
         return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCmdDraw(): The current device does not support drawing with a non-zero base instance.");
     }
 
+	if (cmdBuff->recordedGraphicsPipelineUsesPerVertexTessEval() && vertexCount && instanceCount && (firstVertex || firstInstance || drawIndex)) { return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "PerVertex TES test requires zero firstVertex, firstInstance and DrawID."); }
 	return cmdBuff->recordPerVertexDraw(_vertexCount, _instanceCount);
 }
 
@@ -352,6 +353,78 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	metalState._exists.fragment().descriptorSetData.reset();
 }
 
+// This path is admitted only for the exact, compile-time test fixture (see MVKPipeline.mm).
+// Its TCS writes factor 1. CPU domain records here are test scaffolding, not a tessellator.
+static void encodePerVertexTessEval(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline) {
+	if (const char* error = cmdEncoder->getIndexedPerVertexAttachmentError()) {
+		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "PerVertex TES %s", error));
+		return;
+	}
+	auto* scratch = cmdEncoder->nextPerVertexScratch();
+	if (!scratch) { return; }
+	const uint32_t vertexCount = 6;
+	auto* invocation = (uint32_t*)scratch->buffers[7].contents;
+	memset(invocation, 0, 16 + 32 * vertexCount);
+	invocation[0] = vertexCount;
+	for (uint32_t i = 0; i < vertexCount; ++i) {
+		auto* record = invocation + 4 + 8 * i;
+		record[i % 3] = 0x3f800000; // float 1.0; other domain coordinates are zero.
+		record[3] = i / 3;
+		record[4] = i;
+	}
+	mvkPopulatePerVertexReplay(vertexCount, 1, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, cmdEncoder->getVkGraphics().getProvokingVertexMode(), (uint32_t*)scratch->buffers[2].contents, (uint32_t*)scratch->buffers[3].contents, (uint32_t*)scratch->buffers[4].contents);
+	cmdEncoder->_isIndexedDraw = false;
+	cmdEncoder->finalizeDrawState(kMVKGraphicsStageVertex);
+	id<MTLComputeCommandEncoder> compute = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
+	auto& computeState = cmdEncoder->getState().mtlCompute();
+	computeState.bindBuffer(compute, scratch->buffers[8], 0, pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::Output]);
+	[compute setStageInRegion:MTLRegionMake2D(0, 0, vertexCount, 1)];
+	[compute dispatchThreads:MTLSizeMake(vertexCount, 1, 1) threadsPerThreadgroup:MTLSizeMake(pipeline->getTessVertexStageState().threadExecutionWidth, 1, 1)];
+	[compute memoryBarrierWithScope:MTLBarrierScopeBuffers];
+	cmdEncoder->finalizeDrawState(kMVKGraphicsStageTessControl);
+	const auto& tcs = pipeline->getImplicitBuffers(kMVKShaderStageTessCtl).ids;
+	computeState.bindBuffer(compute, scratch->buffers[8], 0, cmdEncoder->getDevice()->getMetalBufferIndexForVertexAttributeBinding(kMVKTessCtlInputBufferBinding));
+	computeState.bindBuffer(compute, scratch->buffers[9], 0, tcs[MVKImplicitBuffer::Output]);
+	computeState.bindBuffer(compute, scratch->buffers[10], 0, tcs[MVKImplicitBuffer::PatchOutput]);
+	computeState.bindBuffer(compute, scratch->buffers[11], 0, tcs[MVKImplicitBuffer::TessLevel]);
+	uint32_t tessParams[] = {3, 2};
+	computeState.bindBytes(compute, tessParams, sizeof(tessParams), tcs[MVKImplicitBuffer::IndirectParams]);
+	NSUInteger groupSize = mvkLeastCommonMultiple(3u, uint32_t(pipeline->getTessControlStageState().threadExecutionWidth));
+	[compute dispatchThreads:MTLSizeMake(vertexCount, 1, 1) threadsPerThreadgroup:MTLSizeMake(groupSize, 1, 1)];
+	[compute memoryBarrierWithScope:MTLBarrierScopeBuffers];
+	cmdEncoder->getState().prepareTessEvalDispatch(compute, *cmdEncoder);
+	const auto& tes = pipeline->getImplicitBuffers(kMVKShaderStageTessEval).ids;
+	computeState.bindBuffer(compute, scratch->buffers[9], 0, cmdEncoder->getDevice()->getMetalBufferIndexForVertexAttributeBinding(kMVKTessEvalInputBufferBinding));
+	computeState.bindBuffer(compute, scratch->buffers[10], 0, cmdEncoder->getDevice()->getMetalBufferIndexForVertexAttributeBinding(kMVKTessEvalPatchInputBufferBinding));
+	computeState.bindBuffer(compute, scratch->buffers[11], 0, cmdEncoder->getDevice()->getMetalBufferIndexForVertexAttributeBinding(kMVKTessEvalLevelBufferBinding));
+	computeState.bindBuffer(compute, scratch->buffers[7], 0, tes[MVKImplicitBuffer::IndirectParams]);
+	computeState.bindBuffer(compute, scratch->buffers[0], 0, tes[MVKImplicitBuffer::Output]);
+	[compute dispatchThreads:MTLSizeMake(vertexCount, 1, 1) threadsPerThreadgroup:MTLSizeMake(pipeline->getPerVertexTessEvalPipelineState().threadExecutionWidth, 1, 1)];
+	// Ending compute establishes visibility for the tracked scratch buffers in render.
+	cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass);
+	cmdEncoder->finalizeDrawState(kMVKGraphicsStageRasterization);
+	id<MTLRenderCommandEncoder> render = cmdEncoder->_mtlRenderEncoder;
+	auto& graphics = cmdEncoder->getMtlGraphics();
+	const auto& replay = pipeline->getPerVertexReplayBinding();
+	const auto& fragment = pipeline->getPerVertexInputBinding();
+	uint32_t draw[] = {0, 0, 0, vertexCount};
+	graphics.bindVertexBuffer(render, scratch->buffers[0], 0, replay.vertex_buffer_index);
+	graphics.bindVertexBuffer(render, scratch->buffers[2], 0, replay.occurrence_buffer_index);
+	graphics.bindVertexBytes(render, draw, sizeof(draw), replay.draw_parameters_buffer_index);
+	if (pipeline->usesPortableBarycentrics()) { graphics.bindVertexBuffer(render, scratch->buffers[4], 0, pipeline->getPerVertexReplayBarycentricBinding().corner_buffer_index); }
+	if (fragment.vertex_buffer_index != ~0u) {
+		graphics.bindFragmentBuffer(render, scratch->buffers[0], 0, fragment.vertex_buffer_index);
+		graphics.bindFragmentBuffer(render, scratch->buffers[3], 0, fragment.primitive_index_buffer_index);
+	}
+	if (cmdEncoder->getPhysicalDevice()->shouldEmulateReversedDepthViewport()) {
+		uint32_t mask = cmdEncoder->getVkGraphics()._implicitBufferData[kMVKShaderStageVertex].emulatedReversedDepthViewportMask;
+		graphics.bindVertexBytes(render, &mask, sizeof(mask), pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::EmulatedReversedDepthViewport]);
+	}
+	[render drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:vertexCount];
+	graphics._exists.vertex().descriptorSetData.reset();
+	graphics._exists.fragment().descriptorSetData.reset();
+}
+
 void MVKCmdDraw::encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline) {
 	::encodePerVertexInput(cmdEncoder, pipeline, _vertexCount, _instanceCount, _firstVertex, _firstInstance, _drawIndex);
 }
@@ -367,6 +440,11 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
 	cmdEncoder->restartMetalRenderPassIfNeeded();
 
 	auto* pipeline = cmdEncoder->getGraphicsPipeline();
+	if (pipeline->usesPerVertexTessEval()) {
+		if (_vertexCount != 6 || _instanceCount != 1 || _firstVertex || _firstInstance || _drawIndex) { cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "PerVertex TES draw is outside the test fixture.")); return; }
+		encodePerVertexTessEval(cmdEncoder, pipeline);
+		return;
+	}
 	if (pipeline->usesPerVertexInputBuffer()) { encodePerVertexInput(cmdEncoder, pipeline); return; }
 	auto& mtlFeats = cmdEncoder->getMetalFeatures();
 	auto& dvcLimits = cmdEncoder->getDeviceProperties().limits;
@@ -885,7 +963,7 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	uint32_t viewCount = subpass->isMultiview() ? subpass->getViewCountInMetalPass(cmdEncoder->getMultiviewPassIndex()) : 1;
 	auto* scratch = cmdEncoder->nextPerVertexScratch();
 	if (!scratch) { return; }
-	id<MTLBuffer> plan = scratch->buffers[7];
+	id<MTLBuffer> plan = scratch->buffers[12];
 	id<MTLComputePipelineState> helper = scratch->indirectPipeline;
 	if (!plan || !helper || !scratch->indirectCapacity || !viewCount) { reject(VK_ERROR_INITIALIZATION_FAILED, "draw has no planning scratch."); return; }
 	if (const char* error = cmdEncoder->getIndexedPerVertexAttachmentError()) { reject(VK_ERROR_FEATURE_NOT_PRESENT, error); return; }
