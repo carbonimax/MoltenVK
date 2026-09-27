@@ -93,9 +93,9 @@ check_log() { # log expected-exit actual-exit required...
 	grep -E '^  (ordinary vs|barycentric|CPU model|tessellation coordinates|seam|fragment gl_PrimitiveID|VS storage|case|info)|^pipeline rejection|^Pixel|PASS|FAIL' "$log" | grep -v 'Validation Enabled' | sed 's/^/    /' | head -12 || true
 	if [[ $verdict != PASS ]]; then echo "STOP: inspect $log before any further GPU work"; exit 1; fi
 }
-env_run() { env -u DYLD_LIBRARY_PATH -u DYLD_INSERT_LIBRARIES MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION="${SHADER_VALIDATION:-1}" MVK_CONFIG_LOG_LEVEL=2 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS="${PREFILL:-0}" "$@"; }
+env_run() { env -u DYLD_LIBRARY_PATH -u DYLD_INSERT_LIBRARIES MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION="${SHADER_VALIDATION:-1}" MVK_CONFIG_LOG_LEVEL=2 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS="${PREFILL:-0}" MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS="${SYNC:-1}" "$@"; }
 topology() { # library scenario winding expected-exit required...
-	local name=$1-$2-$3 rc=0
+	local name=$1-$2-$3${PREFILL:+-prefill$PREFILL}${SYNC:+-sync$SYNC} rc=0
 	(cd "$output/runs" && env_run gtimeout -k 2 60 "$output/$1/topology" "$output/shaders" "$2" "$3" "$name") > "$output/runs/$name.log" 2>&1 || rc=$?
 	check_log "$output/runs/$name.log" "$4" "$rc" "${@:5}"
 }
@@ -130,8 +130,12 @@ for library in dev shipping; do
 done
 # An ordinary float32 draw beyond the advertised Metal buffer limit must fail during prefill,
 # before a GPU submission or an undersized scratch allocation.
-PREFILL=1 topology shipping ordinary-levels-scratch-limit ccw 0 "TES_TOPOLOGY PASS" "nothing submitted"
-PREFILL=1 topology shipping ordinary-levels-indexed-scratch-limit ccw 0 "TES_TOPOLOGY PASS" "nothing submitted"
+# Without prefill, recording must still refuse it, directly or in a secondary: encoding happens after vkQueueSubmit,
+# which may already have returned. Both synchronous and asynchronous queue submissions.
+for scenario in ordinary-levels-scratch-limit ordinary-levels-indexed-scratch-limit ordinary-levels-secondary-scratch-limit ordinary-levels-indexed-secondary-scratch-limit; do
+	PREFILL=1 topology shipping "$scenario" ccw 0 "TES_TOPOLOGY PASS" "nothing submitted"
+	for sync in 1 0; do SYNC=$sync topology shipping "$scenario" ccw 0 "TES_TOPOLOGY PASS" "nothing submitted"; done
+done
 # 3. Pilot guarantees kept: fixture pixels, compute-bind recording guards, refusals.
 pilot dev ordered ordered.frag
 pilot dev swapped ordered-swapped.frag
