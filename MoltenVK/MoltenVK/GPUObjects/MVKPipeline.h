@@ -250,6 +250,12 @@ public:
 	/** Returns whether this pipeline has tessellation shaders. */
 	bool isTessellationPipeline() { return _isTessellationPipeline; }
 
+	/** Whether this pipeline draws with a mesh shader, through vkCmdDrawMeshTasksEXT. */
+	bool isMeshPipeline() const { return _isMeshPipeline; }
+
+	/** Threads per mesh threadgroup: the workgroup size of the mesh shader. */
+	MTLSize getMeshThreadgroupSize() const { return _meshThreadgroupSize; }
+
 	/** Portable PerVertexKHR uses render capture for direct draws and compute capture for indexed draws, followed by replay.
 	 * Vertex stage resources describe capture; replay uses getPerVertexReplayBinding() and the optional implicit reversed-depth mask. */
 	bool usesPerVertexInputBuffer() const { return _usesPerVertexInputBuffer; }
@@ -368,6 +374,7 @@ protected:
 	bool addPerVertexIndexedCapturePipelines(MTLVertexDescriptor* vertexDesc, const mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkPipelineShaderStageCreateInfo* pVertexSS, uint32_t viewCount);
 	bool addPerVertexReplayShaderToPipeline(MTLRenderPipelineDescriptor* plDesc, const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkPipelineShaderStageCreateInfo* pVertexSS, const VkPipelineShaderStageCreateInfo* pFragmentSS, SPIRVShaderOutputs& vertexOutputs);
     void initMTLRenderPipelineState(const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVTessReflectionData& reflectData, VkPipelineCreationFeedback* pPipelineFB, const VkPipelineShaderStageCreateInfo* pVertexSS, VkPipelineCreationFeedback* pVertexFB, const VkPipelineShaderStageCreateInfo* pTessCtlSS, VkPipelineCreationFeedback* pTessCtlFB, const VkPipelineShaderStageCreateInfo* pTessEvalSS, VkPipelineCreationFeedback* pTessEvalFB, const VkPipelineShaderStageCreateInfo* pFragmentSS, VkPipelineCreationFeedback* pFragmentFB);
+	bool initMeshPipelineState(const VkGraphicsPipelineCreateInfo* pCreateInfo, const VkPipelineShaderStageCreateInfo* pTaskSS, const VkPipelineShaderStageCreateInfo* pMeshSS, VkPipelineCreationFeedback* pMeshFB, const VkPipelineShaderStageCreateInfo* pFragmentSS, VkPipelineCreationFeedback* pFragmentFB);
     void initShaderConversionConfig(mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVTessReflectionData& reflectData);
 	void initReservedVertexAttributeBufferCount(const VkGraphicsPipelineCreateInfo* pCreateInfo);
     void addVertexInputToShaderConversionConfig(mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkGraphicsPipelineCreateInfo* pCreateInfo);
@@ -446,7 +453,11 @@ protected:
 	MVKShaderModule* _tessCtlModule = nullptr;
 	MVKShaderModule* _tessEvalModule = nullptr;
 	MVKShaderModule* _fragmentModule = nullptr;
+	MVKShaderModule* _meshModule = nullptr;
 	bool _ownsVertexModule = false;
+	bool _ownsMeshModule = false;
+	bool _isMeshPipeline = false;
+	MTLSize _meshThreadgroupSize = {};
 	bool _ownsTessCtlModule = false;
 	bool _ownsTessEvalModule = false;
 	bool _ownsFragmentModule = false;

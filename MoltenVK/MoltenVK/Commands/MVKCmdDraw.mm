@@ -1988,3 +1988,27 @@ void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder, const MVKI
         }
     }
 }
+
+
+#pragma mark -
+#pragma mark MVKCmdDrawMeshTasks
+
+VkResult MVKCmdDrawMeshTasks::setContent(MVKCommandBuffer* cmdBuff, uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) {
+	_groupCountX = groupCountX;
+	_groupCountY = groupCountY;
+	_groupCountZ = groupCountZ;
+	return VK_SUCCESS;
+}
+
+// A mesh pipeline without task shader: one mesh threadgroup per workgroup, of the mesh shader's workgroup size.
+void MVKCmdDrawMeshTasks::encode(MVKCommandEncoder* cmdEncoder) {
+	if (!_groupCountX || !_groupCountY || !_groupCountZ) { return; }
+	cmdEncoder->restartMetalRenderPassIfNeeded();
+	auto* pipeline = cmdEncoder->getGraphicsPipeline();
+	if (!pipeline->isMeshPipeline()) { return; }
+	cmdEncoder->finalizeDrawState(kMVKGraphicsStageRasterization);
+	if (!pipeline->hasValidMTLPipelineStates()) { return; }
+	[cmdEncoder->_mtlRenderEncoder drawMeshThreadgroups: MTLSizeMake(_groupCountX, _groupCountY, _groupCountZ)
+	                        threadsPerObjectThreadgroup: MTLSizeMake(1, 1, 1)
+	                          threadsPerMeshThreadgroup: pipeline->getMeshThreadgroupSize()];
+}

@@ -713,6 +713,22 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
 										 const VkGraphicsPipelineCreateInfo* pCreateInfo) :
 	MVKPipeline(device, pipelineCache, (MVKPipelineLayout*)pCreateInfo->layout, getPipelineCreateFlags(pCreateInfo), parent)
 {
+	// Mesh pipelines ignore vertex input and input assembly, which may then hold anything. The shared code below
+	// reads them, so give it no vertex input and the triangle lists that admitted mesh shaders emit.
+	VkGraphicsPipelineCreateInfo meshCreateInfo;
+	VkPipelineVertexInputStateCreateInfo meshVertexInput = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+	VkPipelineInputAssemblyStateCreateInfo meshInputAssembly = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+	for (uint32_t i = 0; i < pCreateInfo->stageCount; i++) {
+		_isMeshPipeline |= mvkIsAnyFlagEnabled(pCreateInfo->pStages[i].stage, VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT);
+	}
+	if (_isMeshPipeline) {
+		meshCreateInfo = *pCreateInfo;
+		meshInputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+		meshCreateInfo.pVertexInputState = &meshVertexInput;
+		meshCreateInfo.pInputAssemblyState = &meshInputAssembly;
+		pCreateInfo = &meshCreateInfo;
+	}
+
 	// Extract dynamic state first, as it can affect many configurations.
 	initDynamicState(pCreateInfo);
 
@@ -761,6 +777,9 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
 	const VkPipelineShaderStageCreateInfo* pTessCtlSS = nullptr;
 	const VkPipelineShaderStageCreateInfo* pTessEvalSS = nullptr;
 	const VkPipelineShaderStageCreateInfo* pFragmentSS = nullptr;
+	const VkPipelineShaderStageCreateInfo* pTaskSS = nullptr;
+	const VkPipelineShaderStageCreateInfo* pMeshSS = nullptr;
+	VkPipelineCreationFeedback* pMeshFB = nullptr;
 	VkPipelineCreationFeedback* pVertexFB = nullptr;
 	VkPipelineCreationFeedback* pTessCtlFB = nullptr;
 	VkPipelineCreationFeedback* pTessEvalFB = nullptr;
@@ -792,6 +811,15 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
 					pFragmentFB = &pFeedbackInfo->pPipelineStageCreationFeedbacks[i];
 				}
 				break;
+			case VK_SHADER_STAGE_TASK_BIT_EXT:
+				pTaskSS = pSS;
+				break;
+			case VK_SHADER_STAGE_MESH_BIT_EXT:
+				pMeshSS = pSS;
+				if (pFeedbackInfo && pFeedbackInfo->pPipelineStageCreationFeedbacks) {
+					pMeshFB = &pFeedbackInfo->pPipelineStageCreationFeedbacks[i];
+				}
+				break;
 			default:
 				break;
 		}
@@ -801,6 +829,7 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
 	_tessCtlModule = getOrCreateShaderModule(device, pTessCtlSS, _ownsTessCtlModule);
 	_tessEvalModule = getOrCreateShaderModule(device, pTessEvalSS, _ownsTessEvalModule);
 	_fragmentModule = getOrCreateShaderModule(device, pFragmentSS, _ownsFragmentModule);
+	_meshModule = getOrCreateShaderModule(device, pMeshSS, _ownsMeshModule);
 
 	warnIfUnsupportedRobustnessEnabled(this, pVertexSS);
 	warnIfUnsupportedRobustnessEnabled(this, pTessCtlSS);
@@ -869,11 +898,18 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
 	}
 
 	// Render pipeline state. Do this as early as possible, to fail fast if pipeline requires a fail on cache-miss.
-	if (!initPerVertexInputPipeline(pCreateInfo, pVertexSS, pFragmentSS)) {
-		_hasValidMTLPipelineStates = false;
-		return;
+	if (_isMeshPipeline) {
+		if (!initMeshPipelineState(pCreateInfo, pTaskSS, pMeshSS, pMeshFB, pFragmentSS, pFragmentFB)) {
+			_hasValidMTLPipelineStates = false;
+			return;
+		}
+	} else {
+		if (!initPerVertexInputPipeline(pCreateInfo, pVertexSS, pFragmentSS)) {
+			_hasValidMTLPipelineStates = false;
+			return;
+		}
+		initMTLRenderPipelineState(pCreateInfo, reflectData, pPipelineFB, pVertexSS, pVertexFB, pTessCtlSS, pTessCtlFB, pTessEvalSS, pTessEvalFB, pFragmentSS, pFragmentFB);
 	}
-	initMTLRenderPipelineState(pCreateInfo, reflectData, pPipelineFB, pVertexSS, pVertexFB, pTessCtlSS, pTessCtlFB, pTessEvalSS, pTessEvalFB, pFragmentSS, pFragmentFB);
 	if ( !_hasValidMTLPipelineStates ) { return; }
 
 	// Blending - must ignore allowed bad pColorBlendState pointer if rasterization disabled or no color attachments
@@ -1188,6 +1224,94 @@ static bool mvkUsesResources(const std::vector<uint32_t>& spirv, spv::ExecutionM
 	return !resources.uniform_buffers.empty() || !resources.storage_buffers.empty() || !resources.storage_images.empty() ||
 		!resources.sampled_images.empty() || !resources.separate_images.empty() || !resources.separate_samplers.empty() ||
 		!resources.subpass_inputs.empty() || !resources.acceleration_structures.empty() || !resources.push_constant_buffers.empty();
+}
+
+// Checks the mesh shader forms the first mesh path supports: triangle output and no per-primitive outputs.
+// Returns the workgroup size, read through LocalSize or LocalSizeId, or an empty reason.
+static std::string mvkMeshShaderIncompatibility(const std::vector<uint32_t>& spirv, const char* entryName, MTLSize& workgroupSize) {
+	SPIRV_CROSS_NAMESPACE::Compiler reflect(spirv);
+	reflect.set_entry_point(entryName, spv::ExecutionModelMeshEXT);
+	if (!reflect.get_execution_mode_bitset().get(spv::ExecutionModeOutputTrianglesEXT)) { return "emits points or lines."; }
+	for (auto varID : reflect.get_active_interface_variables()) {
+		if (reflect.get_storage_class(varID) != spv::StorageClassOutput) { continue; }
+		bool perPrimitive = reflect.has_decoration(varID, spv::DecorationPerPrimitiveEXT);
+		const auto& type = reflect.get_type(reflect.get_type_from_variable(varID).parent_type);
+		const auto& element = type.array.empty() ? type : reflect.get_type(type.parent_type);
+		for (uint32_t i = 0; i < element.member_types.size(); i++) { perPrimitive |= reflect.has_member_decoration(element.self, i, spv::DecorationPerPrimitiveEXT); }
+		if (perPrimitive) { return "writes per-primitive outputs."; }
+	}
+	workgroupSize = MTLSizeMake(reflect.get_execution_mode_argument(spv::ExecutionModeLocalSize, 0),
+								reflect.get_execution_mode_argument(spv::ExecutionModeLocalSize, 1),
+								reflect.get_execution_mode_argument(spv::ExecutionModeLocalSize, 2));
+	return {};
+}
+
+// First mesh path: a mesh and a fragment shader drawn with vkCmdDrawMeshTasksEXT, without task shader, mesh-stage
+// resources, per-primitive outputs, PerVertexKHR fragment inputs, pipeline cache, dynamic state or views.
+// Anything else is refused at creation. The extension is exposed only to the test device adapter.
+bool MVKGraphicsPipeline::initMeshPipelineState(const VkGraphicsPipelineCreateInfo* pCreateInfo,
+												const VkPipelineShaderStageCreateInfo* pTaskSS,
+												const VkPipelineShaderStageCreateInfo* pMeshSS,
+												VkPipelineCreationFeedback* pMeshFB,
+												const VkPipelineShaderStageCreateInfo* pFragmentSS,
+												VkPipelineCreationFeedback* pFragmentFB) {
+	auto unsupported = [&](const std::string& reason) {
+		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCreateGraphicsPipelines(): This mesh pipeline %s", reason.c_str()));
+		return false;
+	};
+	if (!getEnabledMeshShaderFeatures().meshShader || ![getMTLDevice() supportsFamily:MTLGPUFamilyMetal3]) { return unsupported("needs the meshShader feature and a Metal 3 GPU."); }
+	if (pTaskSS) { return unsupported("uses a task shader."); }
+	if (!pMeshSS || !_meshModule || _meshModule->getSPIRV().empty() || !pFragmentSS || !_fragmentModule || pCreateInfo->stageCount != 2) { return unsupported("needs exactly a SPIR-V mesh and a fragment shader."); }
+	if (getPipelineCache() || !_dynamicStateFlags.empty() || getRenderingCreateInfo(pCreateInfo)->viewMask || !_isRasterizing || isDepthClipNegativeOneToOne(pCreateInfo)) {
+		return unsupported("uses a pipeline cache, dynamic state, views, rasterizer discard or a [-1, 1] depth range.");
+	}
+	if (mvkUsesResources(_meshModule->getSPIRV(), spv::ExecutionModelMeshEXT)) { return unsupported("uses mesh-stage descriptors or push constants."); }
+	std::string reason = mvkMeshShaderIncompatibility(_meshModule->getSPIRV(), pMeshSS->pName, _meshThreadgroupSize);
+	if (!reason.empty()) { return unsupported("mesh shader " + reason); }
+	bool usesPerVertex = false;
+	std::string errorLog;
+	if (!mvk::getFragmentShaderUsesPerVertexInput(_fragmentModule->getSPIRV(), pFragmentSS->pName, usesPerVertex, errorLog)) {
+		setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to reflect PerVertexKHR inputs: %s", errorLog.c_str()));
+		return false;
+	}
+	if (usesPerVertex) { return unsupported("reads PerVertexKHR fragment inputs."); }
+
+	SPIRVToMSLConversionConfiguration shaderConfig;
+	initShaderConversionConfig(shaderConfig, pCreateInfo, _tessReflectData);
+	shaderConfig.options.entryPointStage = spv::ExecutionModelMeshEXT;
+	shaderConfig.options.entryPointName = pMeshSS->pName;
+	MVKMTLFunction mesh = getMTLFunction(shaderConfig, pMeshSS, pMeshFB, _meshModule, "Mesh");
+	if (!mesh.getMTLFunction()) { return false; }
+	SPIRVShaderOutputs meshOutputs;
+	if (!getShaderOutputs(_meshModule->getSPIRV(), spv::ExecutionModelMeshEXT, pMeshSS->pName, meshOutputs, errorLog)) {
+		setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to get mesh outputs: %s", errorLog.c_str()));
+		return false;
+	}
+
+	// The fragment side is built as for a vertex pipeline, then carried over to the mesh descriptor.
+	MTLRenderPipelineDescriptor* fragmentDesc = [MTLRenderPipelineDescriptor new];	// temp retain
+	bool compiled = addFragmentShaderToPipeline(fragmentDesc, pCreateInfo, shaderConfig, meshOutputs, pFragmentSS, pFragmentFB);
+	if (compiled) { addFragmentOutputToPipeline(fragmentDesc, pCreateInfo); }
+	MTLMeshRenderPipelineDescriptor* meshDesc = [MTLMeshRenderPipelineDescriptor new];	// temp retain
+	meshDesc.meshFunction = mesh.getMTLFunction();
+	meshDesc.fragmentFunction = fragmentDesc.fragmentFunction;
+	for (NSUInteger i = 0; i < kMVKMaxColorAttachmentCount; i++) { meshDesc.colorAttachments[i] = fragmentDesc.colorAttachments[i]; }
+	meshDesc.depthAttachmentPixelFormat = fragmentDesc.depthAttachmentPixelFormat;
+	meshDesc.stencilAttachmentPixelFormat = fragmentDesc.stencilAttachmentPixelFormat;
+	meshDesc.rasterSampleCount = fragmentDesc.rasterSampleCount;
+	meshDesc.alphaToCoverageEnabled = fragmentDesc.alphaToCoverageEnabled;
+	meshDesc.alphaToOneEnabled = fragmentDesc.alphaToOneEnabled;
+	meshDesc.rasterizationEnabled = fragmentDesc.rasterizationEnabled;
+	setMetalObjectLabel(meshDesc, ((MVKPipelineLayout*)pCreateInfo->layout)->getDebugName());
+	[fragmentDesc release];
+	if (compiled) {
+		// ponytail: synchronous compile; route through MVKRenderPipelineCompiler for timeouts once mesh leaves the test gate.
+		NSError* error = nil;
+		_mtlPipelineState = [getMTLDevice() newRenderPipelineStateWithMeshDescriptor:meshDesc options:MTLPipelineOptionNone reflection:nil error:&error];	// retained
+		if (!_mtlPipelineState) { setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Could not create the mesh pipeline: %s", error.localizedDescription.UTF8String)); }
+	}
+	[meshDesc release];
+	return compiled && _mtlPipelineState;
 }
 
 bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCreateInfo* pCreateInfo, const VkPipelineShaderStageCreateInfo* pVertexSS, const VkPipelineShaderStageCreateInfo* pFragmentSS) {
@@ -2741,6 +2865,7 @@ MVKGraphicsPipeline::~MVKGraphicsPipeline() {
 		if (_ownsTessCtlModule) delete _tessCtlModule;
 		if (_ownsTessEvalModule) delete _tessEvalModule;
 		if (_ownsFragmentModule) delete _fragmentModule;
+		if (_ownsMeshModule) delete _meshModule;
 	}
 }
 
