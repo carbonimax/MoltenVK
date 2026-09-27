@@ -14,6 +14,13 @@ static inline bool mvkCanAssemblePerVertexRestart(uint32_t count, uint32_t insta
 // Compact UINT32 indices followed by two ping-pong scans of four uints per input index.
 static inline uint64_t mvkPerVertexRestartIndexScratchSize(uint32_t count) { return uint64_t(count) * 9 * sizeof(uint32_t); }
 
+// Indirect restart encodes the scan steps of the largest admissible count; surplus steps only copy.
+static inline uint32_t mvkPerVertexIndirectRestartScanSteps(uint32_t capacity) {
+	uint32_t steps = 0;
+	for (uint64_t step = 1; step < capacity; step *= 2) { ++steps; }
+	return steps;
+}
+
 // Zero also identifies topologies outside the portable capture/replay contract.
 static inline uint32_t mvkPerVertexReplayVertexCount(VkPrimitiveTopology topology) {
 	switch (topology) {

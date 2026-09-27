@@ -78,11 +78,22 @@ for form in draw draw-count indexed indexed-count; do
 done
 run "index-oob-indexed" after 0 $big 0 indexed u32 index-oob compute
 run "index-oob-indexed-count" after 0 $big 0 indexed-count u32 index-oob compute
-# 4. Deferred and immediate Metal command buffer prefill.
+# 4. Primitive restart on a triangle strip: static restart for every index width, two draws, dynamic
+#    restart on and off, and the restart capacity bound (8 indices x 2 instances = 16 records).
+for form in indexed indexed-count; do
+	for index in u8 u16 u32; do run "restart-$form-$index" after 0 $big 0 $form $index restart copy; done
+	run "restart-two-$form" after 0 $big 0 $form u16 restart-two compute
+	run "restart-dynamic-on-$form" after 0 $big 0 $form u16 restart-dynamic-on copy
+	run "restart-dynamic-off-$form" after 0 $big 0 $form u8 restart-dynamic-off compute
+	run "capacity16-restart-$form" after 0 16 0 $form u32 restart compute
+	run "capacity15-restart-overflow-$form" after 0 15 0 $form u32 restart-overflow compute
+done
+# 5. Deferred and immediate Metal command buffer prefill.
 for prefill in 1 2; do
 	for form in draw draw-count indexed indexed-count; do PREFILL=$prefill run "prefill$prefill-decisive-$form" after 0 $big 0 $form u32 decisive compute; done
+	PREFILL=$prefill run "prefill$prefill-restart-indexed-count" after 0 $big 0 indexed-count u16 restart compute
 done
-# 5. Negative controls: permuted corners must mismatch; the previous library must refuse at recording.
+# 6. Negative controls: permuted corners must mismatch; the previous library must refuse at recording.
 for form in draw draw-count indexed indexed-count; do
 	run "swap-negative-$form" after 2 $big 1 $form u32 decisive compute
 	run "before-$form" before 1 $big 0 $form u32 decisive compute

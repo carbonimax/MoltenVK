@@ -510,12 +510,10 @@ VkResult MVKCommandBuffer::recordPerVertexIndirectDraw(bool indexed) {
 	if (!_recordedPerVertexPipeline) { return VK_SUCCESS; }
 	auto* pipeline = _recordedPerVertexPipeline;
 	if (pipeline->getZeroDivisorVertexBindings().size()) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indirect draws do not support zero-divisor vertex bindings yet."); }
-	if (indexed) {
-		if (!mvkPerVertexIndexSize(_recordedIndexType)) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed capture requires uint8, uint16 or uint32 indices."); }
-		if (pipeline->getDynamicStateFlags().has(MVKRenderStateFlag::PrimitiveRestartEnable) || pipeline->getStaticStateData().enable.has(MVKRenderStateEnableFlag::PrimitiveRestart)) {
-			return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed indirect draws do not support primitive restart yet.");
-		}
-	}
+	if (indexed && !mvkPerVertexIndexSize(_recordedIndexType)) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed capture requires uint8, uint16 or uint32 indices."); }
+	// Dynamic restart can change at execution. Reserve the restart assembly whenever it is possible.
+	bool restart = indexed && (pipeline->getDynamicStateFlags().has(MVKRenderStateFlag::PrimitiveRestartEnable) || pipeline->getStaticStateData().enable.has(MVKRenderStateEnableFlag::PrimitiveRestart));
+	if (restart && !getMetalFeatures().indirectDrawing) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR restart requires indirect drawing."); }
 	// Each indirect draw plans on the GPU in compute, which ends and restarts the render encoder.
 	if (_doesContinueRenderPass) { _needsInheritedPerVertexAttachments = true; }
 	VkResult result = validateIndexedPerVertexAttachments();
@@ -528,9 +526,13 @@ VkResult MVKCommandBuffer::recordPerVertexIndirectDraw(bool indexed) {
 	if (!capacity) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR indirect capture capacity is empty."); }
 	uint64_t primitives = std::max<uint64_t>(mvkPerVertexPrimitiveCount(uint32_t(capacity), topology), 1);
 	uint64_t occurrences = primitives * mvkPerVertexReplayVertexCount(topology);
-	MVKPerVertexScratchRequest request = {NSUInteger(capacity * stride), NSUInteger(occurrences * 2 * sizeof(uint32_t)), NSUInteger(primitives * 3 * sizeof(uint32_t)), pipeline->usesPortableBarycentrics() ? NSUInteger(occurrences * sizeof(uint32_t)) : 0, indexed ? NSUInteger(capacity * sizeof(uint32_t)) : 0};
+	// Gathered uint32 indices, preceded when restarting by the compacted indices and scan storage.
+	uint64_t indexBytes = indexed ? (restart ? mvkPerVertexRestartIndexScratchSize(uint32_t(capacity)) : 0) + capacity * sizeof(uint32_t) : 0;
+	if (indexBytes > getMetalFeatures().maxMTLBufferSize) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR index scratch buffer exceeds Metal limits."); }
+	MVKPerVertexScratchRequest request = {NSUInteger(capacity * stride), NSUInteger(occurrences * 2 * sizeof(uint32_t)), NSUInteger(primitives * 3 * sizeof(uint32_t)), pipeline->usesPortableBarycentrics() ? NSUInteger(occurrences * sizeof(uint32_t)) : 0, NSUInteger(indexBytes), restart};
 	request.indirectCapacity = uint32_t(capacity);
-	request.planSize = 1024;
+	// Plan words, then one 256-byte perVertexRestart parameter block per dispatch.
+	request.planSize = 1024 + (restart ? (mvkPerVertexIndirectRestartScanSteps(uint32_t(capacity)) + 3) * 256 : 0);
 	// Capacity counts physical records, so every multiview pass reserves the same bounded scratch.
 	uint32_t passCount = std::max(getDevice()->getMultiviewMetalPassCount(getViewMask()), 1u);
 	size_t firstRequest = _perVertexScratchRequests.size();
@@ -579,7 +581,7 @@ VkResult MVKCommandBuffer::reservePerVertexScratch(const std::vector<MVKPerVerte
 			if (result != VK_SUCCESS) { return result; }
 			if (!state || !state.maxTotalThreadsPerThreadgroup || !state.threadExecutionWidth) { return reportError(VK_ERROR_INITIALIZATION_FAILED, "Portable PerVertexKHR indirect planning pipeline is unavailable or has invalid dispatch limits."); }
 			pending[i]->indirectPipeline = [state retain];
-			continue;
+			if (!requests[i].restart) { continue; }
 		}
 		if (!requests[i].indexSize) { continue; }
 		// Secondary requests are flattened into the primary. Prepare in its pool
