@@ -34,6 +34,12 @@ renderpass = (root / 'MoltenVK/MoltenVK/GPUObjects/MVKRenderPass.mm').read_text(
 parts += [method(renderpass, signature) for signature in (
     'void MVKRenderingAttachmentIterator::iterate(', 'void MVKRenderingAttachmentIterator::handleAttachment(',
     'MVKRenderingAttachmentIterator::MVKRenderingAttachmentIterator(')]
+renderpass_header = (root / 'MoltenVK/MoltenVK/GPUObjects/MVKRenderPass.h').read_text()
+query, = re.findall(r'\tbool hasResolveAttachments\(\) const \{\n.*?\n\t\}', renderpass_header, re.S)
+parts += [query.replace('bool hasResolveAttachments()', 'bool MVKRenderSubpass::hasResolveAttachments()')]
+# Use the actual dynamic-subpass constructor body, with only a test wrapper name.
+constructor = method(renderpass, 'MVKRenderSubpass::MVKRenderSubpass(MVKRenderPass* renderPass, const VkRenderingInfo* pRenderingInfo)')
+parts += [constructor.replace('MVKRenderSubpass::MVKRenderSubpass(', 'void MVKRenderSubpass::initDynamic(')]
 # Keep Vulkan pNext view selection in the test, so imageless views traverse the production flow.
 vulkan = (root / 'MoltenVK/MoltenVK/Vulkan/vulkan.mm').read_text()
 start = vulkan.index('\tVkRenderPassAttachmentBeginInfo* pAttachmentBegin = nullptr;')
@@ -50,9 +56,39 @@ elif mutation == 'empty':
     joined = joined.replace('_recordedRenderingError = nullptr;', '_recordedRenderingError = attachmentsKnown && !attachments.size() ? "empty rejected" : nullptr;', 1)
 elif mutation == 'inheritance':
     joined = joined.replace('if (cmdBuff->_needsInheritedPerVertexAttachments)', 'if (false)')
+elif mutation == 'msaa':
+    joined = joined.replace('if (getSubpass()->hasResolveAttachments())', 'if (getSubpass()->getSampleCount() != VK_SAMPLE_COUNT_1_BIT) { return "old MSAA gate"; } if (getSubpass()->hasResolveAttachments())')
+elif mutation == 'static-resolve':
+    joined = joined.replace('if (_currentSubpassInfo.renderpass &&', 'if (false && _currentSubpassInfo.renderpass &&')
+elif mutation == 'dynamic-resolve':
+    joined = joined.replace('if (isResolveAttachment && info->imageView', 'if (false && isResolveAttachment && info->imageView')
+elif mutation == 'encoder-resolve':
+    joined = joined.replace('if (getSubpass()->hasResolveAttachments())', 'if (false && getSubpass()->hasResolveAttachments())')
+elif mutation == 'single-sample-inference':
+    joined = joined.replace('for (auto* attachment : _attachments) {', 'for (auto* attachment : _attachments) { if (attachment && getSubpass()->getSampleCount() != VK_SAMPLE_COUNT_1_BIT && attachment->getSampleCount() == VK_SAMPLE_COUNT_1_BIT) { return "old sample inference"; }')
 else:
-    assert mutation is None, mutation
+    assert mutation in (None, 'store', 'load'), mutation
 (output / 'AttachmentMethods.inc').write_text(joined)
+# Test the unchanged production store/load algorithm and the actual split call chain.
+datatypes = (root / 'MoltenVK/MoltenVK/Vulkan/mvk_datatypes.mm').read_text()
+store = [method(datatypes, 'MTLLoadAction mvkMTLLoadActionFromVkAttachmentLoadOpInObj('),
+         method(datatypes, 'MTLStoreAction mvkMTLStoreActionFromVkAttachmentStoreOpInObj('),
+         '#define mvkMTLLoadActionFromVkAttachmentLoadOp(op) mvkMTLLoadActionFromVkAttachmentLoadOpInObj(op, nullptr)',
+         '#define mvkMTLStoreActionFromVkAttachmentStoreOp(op, resolve, canResolve) mvkMTLStoreActionFromVkAttachmentStoreOpInObj(op, resolve, canResolve, nullptr)']
+store += [method(renderpass, signature) for signature in (
+    'MTLStoreAction MVKAttachmentDescription::getMTLStoreAction(',
+    'void MVKAttachmentDescription::encodeStoreAction(', 'void MVKRenderSubpass::encodeStoreActions(',
+    'bool MVKAttachmentDescription::populateMTLRenderPassAttachmentDescriptor(')]
+store += [method(source, 'void MVKCommandEncoder::encodeStoreActions('), method(source, 'void MVKCommandEncoder::finalizeDrawState(')]
+store = '\n\n'.join(store)
+if mutation == 'store':
+    store = store.replace('encodeStoreActions(true);', 'encodeStoreActions(false);')
+if mutation == 'load':
+    store = store.replace('if (loadOverride ||', 'if (false ||')
+(output / 'MultisampleStoreMethods.inc').write_text(store)
+restart = method(source, 'void MVKCommandEncoder::beginMetalRenderPass(')
+assert 'bool isRestart = cmdUse == kMVKCommandUseRestartSubpass;' in restart
+assert re.search(r'populateMTLRenderPassDescriptor\(.*?_isRenderingEntireAttachment,\s*isRestart\);', restart, re.S)
 # Ensure the tested encoder guard remains wired into the real draw before compute splitting.
 draw = (commands / 'MVKCmdDraw.mm').read_text()
 start = draw.index('static void encodePerVertexInput(')
@@ -64,3 +100,6 @@ for directory in API Commands GPUObjects Layers OS Utility Vulkan; do
 done
 xcrun clang++ -std=c++17 -arch arm64 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-deprecated-declarations -fsanitize=address,undefined "${includes[@]}" "$test_dir/PerVertexAttachmentTests.mm" -framework Foundation -framework Metal -o "$output/attachment-tests"
 "$output/attachment-tests"
+
+xcrun clang++ -std=c++17 -arch arm64 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-deprecated-declarations -fsanitize=address,undefined "${includes[@]}" "$test_dir/PerVertexMultisampleStoreTests.mm" -framework Foundation -framework Metal -o "$output/multisample-store-tests"
+"$output/multisample-store-tests"

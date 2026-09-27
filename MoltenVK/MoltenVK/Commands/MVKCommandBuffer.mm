@@ -150,9 +150,7 @@ VkResult MVKCommandBuffer::begin(const VkCommandBufferBeginInfo* pBeginInfo) {
 		auto attachments = framebuffer ? framebuffer->getAttachments() : MVKArrayRef<MVKImageView*>();
 		// An empty inherited framebuffer may be imageless. Its actual views are only known by the primary.
 		recordRenderPass(attachments, attachments.size() != 0);
-		if (!_currentSubpassInfo.renderpass && _hasSecondaryInheritanceRenderingInfo && _secondaryInheritanceRenderingInfo.rasterizationSamples != VK_SAMPLE_COUNT_1_BIT) {
-			_recordedRenderingError = "indexed compute capture requires single-sample attachments.";
-		}
+		// Inherited sample count alone cannot tell us whether the primary has resolve views.
 	}
 
 	if (pInheritAttLocInfo) {
@@ -439,9 +437,10 @@ void MVKCommandBuffer::recordRenderPass(MVKArrayRef<MVKImageView*> attachments, 
 void MVKCommandBuffer::recordRendering(const VkRenderingInfo* renderingInfo) {
 	recordRenderPass({});
 	MVKRenderingAttachmentIterator attachments(renderingInfo);
-	attachments.iterate([&](const VkRenderingAttachmentInfo*, VkImageAspectFlagBits, MVKImageView* attachment, bool isResolveAttachment) {
+	attachments.iterate([&](const VkRenderingAttachmentInfo* info, VkImageAspectFlagBits aspect, MVKImageView* attachment, bool isResolveAttachment) {
 		if (!attachment) { return; }
-		if (!isResolveAttachment && attachment->getSampleCount() != VK_SAMPLE_COUNT_1_BIT) { _recordedRenderingError = "indexed compute capture requires single-sample attachments."; }
+		// Match MVKRenderSubpass: color uses non-null resolve views; depth/stencil also require a resolve mode.
+		if (isResolveAttachment && info->imageView && (aspect == VK_IMAGE_ASPECT_COLOR_BIT || info->resolveMode != VK_RESOLVE_MODE_NONE)) { _recordedRenderingError = "indexed compute capture cannot split rendering with resolve attachments."; }
 		if (attachment->getImage()->getMTLStorageMode() == MTLStorageModeMemoryless) { _recordedRenderingError = "indexed compute capture cannot preserve memoryless attachments."; }
 	});
 }
@@ -449,7 +448,7 @@ void MVKCommandBuffer::recordRendering(const VkRenderingInfo* renderingInfo) {
 VkResult MVKCommandBuffer::validateIndexedPerVertexAttachments() {
 	const char* error = _recordedRenderingError;
 	if (!_recordedAttachmentsKnown && !_doesContinueRenderPass) { error = "indexed compute capture requires known rendering attachments."; }
-	if (_currentSubpassInfo.renderpass && _currentSubpassInfo.renderpass->getSubpass(_currentSubpassInfo.subpassIndex)->getSampleCount() != VK_SAMPLE_COUNT_1_BIT) { error = "indexed compute capture requires single-sample attachments."; }
+	if (_currentSubpassInfo.renderpass && _currentSubpassInfo.renderpass->getSubpass(_currentSubpassInfo.subpassIndex)->hasResolveAttachments()) { error = "indexed compute capture cannot split rendering with resolve attachments."; }
 	return error ? reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR %s", error) : VK_SUCCESS;
 }
 
@@ -617,7 +616,7 @@ void MVKCommandEncoder::encodeSecondary(MVKCommandBuffer* secondaryCmdBuffer) {
 
 const char* MVKCommandEncoder::getIndexedPerVertexAttachmentError() {
 	if (!isInRenderPass()) { return "indexed compute capture requires known rendering attachments."; }
-	if (getSubpass()->getSampleCount() != VK_SAMPLE_COUNT_1_BIT) { return "indexed compute capture requires single-sample attachments."; }
+	if (getSubpass()->hasResolveAttachments()) { return "indexed compute capture cannot split rendering with resolve attachments."; }
 	// These are the begin-render-pass views, including imageless and dynamic rendering attachments.
 	// An empty list in an active render pass is valid; there is no image content to preserve.
 	for (auto* attachment : _attachments) {
