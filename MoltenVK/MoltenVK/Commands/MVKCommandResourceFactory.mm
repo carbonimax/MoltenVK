@@ -627,6 +627,10 @@ id<MTLComputePipelineState> MVKCommandResourceFactory::newPerVertexRestartMTLCom
 	return newMTLComputePipelineState("perVertexRestart", owner);
 }
 
+id<MTLComputePipelineState> MVKCommandResourceFactory::newPerVertexTessTopologyMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner) {
+	return newMTLComputePipelineState("perVertexTessTopology", owner);
+}
+
 id<MTLComputePipelineState> MVKCommandResourceFactory::newConvertUint8IndicesMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner, bool preserveValues) {
 	if (preserveValues) { return newMTLComputePipelineState("convertUint8IndicesRaw", owner); }
 #if MVK_USE_METAL_PRIVATE_API
