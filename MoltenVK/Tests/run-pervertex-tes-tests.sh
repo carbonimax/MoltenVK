@@ -123,6 +123,10 @@ for library in dev shipping; do
 	for command in indirect indexed-indirect; do SHADER_VALIDATION=0 topology "$library" "ordinary-levels-$command" ccw 0 "TES_TOPOLOGY PASS"; done
 	topology "$library" ordinary-levels-direct cw 0 "TES_TOPOLOGY PASS"
 done
+# An ordinary float32 draw beyond the advertised Metal buffer limit must fail during prefill,
+# before a GPU submission or an undersized scratch allocation.
+PREFILL=1 topology shipping ordinary-levels-scratch-limit ccw 0 "TES_TOPOLOGY PASS" "nothing submitted"
+PREFILL=1 topology shipping ordinary-levels-indexed-scratch-limit ccw 0 "TES_TOPOLOGY PASS" "nothing submitted"
 # 3. Pilot guarantees kept: fixture pixels, compute-bind recording guards, refusals.
 pilot dev ordered ordered.frag
 pilot dev swapped ordered-swapped.frag
