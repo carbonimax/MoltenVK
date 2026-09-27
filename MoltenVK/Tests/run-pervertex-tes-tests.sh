@@ -89,7 +89,7 @@ check_log() { # log expected-exit actual-exit required...
 	for required in "$@"; do grep -qE -- "$required" "$log" || { verdict=FAIL; echo "    missing: $required"; }; done
 	cases=$((cases + 1))
 	printf '%-52s exit=%s %s\n' "$(basename "$log" .log)" "$actual" "$verdict"
-	grep -E '^  (ordinary vs|barycentric|CPU model|tessellation coordinates|seam|fragment gl_PrimitiveID|VS storage)|^pipeline rejection|^Pixel|PASS|FAIL' "$log" | grep -v 'Validation Enabled' | sed 's/^/    /' | head -12 || true
+	grep -E '^  (ordinary vs|barycentric|CPU model|tessellation coordinates|seam|fragment gl_PrimitiveID|VS storage|case|info)|^pipeline rejection|^Pixel|PASS|FAIL' "$log" | grep -v 'Validation Enabled' | sed 's/^/    /' | head -12 || true
 	if [[ $verdict != PASS ]]; then echo "STOP: inspect $log before any further GPU work"; exit 1; fi
 }
 env_run() { env -u DYLD_LIBRARY_PATH -u DYLD_INSERT_LIBRARIES MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MVK_CONFIG_LOG_LEVEL=2 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS="${PREFILL:-0}" "$@"; }
@@ -117,6 +117,12 @@ PREFILL=2 topology dev mixed cw 0 "TES_TOPOLOGY PASS"
 for scenario in reject-quads reject-fractional reject-point-mode reject-lower-left reject-descriptor reject-push-constant reject-cache reject-first-vertex reject-instances; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
 topology no-admission reject-no-admission ccw 0 "TES_TOPOLOGY PASS"
 topology shipping public-device-gate ccw 0 "TES_TOPOLOGY PASS"
+# 2b. Ordinary tessellation keeps float32 TCS levels until Vulkan classification, in every draw command, on the
+# shipping library too: the image, tessellation and TES-visible levels match the Vulkan level representative.
+for library in dev shipping; do
+	for command in direct indexed indirect indexed-indirect; do topology "$library" "ordinary-levels-$command" ccw 0 "TES_TOPOLOGY PASS"; done
+	topology "$library" ordinary-levels-direct cw 0 "TES_TOPOLOGY PASS"
+done
 # 3. Pilot guarantees kept: fixture pixels, compute-bind recording guards, refusals.
 pilot dev ordered ordered.frag
 pilot dev swapped ordered-swapped.frag
