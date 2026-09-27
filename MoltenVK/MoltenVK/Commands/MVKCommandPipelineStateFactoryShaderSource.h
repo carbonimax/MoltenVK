@@ -681,15 +681,17 @@ kernel void perVertexTessTopology(const device uint* levels [[buffer(0)]], devic
     }
     if (i >= patches || plan[0] || !counts[i]) { return; }
     // Clockwise (u,v) corner orders of the proven Metal topologies; counter-clockwise swaps corners 1 and 2.
-    const float t = 2.0f / 9.0f;
+    // Coordinates are the M4 tessellator's, in 1/65536 steps: 1 - x is exact (Vulkan invariance rule 8), each
+    // edge vertex (x, 1-x) has its exact mirror (rule 3), and every edge is subdivided alike (rule 4).
+    const float q = 1.0f / 65536.0f;
     const float3 points[12] = {
-        float3(1, 0, 0), float3(2.0f / 3.0f, 1.0f / 3.0f, 0), float3(1.0f / 3.0f, 2.0f / 3.0f, 0), float3(0, 1, 0),
-        float3(0, 2.0f / 3.0f, 1.0f / 3.0f), float3(0, 1.0f / 3.0f, 2.0f / 3.0f), float3(0, 0, 1),
-        float3(1.0f / 3.0f, 0, 2.0f / 3.0f), float3(2.0f / 3.0f, 0, 1.0f / 3.0f),
-        float3(1.0f - 2.0f * t, t, t), float3(t, 1.0f - 2.0f * t, t), float3(t, t, 1.0f - 2.0f * t)};
+        float3(1, 0, 0), float3(43691 * q, 21845 * q, 0), float3(21845 * q, 43691 * q, 0), float3(0, 1, 0),
+        float3(0, 43691 * q, 21845 * q), float3(0, 21845 * q, 43691 * q), float3(0, 0, 1),
+        float3(21845 * q, 0, 43691 * q), float3(43691 * q, 0, 21845 * q),
+        float3(36409 * q, 14564 * q, 14563 * q), float3(14563 * q, 36409 * q, 14564 * q), float3(14563 * q, 14563 * q, 36410 * q)};
     const uint3 level3[13] = {uint3(9, 8, 0), uint3(9, 0, 1), uint3(10, 2, 3), uint3(10, 3, 4), uint3(11, 5, 6), uint3(11, 6, 7), uint3(9, 10, 11),
         uint3(9, 1, 10), uint3(10, 1, 2), uint3(10, 4, 11), uint3(11, 4, 5), uint3(11, 7, 9), uint3(9, 7, 8)};
-    const float3 level2[7] = {float3(1, 0, 0), float3(0.5f, 0.5f, 0), float3(0, 1, 0), float3(0, 0.5f, 0.5f), float3(0, 0, 1), float3(0.5f, 0, 0.5f), float3(1.0f / 3.0f)};
+    const float3 level2[7] = {float3(1, 0, 0), float3(0.5f, 0.5f, 0), float3(0, 1, 0), float3(0, 0.5f, 0.5f), float3(0, 0, 1), float3(0.5f, 0, 0.5f), float3(21845 * q, 21845 * q, 21846 * q)};
     uint triangles = counts[i];
     for (uint triangle = 0; triangle < triangles; ++triangle) {
         uint key = offsets[i] + triangle;
