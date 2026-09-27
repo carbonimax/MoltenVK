@@ -448,6 +448,25 @@ static void encodePerVertexTessEval(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	graphics._exists.fragment().descriptorSetData.reset();
 }
 
+// Ordinary tessellation that keeps float32 TCS levels: after the TCS, Vulkan classifies them into the separate half
+// factors Metal's tessellator reads (tessLevelsToHalfFactors), while the TES reads the float32 levels. The caller
+// binds the TCS parameters (patch count in word 1) at index 3, then dispatches at least one thread per patch.
+static MVKMetalComputeCommandEncoderState& bindTessLevelsToHalfFactors(MVKCommandEncoder* cmdEncoder, id<MTLComputeCommandEncoder> encoder,
+																	   const MVKMTLBufferAllocation* levels, const MVKMTLBufferAllocation* factors) {
+	[encoder memoryBarrierWithScope: MTLBarrierScopeBuffers];
+	auto& state = cmdEncoder->getMtlCompute();
+	state.bindPipeline(encoder, cmdEncoder->getCommandEncodingPool()->getTessLevelsToHalfFactorsMTLComputePipelineState());
+	state.bindBuffer(encoder, levels->_mtlBuffer, levels->_offset, 0);
+	state.bindBuffer(encoder, factors->_mtlBuffer, factors->_offset, 1);
+	float maxLevel = float(cmdEncoder->getDeviceProperties().limits.maxTessellationGenerationLevel);
+	state.bindStructBytes(encoder, &maxLevel, 2);
+	state._exists.descriptorSetData.reset();
+	return state;
+}
+
+// Float32 TCS levels: outer[4], inner[2] per patch.
+static constexpr uint32_t kMVKFloat32TessLevelSize = 6 * sizeof(float);
+
 void MVKCmdDraw::encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline) {
 	::encodePerVertexInput(cmdEncoder, pipeline, _vertexCount, _instanceCount, _firstVertex, _firstInstance, _drawIndex);
 }
@@ -487,6 +506,7 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
     const MVKMTLBufferAllocation* tcOutBuff = nullptr;
     const MVKMTLBufferAllocation* tcPatchOutBuff = nullptr;
     const MVKMTLBufferAllocation* tcLevelBuff = nullptr;
+    const MVKMTLBufferAllocation* tcFloatLevelBuff = nullptr;
     const MVKMTLBufferAllocation* tempDrawIDBuff = nullptr;
 	struct {
 		uint32_t inControlPointCount = 0;
@@ -555,8 +575,9 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
                                          atIndex: pipeline->getImplicitBuffers(kMVKShaderStageTessCtl).ids[MVKImplicitBuffer::PatchOutput]];
                 }
                 tcLevelBuff = cmdEncoder->getTempMTLBuffer(tessParams.patchCount * sizeof(MTLQuadTessellationFactorsHalf), true);
-                [mtlTessCtlEncoder setBuffer: tcLevelBuff->_mtlBuffer
-                                      offset: tcLevelBuff->_offset
+                if (pipeline->usesFloat32TessLevels()) { tcFloatLevelBuff = cmdEncoder->getTempMTLBuffer(tessParams.patchCount * kMVKFloat32TessLevelSize, true); }
+                [mtlTessCtlEncoder setBuffer: (tcFloatLevelBuff ? tcFloatLevelBuff : tcLevelBuff)->_mtlBuffer
+                                      offset: (tcFloatLevelBuff ? tcFloatLevelBuff : tcLevelBuff)->_offset
                                      atIndex: pipeline->getImplicitBuffers(kMVKShaderStageTessCtl).ids[MVKImplicitBuffer::TessLevel]];
                 cmdEncoder->setComputeBytes(mtlTessCtlEncoder,
                                             &tessParams,
@@ -581,6 +602,12 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
 					[mtlTessCtlEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide(tessParams.patchCount * outControlPointCount, wgSize), 1, 1)
 									  threadsPerThreadgroup: MTLSizeMake(wgSize, 1, 1)];
 				}
+                if (tcFloatLevelBuff) {
+                    auto& state = bindTessLevelsToHalfFactors(cmdEncoder, mtlTessCtlEncoder, tcFloatLevelBuff, tcLevelBuff);
+                    state.bindBytes(mtlTessCtlEncoder, &tessParams, sizeof(tessParams), 3);
+                    [mtlTessCtlEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide(tessParams.patchCount, 64u), 1, 1)
+                                      threadsPerThreadgroup: MTLSizeMake(64, 1, 1)];
+                }
                 // Running this stage prematurely ended the render pass, so we have to start it up again.
                 // TODO: On iOS, maybe we could use a tile shader to avoid this.
                 cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass);
@@ -598,8 +625,8 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
                                                                 offset: tcPatchOutBuff->_offset
                                                                atIndex: cmdEncoder->getDevice()->getMetalBufferIndexForVertexAttributeBinding(kMVKTessEvalPatchInputBufferBinding)];
                     }
-                    [cmdEncoder->_mtlRenderEncoder setVertexBuffer: tcLevelBuff->_mtlBuffer
-                                                            offset: tcLevelBuff->_offset
+                    [cmdEncoder->_mtlRenderEncoder setVertexBuffer: (tcFloatLevelBuff ? tcFloatLevelBuff : tcLevelBuff)->_mtlBuffer
+                                                            offset: (tcFloatLevelBuff ? tcFloatLevelBuff : tcLevelBuff)->_offset
                                                            atIndex: cmdEncoder->getDevice()->getMetalBufferIndexForVertexAttributeBinding(kMVKTessEvalLevelBufferBinding)];
                     [cmdEncoder->_mtlRenderEncoder setTessellationFactorBuffer: tcLevelBuff->_mtlBuffer
                                                                         offset: tcLevelBuff->_offset
@@ -768,6 +795,7 @@ void MVKCmdDrawIndexed::encode(MVKCommandEncoder* cmdEncoder) {
     const MVKMTLBufferAllocation* tcOutBuff = nullptr;
     const MVKMTLBufferAllocation* tcPatchOutBuff = nullptr;
     const MVKMTLBufferAllocation* tcLevelBuff = nullptr;
+    const MVKMTLBufferAllocation* tcFloatLevelBuff = nullptr;
     const MVKMTLBufferAllocation* tempDrawIDBuff = nullptr;
 	struct {
 		uint32_t inControlPointCount = 0;
@@ -838,8 +866,9 @@ void MVKCmdDrawIndexed::encode(MVKCommandEncoder* cmdEncoder) {
                                          atIndex: pipeline->getImplicitBuffers(kMVKShaderStageTessCtl).ids[MVKImplicitBuffer::PatchOutput]];
                 }
                 tcLevelBuff = cmdEncoder->getTempMTLBuffer(tessParams.patchCount * sizeof(MTLQuadTessellationFactorsHalf), true);
-                [mtlTessCtlEncoder setBuffer: tcLevelBuff->_mtlBuffer
-                                      offset: tcLevelBuff->_offset
+                if (pipeline->usesFloat32TessLevels()) { tcFloatLevelBuff = cmdEncoder->getTempMTLBuffer(tessParams.patchCount * kMVKFloat32TessLevelSize, true); }
+                [mtlTessCtlEncoder setBuffer: (tcFloatLevelBuff ? tcFloatLevelBuff : tcLevelBuff)->_mtlBuffer
+                                      offset: (tcFloatLevelBuff ? tcFloatLevelBuff : tcLevelBuff)->_offset
                                      atIndex: pipeline->getImplicitBuffers(kMVKShaderStageTessCtl).ids[MVKImplicitBuffer::TessLevel]];
                 cmdEncoder->setComputeBytes(mtlTessCtlEncoder,
                                             &tessParams,
@@ -865,6 +894,12 @@ void MVKCmdDrawIndexed::encode(MVKCommandEncoder* cmdEncoder) {
 					[mtlTessCtlEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide(tessParams.patchCount * outControlPointCount, wgSize), 1, 1)
 									  threadsPerThreadgroup: MTLSizeMake(wgSize, 1, 1)];
 				}
+                if (tcFloatLevelBuff) {
+                    auto& state = bindTessLevelsToHalfFactors(cmdEncoder, mtlTessCtlEncoder, tcFloatLevelBuff, tcLevelBuff);
+                    state.bindBytes(mtlTessCtlEncoder, &tessParams, sizeof(tessParams), 3);
+                    [mtlTessCtlEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide(tessParams.patchCount, 64u), 1, 1)
+                                      threadsPerThreadgroup: MTLSizeMake(64, 1, 1)];
+                }
                 // Running this stage prematurely ended the render pass, so we have to start it up again.
                 // TODO: On iOS, maybe we could use a tile shader to avoid this.
                 cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass);
@@ -882,8 +917,8 @@ void MVKCmdDrawIndexed::encode(MVKCommandEncoder* cmdEncoder) {
                                                                 offset: tcPatchOutBuff->_offset
                                                                atIndex: cmdEncoder->getDevice()->getMetalBufferIndexForVertexAttributeBinding(kMVKTessEvalPatchInputBufferBinding)];
                     }
-                    [cmdEncoder->_mtlRenderEncoder setVertexBuffer: tcLevelBuff->_mtlBuffer
-                                                            offset: tcLevelBuff->_offset
+                    [cmdEncoder->_mtlRenderEncoder setVertexBuffer: (tcFloatLevelBuff ? tcFloatLevelBuff : tcLevelBuff)->_mtlBuffer
+                                                            offset: (tcFloatLevelBuff ? tcFloatLevelBuff : tcLevelBuff)->_offset
                                                            atIndex: cmdEncoder->getDevice()->getMetalBufferIndexForVertexAttributeBinding(kMVKTessEvalLevelBufferBinding)];
                     [cmdEncoder->_mtlRenderEncoder setTessellationFactorBuffer: tcLevelBuff->_mtlBuffer
                                                                         offset: tcLevelBuff->_offset
@@ -1360,6 +1395,7 @@ void MVKCmdDrawIndirect::encode(MVKCommandEncoder* cmdEncoder) {
     const MVKMTLBufferAllocation* tcOutBuff = nullptr;
     const MVKMTLBufferAllocation* tcPatchOutBuff = nullptr;
     const MVKMTLBufferAllocation* tcLevelBuff = nullptr;
+    const MVKMTLBufferAllocation* tcFloatLevelBuff = nullptr;
     const MVKMTLBufferAllocation* tempDrawIDBuff = nullptr;
     uint32_t patchCount = 0, vertexCount = 0;
     uint32_t inControlPointCount = 0, outControlPointCount = 0;
@@ -1398,6 +1434,7 @@ void MVKCmdDrawIndirect::encode(MVKCommandEncoder* cmdEncoder) {
             tcPatchOutBuff = cmdEncoder->getTempMTLBuffer(patchCount * 4 * dvcLimits.maxTessellationControlPerPatchOutputComponents, true);
         }
         tcLevelBuff = cmdEncoder->getTempMTLBuffer(patchCount * sizeof(MTLQuadTessellationFactorsHalf), true);
+        if (pipeline->usesFloat32TessLevels()) { tcFloatLevelBuff = cmdEncoder->getTempMTLBuffer(patchCount * kMVKFloat32TessLevelSize, true); }
 
         vtxThreadExecWidth = pipeline->getTessVertexStageState().threadExecutionWidth;
         NSUInteger sgSize = pipeline->getTessControlStageState().threadExecutionWidth;
@@ -1448,6 +1485,9 @@ void MVKCmdDrawIndirect::encode(MVKCommandEncoder* cmdEncoder) {
 				state.bindStructBytes(mtlTessCtlEncoder, &_drawCount,               6);
 				state.bindStructBytes(mtlTessCtlEncoder, &vtxThreadExecWidth,       7);
 				state.bindStructBytes(mtlTessCtlEncoder, &tcWorkgroupSize,          8);
+				// The TCS reads each draw's parameters at this stride, which follows minUniformBufferOffsetAlignment.
+				uint32_t paramsStride = uint32_t(paramsIncr);
+				state.bindStructBytes(mtlTessCtlEncoder, &paramsStride, 9);
 				if (mtlFeats.nonUniformThreadgroups) {
 					[mtlTessCtlEncoder dispatchThreads: MTLSizeMake(_drawCount, 1, 1)
 								 threadsPerThreadgroup: MTLSizeMake(mtlConvertState.threadExecutionWidth, 1, 1)];
@@ -1523,8 +1563,8 @@ void MVKCmdDrawIndirect::encode(MVKCommandEncoder* cmdEncoder) {
                                               offset: tcPatchOutBuff->_offset
                                              atIndex: pipeline->getImplicitBuffers(kMVKShaderStageTessCtl).ids[MVKImplicitBuffer::PatchOutput]];
                     }
-                    [mtlTessCtlEncoder setBuffer: tcLevelBuff->_mtlBuffer
-                                          offset: tcLevelBuff->_offset
+                    [mtlTessCtlEncoder setBuffer: (tcFloatLevelBuff ? tcFloatLevelBuff : tcLevelBuff)->_mtlBuffer
+                                          offset: (tcFloatLevelBuff ? tcFloatLevelBuff : tcLevelBuff)->_offset
                                          atIndex: pipeline->getImplicitBuffers(kMVKShaderStageTessCtl).ids[MVKImplicitBuffer::TessLevel]];
 					[mtlTessCtlEncoder setBuffer: tcParamsBuff->_mtlBuffer
 										  offset: mtlParmBuffOfst
@@ -1539,6 +1579,14 @@ void MVKCmdDrawIndirect::encode(MVKCommandEncoder* cmdEncoder) {
                                                          indirectBufferOffset: mtlIndBuffOfst
                                                         threadsPerThreadgroup: MTLSizeMake(tcWorkgroupSize, 1, 1)];
                     mtlIndBuffOfst += sizeof(MTLDispatchThreadgroupsIndirectArguments);
+                    if (tcFloatLevelBuff) {
+                        // The TCS grid of this draw has at least one thread per patch.
+                        auto& state = bindTessLevelsToHalfFactors(cmdEncoder, mtlTessCtlEncoder, tcFloatLevelBuff, tcLevelBuff);
+                        state.bindBuffer(mtlTessCtlEncoder, tcParamsBuff->_mtlBuffer, mtlParmBuffOfst - paramsIncr, 3);
+                        [mtlTessCtlEncoder dispatchThreadgroupsWithIndirectBuffer: mtlIndBuff
+                                                             indirectBufferOffset: mtlIndBuffOfst - sizeof(MTLDispatchThreadgroupsIndirectArguments)
+                                                            threadsPerThreadgroup: MTLSizeMake(tcWorkgroupSize, 1, 1)];
+                    }
                     // Running this stage prematurely ended the render pass, so we have to start it up again.
                     // TODO: On iOS, maybe we could use a tile shader to avoid this.
                     cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass);
@@ -1557,8 +1605,8 @@ void MVKCmdDrawIndirect::encode(MVKCommandEncoder* cmdEncoder) {
 																		offset: tcPatchOutBuff->_offset
 																	   atIndex: cmdEncoder->getDevice()->getMetalBufferIndexForVertexAttributeBinding(kMVKTessEvalPatchInputBufferBinding)];
 							}
-							[cmdEncoder->_mtlRenderEncoder setVertexBuffer: tcLevelBuff->_mtlBuffer
-																	offset: tcLevelBuff->_offset
+							[cmdEncoder->_mtlRenderEncoder setVertexBuffer: (tcFloatLevelBuff ? tcFloatLevelBuff : tcLevelBuff)->_mtlBuffer
+																	offset: (tcFloatLevelBuff ? tcFloatLevelBuff : tcLevelBuff)->_offset
 																   atIndex: cmdEncoder->getDevice()->getMetalBufferIndexForVertexAttributeBinding(kMVKTessEvalLevelBufferBinding)];
 							[cmdEncoder->_mtlRenderEncoder setTessellationFactorBuffer: tcLevelBuff->_mtlBuffer
 																				offset: tcLevelBuff->_offset
@@ -1733,6 +1781,7 @@ void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder, const MVKI
     const MVKMTLBufferAllocation* tcOutBuff = nullptr;
     const MVKMTLBufferAllocation* tcPatchOutBuff = nullptr;
     const MVKMTLBufferAllocation* tcLevelBuff = nullptr;
+    const MVKMTLBufferAllocation* tcFloatLevelBuff = nullptr;
     const MVKMTLBufferAllocation* vtxIndexBuff = nullptr;
     const MVKMTLBufferAllocation* tempDrawIDBuff = nullptr;
     uint32_t patchCount = 0, vertexCount = 0;
@@ -1773,6 +1822,7 @@ void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder, const MVKI
             tcPatchOutBuff = cmdEncoder->getTempMTLBuffer(patchCount * 4 * dvcLimits.maxTessellationControlPerPatchOutputComponents, true);
         }
         tcLevelBuff = cmdEncoder->getTempMTLBuffer(patchCount * sizeof(MTLQuadTessellationFactorsHalf), true);
+        if (pipeline->usesFloat32TessLevels()) { tcFloatLevelBuff = cmdEncoder->getTempMTLBuffer(patchCount * kMVKFloat32TessLevelSize, true); }
         vtxIndexBuff = cmdEncoder->getTempMTLBuffer(ibb.size, true);
 
         id<MTLComputePipelineState> vtxState;
@@ -1833,6 +1883,9 @@ void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder, const MVKI
                     state.bindStructBytes(mtlTessCtlEncoder, &_drawCount,               6);
                     state.bindStructBytes(mtlTessCtlEncoder, &vtxThreadExecWidth,       7);
                     state.bindStructBytes(mtlTessCtlEncoder, &tcWorkgroupSize,          8);
+                    // The TCS reads each draw's parameters at this stride, which follows minUniformBufferOffsetAlignment.
+                    uint32_t paramsStride = uint32_t(paramsIncr);
+                    state.bindStructBytes(mtlTessCtlEncoder, &paramsStride, 9);
                     [mtlTessCtlEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(_drawCount, mtlConvertState.threadExecutionWidth), 1, 1)
                                       threadsPerThreadgroup: MTLSizeMake(mtlConvertState.threadExecutionWidth, 1, 1)];
                 }
@@ -1921,8 +1974,8 @@ void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder, const MVKI
                                               offset: tcPatchOutBuff->_offset
                                              atIndex: pipeline->getImplicitBuffers(kMVKShaderStageTessCtl).ids[MVKImplicitBuffer::PatchOutput]];
                     }
-                    [mtlTessCtlEncoder setBuffer: tcLevelBuff->_mtlBuffer
-                                          offset: tcLevelBuff->_offset
+                    [mtlTessCtlEncoder setBuffer: (tcFloatLevelBuff ? tcFloatLevelBuff : tcLevelBuff)->_mtlBuffer
+                                          offset: (tcFloatLevelBuff ? tcFloatLevelBuff : tcLevelBuff)->_offset
                                          atIndex: pipeline->getImplicitBuffers(kMVKShaderStageTessCtl).ids[MVKImplicitBuffer::TessLevel]];
 					[mtlTessCtlEncoder setBuffer: tcParamsBuff->_mtlBuffer
 										  offset: mtlParmBuffOfst
@@ -1937,6 +1990,14 @@ void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder, const MVKI
                                                          indirectBufferOffset: mtlTempIndBuffOfst
                                                         threadsPerThreadgroup: MTLSizeMake(tcWorkgroupSize, 1, 1)];
                     mtlTempIndBuffOfst += sizeof(MTLDispatchThreadgroupsIndirectArguments);
+                    if (tcFloatLevelBuff) {
+                        // The TCS grid of this draw has at least one thread per patch.
+                        auto& state = bindTessLevelsToHalfFactors(cmdEncoder, mtlTessCtlEncoder, tcFloatLevelBuff, tcLevelBuff);
+                        state.bindBuffer(mtlTessCtlEncoder, tcParamsBuff->_mtlBuffer, mtlParmBuffOfst - paramsIncr, 3);
+                        [mtlTessCtlEncoder dispatchThreadgroupsWithIndirectBuffer: mtlIndBuff
+                                                             indirectBufferOffset: mtlTempIndBuffOfst - sizeof(MTLDispatchThreadgroupsIndirectArguments)
+                                                            threadsPerThreadgroup: MTLSizeMake(tcWorkgroupSize, 1, 1)];
+                    }
                     // Running this stage prematurely ended the render pass, so we have to start it up again.
                     // TODO: On iOS, maybe we could use a tile shader to avoid this.
                     cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass);
@@ -1954,8 +2015,8 @@ void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder, const MVKI
 																		offset: tcPatchOutBuff->_offset
 																	   atIndex: cmdEncoder->getDevice()->getMetalBufferIndexForVertexAttributeBinding(kMVKTessEvalPatchInputBufferBinding)];
 							}
-							[cmdEncoder->_mtlRenderEncoder setVertexBuffer: tcLevelBuff->_mtlBuffer
-																	offset: tcLevelBuff->_offset
+							[cmdEncoder->_mtlRenderEncoder setVertexBuffer: (tcFloatLevelBuff ? tcFloatLevelBuff : tcLevelBuff)->_mtlBuffer
+																	offset: (tcFloatLevelBuff ? tcFloatLevelBuff : tcLevelBuff)->_offset
 																   atIndex: cmdEncoder->getDevice()->getMetalBufferIndexForVertexAttributeBinding(kMVKTessEvalLevelBufferBinding)];
 							[cmdEncoder->_mtlRenderEncoder setTessellationFactorBuffer: tcLevelBuff->_mtlBuffer
 																				offset: tcLevelBuff->_offset

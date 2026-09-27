@@ -32,6 +32,20 @@ Any other pipeline mode returns `VK_ERROR_FEATURE_NOT_PRESENT` at `vkCreateGraph
 6. **Capacity.** Scratch is reserved before submission for the proven maximum of 39 records per patch, including the float32 levels and the plan buffer. Every allocation is transactional.
 7. **Synchronization.** Compute buffer barriers separate VS, TCS, the generator phases and TES. Ending compute makes the tracked scratch visible to the restarted render pass.
 
+## Ordinary tessellation levels
+
+This part is not test-only: it changes the ordinary tessellation path of every build. Metal's tessellator reads only half factors, and the TCS used to write its levels through `half()`, so `nextafter(1, +inf)` tessellated at level 1 and a positive level below the half range discarded the patch.
+
+For ordinary pipelines with triangles, equal spacing, no point mode, the upper-left origin and one view:
+
+- the TCS writes float32 levels;
+- a compute kernel classifies them as Vulkan does (discard, clamp, round up) into the half factors Metal reads;
+- the TES reads the float32 levels, which Vulkan defines as the values the TCS wrote.
+
+The four draw commands (direct, indexed, indirect, indexed indirect) use the same kernel. Eligibility comes from SPIRV-Cross's shape query at pipeline creation: a TCS/TES pair that float32 cannot express, and every other mode, keeps the half path unchanged.
+
+Indirect tessellated draws with a `drawCount` above 1 also needed a fix. Their conversion kernels wrote each draw's TCS parameters at a fixed 256-byte stride, while the host reads them at `max(minUniformBufferOffsetAlignment, 8)`, which is 16 on Apple GPUs. Every draw after the first used wrong parameters.
+
 ## Oracles (`topology.cpp`)
 
 Positions and levels are vertex attributes that the GPU copies into a host-zeroed buffer earlier in the command buffer. For each scenario the test checks:
@@ -55,7 +69,8 @@ Scenarios cover:
 - both windings;
 - seams: two patches of level 1, 2 or 3 sharing an edge, which is the `u = 0` edge of one and the `w = 0` edge of the other (rule 4);
 - draws of 1, 2, 4 and 5 vertices, counted by the VS storage counter;
-- level 4, non-uniform levels and a NaN inner level, which must be refused with `VK_ERROR_DEVICE_LOST` and no pixel.
+- level 4, non-uniform levels and a NaN inner level, which must be refused with `VK_ERROR_DEVICE_LOST` and no pixel;
+- ordinary-only draws (`ordinary-levels-*`, also on the shipping library, through each draw command, as one draw and as two draws in one render pass) where levels that half would change must render, tessellate and reach the TES exactly like their Vulkan representative: `nextafter(1, +inf)` as 2, `nextafter(2, +inf)` as 3, `1e-30` as 1 on outer and inner levels, with `+inf`, `-0` and NaN as controls.
 
 `main.cpp` keeps the earlier pilot checks that still apply: the factor-1 fixture with the ordered, swapped and wrong-patch fragments, the compute-bind recording guards, and the refusals for cache, patch size, specialization, instances, first vertex, indexed draws and the no-admission build.
 
@@ -72,7 +87,9 @@ The runner builds from `HEAD`:
 - three Debug arm64 libraries: development, without admission, and shipping;
 - three generator mutations that must be caught: reversed winding, moved level-3 interior coordinates, and ignored patch offsets.
 
-It also checks that the float32 TessLevel ABI is live in the generated TCS and TES, and writes `EVIDENCE.sha256` and `SOURCE-INDEX.txt`.
+It also checks that the float32 TessLevel ABI is live in the generated TCS and TES, that ordinary fractional and quad pipelines keep the half ABI, and writes `EVIDENCE.sha256` and `SOURCE-INDEX.txt`.
+
+Metal shader validation makes ordinary indirect tessellation draw nothing on M4, with or without this change (the VS runs, no TES does, nothing is reported). The runner therefore runs the indirect ordinary cases under Metal API validation only.
 
 ## Limits
 
@@ -86,4 +103,4 @@ Proven on one Apple M4 Pro (macOS 27.2, Xcode 27.1) only. Not supported:
 
 A TES PerVertex pipeline also needs one more free fragment buffer slot, for the patch-index table.
 
-Ordinary point-mode TES pipelines already fail in MoltenVK, independently of this path. The ordinary TES path keeps its half factors, so it diverges from the PerVertex path on levels that half cannot represent.
+Ordinary point-mode TES pipelines already fail in MoltenVK, independently of this path. Ordinary fractional spacing, quads, point mode and the lower-left origin still go through half factors: there, levels that half cannot represent still diverge from Vulkan.

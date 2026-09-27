@@ -81,15 +81,15 @@ check_log() { # log expected-exit actual-exit required...
 	local log=$1 expected=$2 actual=$3 verdict=PASS; shift 3
 	[[ $actual == "$expected" ]] || verdict=FAIL
 	grep -q 'Metal API Validation Enabled' "$log" || verdict=FAIL
-	grep -q 'Metal GPU Validation Enabled' "$log" || verdict=FAIL
+	[[ ${SHADER_VALIDATION:-1} == 0 ]] || grep -q 'Metal GPU Validation Enabled' "$log" || verdict=FAIL
 	if grep -qiE 'Shader Validation|GPU Address Sanitizer|validation error|Execution of the command buffer was aborted|execution failed' "$log"; then verdict=FAIL; fi
 	for required in "$@"; do grep -qE -- "$required" "$log" || { verdict=FAIL; echo "    missing: $required"; }; done
 	cases=$((cases + 1))
 	printf '%-52s exit=%s %s\n' "$(basename "$log" .log)" "$actual" "$verdict"
-	grep -E '^  (ordinary vs|barycentric|CPU model|tessellation coordinates|seam|fragment gl_PrimitiveID|VS storage)|^pipeline rejection|^Pixel|PASS|FAIL' "$log" | grep -v 'Validation Enabled' | sed 's/^/    /' | head -12 || true
+	grep -E '^  (ordinary vs|barycentric|CPU model|tessellation coordinates|seam|fragment gl_PrimitiveID|VS storage|case|info)|^pipeline rejection|^Pixel|PASS|FAIL' "$log" | grep -v 'Validation Enabled' | sed 's/^/    /' | head -12 || true
 	if [[ $verdict != PASS ]]; then echo "STOP: inspect $log before any further GPU work"; exit 1; fi
 }
-env_run() { env -u DYLD_LIBRARY_PATH -u DYLD_INSERT_LIBRARIES MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MVK_CONFIG_LOG_LEVEL=2 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS="${PREFILL:-0}" "$@"; }
+env_run() { env -u DYLD_LIBRARY_PATH -u DYLD_INSERT_LIBRARIES MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION="${SHADER_VALIDATION:-1}" MVK_CONFIG_LOG_LEVEL=2 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS="${PREFILL:-0}" "$@"; }
 topology() { # library scenario winding expected-exit required...
 	local name=$1-$2-$3 rc=0
 	(cd "$output/runs" && env_run gtimeout -k 2 60 "$output/$1/topology" "$output/shaders" "$2" "$3" "$name") > "$output/runs/$name.log" 2>&1 || rc=$?
@@ -114,6 +114,15 @@ PREFILL=2 topology dev mixed cw 0 "TES_TOPOLOGY PASS"
 for scenario in reject-quads reject-fractional reject-point-mode reject-lower-left reject-descriptor reject-push-constant reject-cache reject-first-vertex reject-instances; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
 topology no-admission reject-no-admission ccw 0 "TES_TOPOLOGY PASS"
 topology shipping public-device-gate ccw 0 "TES_TOPOLOGY PASS"
+# 2b. Ordinary tessellation keeps float32 TCS levels until Vulkan classification, in every draw command, on the
+# shipping library too: the image, tessellation and TES-visible levels match the Vulkan level representative.
+# Metal shader validation makes ordinary indirect tessellation draw nothing, before and after this change
+# (the VS runs, no TES does): indirect commands run under Metal API validation only.
+for library in dev shipping; do
+	for command in direct indexed; do topology "$library" "ordinary-levels-$command" ccw 0 "TES_TOPOLOGY PASS"; done
+	for command in indirect indexed-indirect; do SHADER_VALIDATION=0 topology "$library" "ordinary-levels-$command" ccw 0 "TES_TOPOLOGY PASS"; done
+	topology "$library" ordinary-levels-direct cw 0 "TES_TOPOLOGY PASS"
+done
 # 3. Pilot guarantees kept: fixture pixels, compute-bind recording guards, refusals.
 pilot dev ordered ordered.frag
 pilot dev swapped ordered-swapped.frag
@@ -135,6 +144,14 @@ grep -l 'spvTessellationFactorsFloat' "$output"/dump/shader-tes-*.metal > "$outp
 grep -h 'spvTessLevel\[gl_PrimitiveID\]\.outer\[0\]' "$output"/dump/shader-tcs-*.metal | tee "$output/float32-store.txt"
 if grep -q 'half(' "$output/float32-store.txt"; then echo "FAIL: TCS level store still converts to half"; exit 1; fi
 echo "float32 TessLevel ABI: TCS $(wc -l < "$output/float32-tcs.txt" | tr -d ' ') file(s), TES $(wc -l < "$output/float32-tes.txt" | tr -d ' ') file(s)"
-( cd "$output" && shasum -a 256 shaders/* */PROVENANCE.txt */mutation.diff runs/* dump/* scratch.log float32-*.txt dev/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib > EVIDENCE.sha256 )
+# Unproven ordinary modes keep the half factors: fractional spacing and quads compile their TCS without float32.
+for mode in fractional quads; do
+	mkdir -p "$output/dump-$mode"
+	(cd "$output/runs" && env_run MVK_CONFIG_SHADER_DUMP_DIR="$output/dump-$mode" "$output/dev/topology" "$output/shaders" "reject-$mode" ccw "dump-$mode") > "$output/runs/dump-$mode.log" 2>&1
+	grep -l 'TessellationFactorsHalf\* spvTessLevel' "$output/dump-$mode"/shader-tcs-*.metal > "$output/half-$mode.txt"
+	if grep -l 'spvTessellationFactorsFloat' "$output/dump-$mode"/shader-tcs-*.metal; then echo "FAIL: unproven $mode TCS uses float32 levels"; exit 1; fi
+	echo "half TessLevel ABI kept for ordinary $mode: TCS $(wc -l < "$output/half-$mode.txt" | tr -d ' ') file(s)"
+done
+( cd "$output" && shasum -a 256 shaders/* */PROVENANCE.txt */mutation.diff runs/* dump/* dump-*/* scratch.log float32-*.txt half-*.txt dev/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib > EVIDENCE.sha256 )
 git -C "$root" ls-files -s MoltenVK MoltenVKShaderConverter ExternalRevisions > "$output/SOURCE-INDEX.txt"
 echo "PERVERTEX_TES_TOPOLOGY PASS: $cases cases on $head"
