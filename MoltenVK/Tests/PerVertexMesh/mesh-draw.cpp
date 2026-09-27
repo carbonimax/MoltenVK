@@ -12,12 +12,18 @@
 // rival with the corners rotated, from a rival with the values degraded as a type error would (32-bit integers
 // through float, floats through half, half bits read as an integer, 16-bit integers with the other extension) and,
 // on two workgroups, from a rival where each workgroup reads the other's values.
+// The resource-* scenarios (forms.mesh with RESOURCE, resource.frag) check the fragment resources of a PerVertexKHR mesh
+// pipeline the same way: a table read through a buffer device address from the push constants, a storage buffer from a
+// descriptor set and a push constant salt, each indexed by the PerVertexKHR corners. resource-bda-other pushes the
+// address of another table and must read it. resource-unresident is an opt-in witness with invalid usage, run only on
+// request: it reads a table created without device address usage, which MoltenVK never makes resident, and reports
+// whether its absence is visible.
 // Usage: mesh-draw <shader-dir> <scenario>
 //   draw | grid | twice | pervertex | pervertex-swapped | pervertex-permuted | pervertex-block-output | barycentric
 //   | barycentric-permuted
 //   | pervertex-consistency | form-uint | form-swapped | form-ivec2 | form-vec3 | form-uvec3 | form-components
 //   | form-fewer | form-scalar | form-array1 | form-array2 | form-half | form-int16 | form-uint16 | form-mixed
-//   | form-grid | reject-task | reject-descriptor | reject-per-primitive | reject-pervertex-block
+//   | form-grid | resource-bda | resource-bda-other | resource-unresident | model-check | reject-task | reject-descriptor | reject-per-primitive | reject-pervertex-block
 //   | reject-pervertex-matrix | reject-specialization | reject-indirect | reject-draw-id | reject-draw-id-uint
 //   | reject-buffer-address | no-adapter | public-device-gate
 // The refusal scenarios only create pipelines: nothing they build is ever submitted.
@@ -174,6 +180,56 @@ static void formExpected(const Form& form, uint32_t group, const int* corners, c
 	out[3] = kTag;
 }
 
+// Fragment resources of resource.frag: value(tag, i) fills entry i of a buffer, with tags A for the pushed table,
+// B for another addressable table, C for the storage buffer and D for the table without device address usage.
+static uint32_t resourceValue(uint32_t tag, uint32_t i) { return tag ? (tag << 28 | (i + 1) * 0x00012345u) : 0; }
+static const uint32_t kSalt = 0x5A17C0DEu;
+struct Resource { const char* name; uint32_t table, rival; bool unresident; };
+static const std::vector<Resource> kResources = {
+	{"resource-bda", 0xA, 0xB, false},
+	{"resource-bda-other", 0xB, 0xA, false},
+	{"resource-unresident", 0xD, 0xA, true},
+};
+static void resourceExpected(uint32_t table, uint32_t storage, uint32_t salt, const int* corners, const int order[3], uint32_t out[4]) {
+	for (uint32_t j = 0; j < 3; ++j) out[j] = resourceValue(table, uint32_t(corners[order[j]]));
+	out[3] = resourceValue(storage, uint32_t(corners[order[2]])) ^ salt;
+}
+
+// Compares a resource-* image with its model and with rivals that must each match at most 10% of the checked pixels:
+// rotated corners, the other table, resources read as zeros, and a missing push constant salt. A null image checks
+// that the model tells its rivals apart.
+static bool checkResource(const Resource& resource, const uint32_t* image) {
+	static const int kOrder[3] = {0, 1, 2}, kRotate[3] = {1, 2, 0};
+	uint32_t checked = 0, mismatch = 0, background = 0, rivals[4] = {};
+	for (uint32_t y = 0; y < kSize; ++y) for (uint32_t x = 0; x < kSize; ++x) {
+		uint32_t group = 0, want[4], rival[4][4];
+		const int* corners = nullptr;
+		float lambda[3];
+		bool outside = false;
+		const uint32_t* p = image ? &image[4 * (y * kSize + x)] : nullptr;
+		if (!locate(int(x), int(y), 1, 0u, group, corners, lambda, outside)) {
+			if (outside && p) background += p[0] != kClear || p[1] != kClear || p[2] != kClear || p[3] != kClear;
+			continue;
+		}
+		++checked;
+		resourceExpected(resource.table, 0xC, kSalt, corners, kOrder, want);
+		resourceExpected(resource.table, 0xC, kSalt, corners, kRotate, rival[0]);
+		resourceExpected(resource.rival, 0xC, kSalt, corners, kOrder, rival[1]);
+		resourceExpected(0, 0, kSalt, corners, kOrder, rival[2]);
+		resourceExpected(resource.table, 0xC, 0, corners, kOrder, rival[3]);
+		if (!p) p = want;
+		if (memcmp(p, want, sizeof(want)) && !mismatch++) {
+			std::printf("  first mismatch at (%u,%u): got %08x %08x %08x %08x, expected %08x %08x %08x %08x\n", x, y, p[0], p[1], p[2], p[3], want[0], want[1], want[2], want[3]);
+		}
+		for (int r = 0; r < 4; ++r) rivals[r] += !memcmp(p, rival[r], sizeof(want));
+	}
+	bool pass = checked > 0 && !mismatch && !background;
+	for (uint32_t matches : rivals) pass &= matches * 10 <= checked;
+	std::printf("  %s exact resources: checked=%u mismatch=%u background_changed=%u rival_matches corner=%u other_table=%u zeros=%u no_salt=%u (at most %u)\n",
+	            resource.name, checked, mismatch, background, rivals[0], rivals[1], rivals[2], rivals[3], checked / 10);
+	return pass;
+}
+
 // Compares a form-* image with its model and with the rivals, which must each match at most 10% of the checked pixels.
 // With a null image, compares the model with itself: the CPU check that every rival is told apart before any GPU run.
 static bool checkForm(const Form& form, const uint32_t* image) {
@@ -217,14 +273,18 @@ int main(int argc, char** argv) {
 	try {
 		if (argc != 3) throw std::runtime_error("Usage: mesh-draw <shader-dir> <scenario>");
 		const std::string shaders = argv[1], scenario = argv[2];
-	if (scenario == "model-check") {  // CPU only: no Vulkan instance, no GPU.
-		bool pass = true;
-		for (const auto& form : kForms) pass &= checkForm(form, nullptr);
-		std::printf("MESH_DRAW %s model-check: %zu form models tell their corner, type and workgroup rivals apart\n", pass ? "PASS" : "FAIL", kForms.size());
-		return pass ? 0 : 2;
-	}
-	const Form* form = nullptr;
-	for (const auto& candidate : kForms) if (scenario == candidate.name) form = &candidate;
+		if (scenario == "model-check") {  // CPU only: no Vulkan instance, no GPU.
+			bool pass = true;
+			for (const auto& form : kForms) pass &= checkForm(form, nullptr);
+			for (const auto& resource : kResources) pass &= checkResource(resource, nullptr);
+			std::printf("MESH_DRAW %s model-check: %zu form and %zu resource models tell their rivals apart\n", pass ? "PASS" : "FAIL", kForms.size(), kResources.size());
+			return pass ? 0 : 2;
+		}
+		const Form* form = nullptr;
+		for (const auto& candidate : kForms) if (scenario == candidate.name) form = &candidate;
+		const Resource* resource = nullptr;
+		for (const auto& candidate : kResources) if (scenario == candidate.name) resource = &candidate;
+		const bool exact = form || resource;
 		VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
 		app.pApplicationName = "PerVertexKHR mesh draw";
 		app.apiVersion = VK_API_VERSION_1_3;
@@ -324,7 +384,7 @@ int main(int argc, char** argv) {
 			throw std::runtime_error("No memory type");
 		};
 		VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-		const uint32_t pixelBytes = form ? 16 : 4;
+		const uint32_t pixelBytes = exact ? 16 : 4;
 		bufferInfo.size = kSize * kSize * 16;
 		bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 		VkBuffer readback = VK_NULL_HANDLE;
@@ -342,7 +402,7 @@ int main(int argc, char** argv) {
 
 		VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
 		imageInfo.imageType = VK_IMAGE_TYPE_2D;
-		imageInfo.format = form ? VK_FORMAT_R32G32B32A32_UINT : VK_FORMAT_R8G8B8A8_UNORM;
+		imageInfo.format = exact ? VK_FORMAT_R32G32B32A32_UINT : VK_FORMAT_R8G8B8A8_UNORM;
 		imageInfo.extent = {kSize, kSize, 1};
 		imageInfo.mipLevels = imageInfo.arrayLayers = 1;
 		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -401,6 +461,18 @@ int main(int argc, char** argv) {
 		layoutInfo.setLayoutCount = 1;
 		layoutInfo.pSetLayouts = &setLayout;
 		check(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &uniformLayout), "Create uniform layout");
+		// resource.frag: a fragment storage buffer at set 0, binding 0, and 16 bytes of fragment push constants.
+		VkDescriptorSetLayoutBinding storageBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+		setLayoutInfo.pBindings = &storageBinding;
+		VkDescriptorSetLayout storageSetLayout = VK_NULL_HANDLE;
+		check(vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &storageSetLayout), "Create storage set layout");
+		struct Push { VkDeviceAddress table; uint32_t salt, pad; };
+		VkPushConstantRange pushRange{VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Push)};
+		layoutInfo.pSetLayouts = &storageSetLayout;
+		layoutInfo.pushConstantRangeCount = 1;
+		layoutInfo.pPushConstantRanges = &pushRange;
+		VkPipelineLayout resourceLayout = VK_NULL_HANDLE;
+		check(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &resourceLayout), "Create resource layout");
 
 		auto module = [&](const std::string& name) {
 			auto code = readSpirv(shaders + "/" + name);
@@ -490,10 +562,65 @@ int main(int argc, char** argv) {
 		};
 		const Render* render = nullptr;
 		for (const auto& candidate : renders) if (scenario == candidate.name) render = &candidate;
-		if (!render && !form) throw std::runtime_error("Unknown scenario");
+		if (!render && !exact) throw std::runtime_error("Unknown scenario");
 		const bool grid = scenario == "grid" || (form && form->grid), twice = scenario == "twice", indirect = scenario == "reject-indirect";
 		VkPipeline pipeline = VK_NULL_HANDLE;
-		check(createPipeline(form ? form->mesh : render->mesh, false, emptyLayout, pipeline, form ? form->fragment : render->fragment), "Create mesh pipeline");
+		if (resource) check(createPipeline("forms-resource.mesh.spv", false, resourceLayout, pipeline, "resource.frag.spv"), "Create mesh pipeline");
+		else check(createPipeline(form ? form->mesh : render->mesh, false, emptyLayout, pipeline, form ? form->fragment : render->fragment), "Create mesh pipeline");
+		// resource-*: tables A and B with device address usage, storage buffer C, and for the witness table D without
+		// device address usage. Each buffer has its own allocation, so that none is resident through another.
+		auto tableBuffer = [&](uint32_t tag, bool addressable) {
+			VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+			info.size = 16 * sizeof(uint32_t);
+			info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | (addressable ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0);
+			VkBuffer buffer = VK_NULL_HANDLE;
+			check(vkCreateBuffer(device, &info, nullptr, &buffer), "Create table buffer");
+			VkMemoryRequirements tableRequirements{};
+			vkGetBufferMemoryRequirements(device, buffer, &tableRequirements);
+			VkMemoryAllocateFlagsInfo flags{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
+			flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+			VkMemoryAllocateInfo tableAllocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+			tableAllocation.pNext = addressable ? &flags : nullptr;
+			tableAllocation.allocationSize = tableRequirements.size;
+			tableAllocation.memoryTypeIndex = memoryType(tableRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+			VkDeviceMemory memory = VK_NULL_HANDLE;
+			check(vkAllocateMemory(device, &tableAllocation, nullptr, &memory), "Allocate table");
+			check(vkBindBufferMemory(device, buffer, memory, 0), "Bind table");
+			void* data = nullptr;
+			check(vkMapMemory(device, memory, 0, VK_WHOLE_SIZE, 0, &data), "Map table");
+			for (uint32_t i = 0; i < 16; ++i) static_cast<uint32_t*>(data)[i] = resourceValue(tag, i);
+			vkUnmapMemory(device, memory);
+			return buffer;
+		};
+		VkDescriptorSet storageSet = VK_NULL_HANDLE;
+		Push push{0, kSalt, 0};
+		if (resource) {
+			VkBuffer tableA = tableBuffer(0xA, true), tableB = tableBuffer(0xB, true), storage = tableBuffer(0xC, false);
+			VkBuffer pushed = resource->unresident ? tableBuffer(0xD, false) : resource->table == 0xA ? tableA : tableB;
+			VkBufferDeviceAddressInfo addressInfo{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+			addressInfo.buffer = pushed;
+			push.table = vkGetBufferDeviceAddress(device, &addressInfo);  // Invalid usage for table D, on purpose.
+			VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+			VkDescriptorPoolCreateInfo descriptorPoolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+			descriptorPoolInfo.maxSets = 1;
+			descriptorPoolInfo.poolSizeCount = 1;
+			descriptorPoolInfo.pPoolSizes = &poolSize;
+			VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+			check(vkCreateDescriptorPool(device, &descriptorPoolInfo, nullptr, &descriptorPool), "Create descriptor pool");
+			VkDescriptorSetAllocateInfo setAllocation{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+			setAllocation.descriptorPool = descriptorPool;
+			setAllocation.descriptorSetCount = 1;
+			setAllocation.pSetLayouts = &storageSetLayout;
+			check(vkAllocateDescriptorSets(device, &setAllocation, &storageSet), "Allocate descriptor set");
+			VkDescriptorBufferInfo storageInfo{storage, 0, VK_WHOLE_SIZE};
+			VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+			write.dstSet = storageSet;
+			write.descriptorCount = 1;
+			write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			write.pBufferInfo = &storageInfo;
+			vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+			std::printf("RESOURCE table=%X address=0x%llx storage=C salt=%08x\n", resource->unresident ? 0xDu : resource->table, (unsigned long long)push.table, kSalt);
+		}
 		VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
 		VkCommandPool pool = VK_NULL_HANDLE;
 		check(vkCreateCommandPool(device, &poolInfo, nullptr, &pool), "Create command pool");
@@ -506,7 +633,7 @@ int main(int argc, char** argv) {
 		check(vkBeginCommandBuffer(command, &begin), "Begin command buffer");
 		VkClearValue clear{};
 		clear.color.float32[0] = clear.color.float32[2] = clear.color.float32[3] = 1.0f;
-		if (form) for (auto& word : clear.color.uint32) word = kClear;
+		if (exact) for (auto& word : clear.color.uint32) word = kClear;
 		VkRenderPassBeginInfo passBegin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
 		passBegin.renderPass = renderPass;
 		passBegin.framebuffer = framebuffer;
@@ -515,6 +642,10 @@ int main(int argc, char** argv) {
 		passBegin.pClearValues = &clear;
 		vkCmdBeginRenderPass(command, &passBegin, VK_SUBPASS_CONTENTS_INLINE);
 		vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+		if (resource) {
+			vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, resourceLayout, 0, 1, &storageSet, 0, nullptr);
+			vkCmdPushConstants(command, resourceLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+		}
 		if (indirect) drawMeshTasksIndirect(command, readback, 0, 1, sizeof(VkDrawMeshTasksIndirectCommandEXT));
 		else if (twice) { drawMeshTasks(command, 1, 1, 1); drawMeshTasks(command, 2, 1, 1); }  // The second draw repaints group 0.
 		else drawMeshTasks(command, grid ? 2 : 1, 1, 1);
@@ -534,9 +665,27 @@ int main(int argc, char** argv) {
 		VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
 		submit.commandBufferCount = 1;
 		submit.pCommandBuffers = &command;
-		check(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE), "Submit");
-		check(vkQueueWaitIdle(queue), "Wait");
+		VkResult submitted = vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE);
+		VkResult waited = submitted == VK_SUCCESS ? vkQueueWaitIdle(queue) : submitted;
+		if (resource && resource->unresident && waited != VK_SUCCESS) {
+			std::printf("ABSENT_WITNESS detected %s: the queue failed (%d) reading the non-resident table\n", scenario.c_str(), waited);
+			return 0;
+		}
+		check(submitted, "Submit");
+		check(waited, "Wait");
 		std::ofstream(scenario + ".rgba", std::ios::binary).write(static_cast<const char*>(mapped), kSize * kSize * pixelBytes);
+		if (resource) {
+			bool pass = checkResource(*resource, static_cast<const uint32_t*>(mapped));
+			vkDeviceWaitIdle(device);
+			if (resource->unresident) {
+				// The witness detects the absent table unless it read back exactly the values of D.
+				std::printf("ABSENT_WITNESS %s %s: %s\n", pass ? "NOT-detected" : "detected", scenario.c_str(),
+				            pass ? "the non-resident table read back its values; check the Metal validation log" : "the non-resident table did not read back its values");
+				return pass ? 3 : 0;
+			}
+			std::printf("MESH_DRAW %s %s\n", pass ? "PASS" : "FAIL", scenario.c_str());
+			return pass ? 0 : 2;
+		}
 		if (form) {
 			bool pass = checkForm(*form, static_cast<const uint32_t*>(mapped));
 			std::printf("MESH_DRAW %s %s\n", pass ? "PASS" : "FAIL", scenario.c_str());

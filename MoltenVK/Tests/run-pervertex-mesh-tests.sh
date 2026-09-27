@@ -45,6 +45,8 @@ compile pervertex.frag pervertex-matrix.frag.spv -DMATRIX
 compile forms.mesh forms.mesh.spv
 compile forms.mesh forms16.mesh.spv -DSIXTEEN
 compile forms.mesh forms-grid.mesh.spv -DGRID
+compile forms.mesh forms-resource.mesh.spv -DRESOURCE
+compile resource.frag resource.frag.spv
 forms="uint swapped ivec2 vec3 uvec3 components fewer scalar array1 array2 half int16 uint16 mixed"
 for form in $forms; do compile forms.frag "form-$form.frag.spv" "-D$(tr a-z A-Z <<< "$form")"; done
 for name in dev $([[ $cpu_only ]] || echo shipping); do
@@ -87,6 +89,7 @@ for form in $forms; do
 	case $form in half|int16|uint16) link "form-$form" forms16.mesh.spv "form-$form.frag.spv" ;; *) link "form-$form" forms.mesh.spv "form-$form.frag.spv" ;; esac
 done
 link form-grid forms-grid.mesh.spv form-mixed.frag.spv
+link resource forms-resource.mesh.spv resource.frag.spv
 # A mesh translated with a zero workgroup size never leaves its output loops (SPIRV-Cross before 8cd36d69).
 if grep -l 'gl_WorkGroupSize \[\[maybe_unused\]\] = uint3(0, 0, 0)' "$preflight"/*.mesh.metal; then echo "STOP: zero mesh workgroup size would hang the GPU"; exit 1; fi
 syntax=0
@@ -117,7 +120,7 @@ run() { # library scenario
 	if [[ $verdict != PASS ]]; then echo "STOP: inspect $log before any further GPU work"; exit 1; fi
 }
 for scenario in draw grid twice pervertex pervertex-swapped pervertex-permuted pervertex-block-output barycentric barycentric-permuted pervertex-consistency \
-	$(for form in $forms grid; do echo "form-$form"; done) reject-task reject-descriptor reject-per-primitive reject-pervertex-block reject-pervertex-matrix reject-specialization reject-indirect \
+	$(for form in $forms grid; do echo "form-$form"; done) resource-bda resource-bda-other reject-task reject-descriptor reject-per-primitive reject-pervertex-block reject-pervertex-matrix reject-specialization reject-indirect \
 	reject-draw-id reject-draw-id-uint reject-buffer-address no-adapter; do run dev "$scenario"; done
 run shipping public-device-gate
 rm -f "$output"/runs/*.rgba
