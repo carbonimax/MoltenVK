@@ -7,6 +7,7 @@
 // recorded to check DrawID, first/base values, instances and exactly-once side effects.
 #define VK_ENABLE_BETA_EXTENSIONS 1 // VK_KHR_portability_subset
 #include <vulkan/vulkan.h>
+#include <dlfcn.h>
 
 #include <algorithm>
 #include <array>
@@ -169,6 +170,8 @@ int main(int argc, char** argv) {
 		std::vector<const char*> deviceExtensions{VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME};
 		if (dynamicRestart) deviceExtensions.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME);
 		for (auto candidate : physicals) {
+			// The combined test library exposes an adapter; shipping libraries have no such symbol.
+			if (auto enable = reinterpret_cast<void (*)(VkPhysicalDevice)>(dlsym(RTLD_DEFAULT, "mvkEnableTESFixtureDevice"))) { enable(candidate); }
 			check(vkEnumerateDeviceExtensionProperties(candidate, nullptr, &count, nullptr), "Enumerate device extensions");
 			std::vector<VkExtensionProperties> extensions(count);
 			check(vkEnumerateDeviceExtensionProperties(candidate, nullptr, &count, extensions.data()), "Read device extensions");
