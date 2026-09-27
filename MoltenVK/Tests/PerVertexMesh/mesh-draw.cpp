@@ -6,7 +6,8 @@
 // model of the Vulkan rasterization (y down), outside pixels must keep the clear, and the refused forms must fail
 // deterministically. The shipping library must expose neither the extension nor the feature.
 // Usage: mesh-draw <shader-dir> <scenario>
-//   draw | grid | twice | reject-task | reject-descriptor | reject-per-primitive | reject-pervertex | reject-indirect | no-adapter | public-device-gate
+//   draw | grid | twice | reject-task | reject-descriptor | reject-per-primitive | reject-pervertex | reject-specialization | reject-indirect
+//   | no-adapter | public-device-gate
 #define VK_ENABLE_BETA_EXTENSIONS 1
 #include <vulkan/vulkan.h>
 
@@ -233,7 +234,11 @@ int main(int argc, char** argv) {
 			check(vkCreateShaderModule(device, &info, nullptr, &result), "Create shader module");
 			return result;
 		};
-		auto createPipeline = [&](const std::string& mesh, bool task, VkPipelineLayout layout, VkPipeline& pipeline, const std::string& fragment = "interp.frag.spv") {
+		// A specialization map on the mesh stage could change its workgroup size: the first path refuses it.
+		const uint32_t specializationValue = 1;
+		const VkSpecializationMapEntry specializationEntry{0, 0, sizeof(uint32_t)};
+		const VkSpecializationInfo specialization{1, &specializationEntry, sizeof(uint32_t), &specializationValue};
+		auto createPipeline = [&](const std::string& mesh, bool task, VkPipelineLayout layout, VkPipeline& pipeline, const std::string& fragment = "interp.frag.spv", bool specialize = false) {
 			std::vector<VkPipelineShaderStageCreateInfo> stages;
 			auto stage = [&](VkShaderStageFlagBits bit, const std::string& name) {
 				VkPipelineShaderStageCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
@@ -244,6 +249,7 @@ int main(int argc, char** argv) {
 			};
 			if (task) stage(VK_SHADER_STAGE_TASK_BIT_EXT, "task.task.spv");
 			stage(VK_SHADER_STAGE_MESH_BIT_EXT, mesh);
+			if (specialize) stages.back().pSpecializationInfo = &specialization;
 			stage(VK_SHADER_STAGE_FRAGMENT_BIT, fragment);
 			VkViewport viewport{0, 0, float(kSize), float(kSize), 0, 1};
 			VkRect2D scissor{{0, 0}, {kSize, kSize}};
@@ -274,11 +280,12 @@ int main(int argc, char** argv) {
 			return vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline);
 		};
 
-		if (scenario == "reject-task" || scenario == "reject-descriptor" || scenario == "reject-per-primitive" || scenario == "reject-pervertex") {
+		if (scenario == "reject-task" || scenario == "reject-descriptor" || scenario == "reject-per-primitive" || scenario == "reject-pervertex" || scenario == "reject-specialization") {
 			VkPipeline pipeline = VK_NULL_HANDLE;
 			VkResult result = scenario == "reject-task" ? createPipeline("mesh.mesh.spv", true, emptyLayout, pipeline)
 			                : scenario == "reject-descriptor" ? createPipeline("descriptor.mesh.spv", false, uniformLayout, pipeline)
 			                : scenario == "reject-pervertex" ? createPipeline("mesh.mesh.spv", false, emptyLayout, pipeline, "pervertex.frag.spv")
+			                : scenario == "reject-specialization" ? createPipeline("mesh.mesh.spv", false, emptyLayout, pipeline, "interp.frag.spv", true)
 			                : createPipeline("per-primitive.mesh.spv", false, emptyLayout, pipeline);
 			bool pass = result == VK_ERROR_FEATURE_NOT_PRESENT;
 			std::printf("MESH_DRAW %s %s: vkCreateGraphicsPipelines=%d expected=%d\n", pass ? "PASS" : "FAIL", scenario.c_str(), result, VK_ERROR_FEATURE_NOT_PRESENT);
