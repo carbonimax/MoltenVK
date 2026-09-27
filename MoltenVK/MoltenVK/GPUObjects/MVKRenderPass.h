@@ -432,7 +432,7 @@ protected:
 #pragma mark Support functions
 
 /** Checks native resolve support for a portable indexed capture split. Memoryless views are checked by the caller. */
-const char* mvkGetPerVertexResolveError(const MVKPhysicalDeviceMetalFeatures& features, MVKPixelFormats* formats, VkFormat resolveFormat, VkImageAspectFlagBits aspect, VkResolveModeFlagBits mode);
+const char* mvkGetPerVertexResolveError(const MVKPhysicalDeviceMetalFeatures& features, MVKPixelFormats* formats, VkFormat resolveFormat, VkImageAspectFlagBits aspect, VkResolveModeFlagBits mode, VkRenderingFlags renderingFlags);
 
 /** Returns whether the view mask uses multiview. */
 static constexpr bool mvkIsMultiview(uint32_t viewMask) { return viewMask != 0; }

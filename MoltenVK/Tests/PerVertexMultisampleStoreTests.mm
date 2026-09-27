@@ -12,12 +12,16 @@ struct MVKBaseObject {
 struct MVKRenderPass;
 struct MVKRenderSubpass;
 struct MVKCommandEncoder;
+struct MVKFramebuffer {};
 using MVKMTLFmtCaps = uint32_t;
 constexpr MVKMTLFmtCaps kMVKMTLFmtCapsResolve = 1;
 struct MVKPixelFormats {
 	uint32_t getCapabilities(MTLPixelFormat) { return kMVKMTLFmtCapsResolve; }
 	bool isDepthFormat(MTLPixelFormat format) { return format == MTLPixelFormatDepth32Float; }
 	bool isStencilFormat(MTLPixelFormat format) { return format == MTLPixelFormatStencil8; }
+	MTLClearColor getMTLClearColor(VkClearColorValue, VkFormat) { return MTLClearColorMake(0, 0, 0, 0); }
+	double getMTLClearDepthValue(VkClearDepthStencilValue value) { return value.depth; }
+	uint32_t getMTLClearStencilValue(VkClearDepthStencilValue value) { return value.stencil; }
 };
 struct MVKImage {
 	MTLStorageMode storage = MTLStorageModePrivate;
@@ -27,13 +31,16 @@ struct MVKImage {
 };
 struct MVKImageView {
 	MVKImage image;
+	id<MTLTexture> texture = nil;
 	MVKImage* getImage() { return &image; }
 	MTLPixelFormat getMTLPixelFormat() { return image.format; }
-	void populateMTLRenderPassAttachmentDescriptor(MTLRenderPassAttachmentDescriptor*) {}
+	void populateMTLRenderPassAttachmentDescriptor(MTLRenderPassAttachmentDescriptor* descriptor) { descriptor.texture = texture; }
+	void populateMTLRenderPassAttachmentDescriptorResolve(MTLRenderPassAttachmentDescriptor* descriptor) { descriptor.resolveTexture = texture; }
 };
 struct MVKAttachmentDescription {
 	MVKRenderPass* _renderPass = nullptr;
 	VkAttachmentDescription2 _info{};
+	VkFormat getFormat() { return _info.format; }
 	bool isFirstUseOfAttachment(MVKRenderSubpass*) { return true; }
 	bool isLastUseOfAttachment(MVKRenderSubpass*) { return true; }
 	MTLStoreAction getMTLStoreAction(MVKRenderSubpass*, bool, bool, bool, bool, bool, bool);
@@ -55,6 +62,10 @@ struct MVKRenderSubpass {
 	VkAttachmentReference2 _depthAttachment{}, _stencilAttachment{}, _depthResolveAttachment{}, _stencilResolveAttachment{};
 	VkResolveModeFlagBits _depthResolveMode = VK_RESOLVE_MODE_NONE, _stencilResolveMode = VK_RESOLVE_MODE_NONE;
 	uint32_t getColorAttachmentCount() { return uint32_t(_colorAttachments.size()); }
+	bool isMultiview() { return false; }
+	uint32_t getFirstViewIndexInMetalPass(uint32_t) { return 0; }
+	VkSampleCountFlagBits _defaultSampleCount = VK_SAMPLE_COUNT_4_BIT;
+	void populateMTLRenderPassDescriptor(MTLRenderPassDescriptor*, uint32_t, MVKFramebuffer*, MVKArrayRef<MVKImageView*const>, MVKArrayRef<const VkClearValue>, bool, bool);
 	void encodeStoreActions(MVKCommandEncoder*, bool, MVKArrayRef<MVKImageView*const>, bool);
 	unsigned softwareResolveCalls = 0;
 	void resolveUnresolvableAttachments(MVKCommandEncoder*, MVKArrayRef<MVKImageView*>) { ++softwareResolveCalls; }
@@ -62,6 +73,7 @@ struct MVKRenderSubpass {
 @interface StoreEncoder : NSObject {
 @public
 	MTLStoreAction colors[3], depth, stencil;
+	bool colorResolveTextures[3], depthResolveTexture, stencilResolveTexture;
 }
 - (void)setColorStoreAction:(MTLStoreAction)action atIndex:(NSUInteger)index;
 - (void)setDepthStoreAction:(MTLStoreAction)action;
@@ -69,13 +81,14 @@ struct MVKRenderSubpass {
 - (void)updateFence:(id)fence afterStages:(MTLRenderStages)stages;
 @end
 @implementation StoreEncoder
-- (void)setColorStoreAction:(MTLStoreAction)action atIndex:(NSUInteger)index { colors[index] = action; }
-- (void)setDepthStoreAction:(MTLStoreAction)action { depth = action; }
-- (void)setStencilStoreAction:(MTLStoreAction)action { stencil = action; }
+// Match the M4 Metal deferred-store validation contract. Descriptors are populated by production code.
+- (void)setColorStoreAction:(MTLStoreAction)action atIndex:(NSUInteger)index { assert(!colorResolveTextures[index] || action == MTLStoreActionMultisampleResolve || action == MTLStoreActionStoreAndMultisampleResolve); colors[index] = action; }
+- (void)setDepthStoreAction:(MTLStoreAction)action { assert(!depthResolveTexture || action == MTLStoreActionMultisampleResolve || action == MTLStoreActionStoreAndMultisampleResolve); depth = action; }
+- (void)setStencilStoreAction:(MTLStoreAction)action { assert(!stencilResolveTexture || action == MTLStoreActionMultisampleResolve || action == MTLStoreActionStoreAndMultisampleResolve); stencil = action; }
 - (void)updateFence:(id)fence afterStages:(MTLRenderStages)stages {}
 @end
 struct MVKCommandEncoder {
-	bool _isIndexedDraw = false, _isPerVertexRenderSplit = false;
+	bool _isIndexedDraw = false;
 	struct Pipeline { bool portable = false; bool usesPerVertexInputBuffer() { return portable; } } pipeline;
 	Pipeline* getGraphicsPipeline() { return &pipeline; }
 	struct CommandBuffer { bool _hasStageCounterTimestampCommand = false; } commandBuffer;
@@ -165,29 +178,41 @@ int main() {
 		pass.features.combinedStoreResolveAction = true;
 		assert(attachment.getMTLStoreAction(&encoder.subpass, true, false, true, true, false, true) == MTLStoreActionStoreAndMultisampleResolve);
 		assert(attachment.getMTLStoreAction(&encoder.subpass, true, true, false, false, false, true) == MTLStoreActionDontCare);
-		// Active color + depth + stencil resolve attachments: store-only at each indexed split,
-		// normal final resolve at the Vulkan boundary. Ordinary/tessellation splits stay unchanged.
-		for (auto ref : {reference(0), reference(VK_ATTACHMENT_UNUSED), reference(1)}) { encoder.subpass._resolveAttachments.push_back(ref); }
-		encoder.subpass._depthResolveAttachment = reference(2);
-		encoder.subpass._stencilResolveAttachment = reference(3);
+		// The resolve textures remain attached to the already-created encoder. Store alone is invalid.
+		MVKImageView resolves[4];
+		for (unsigned i = 0; i < 4; ++i) {
+			// CPU-only retained objects stand in for textures; no Metal command buffer is submitted.
+			resolves[i].texture = (id<MTLTexture>)[NSObject new];
+			resolves[i].image.format = images[i].image.format;
+			encoder._attachments.push_back(&resolves[i]);
+		}
+		for (auto ref : {reference(4), reference(VK_ATTACHMENT_UNUSED), reference(5)}) { encoder.subpass._resolveAttachments.push_back(ref); }
+		encoder.subpass._depthResolveAttachment = reference(6);
+		encoder.subpass._stencilResolveAttachment = reference(7);
 		encoder.subpass._depthResolveMode = encoder.subpass._stencilResolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
 		StoreEncoder* metal = encoder._mtlRenderEncoder;
+		MTLRenderPassDescriptor* descriptor = [MTLRenderPassDescriptor renderPassDescriptor];
+		VkClearValue clearValues[4]{};
+		encoder.subpass.populateMTLRenderPassDescriptor(descriptor, 0, nullptr, encoder._attachments.contents(), clearValues, true, true);
+		for (unsigned i = 0; i < 3; ++i) { metal->colorResolveTextures[i] = descriptor.colorAttachments[i].resolveTexture != nil; }
+		metal->depthResolveTexture = descriptor.depthAttachment.resolveTexture != nil;
+		metal->stencilResolveTexture = descriptor.stencilAttachment.resolveTexture != nil;
+		assert(metal->colorResolveTextures[0] && !metal->colorResolveTextures[1] && metal->colorResolveTextures[2] && metal->depthResolveTexture && metal->stencilResolveTexture);
 		for (bool combined : {false, true}) {
 			pass.features.combinedStoreResolveAction = combined;
 			for (bool portable : {false, true}) {
 				for (bool indexed : {false, true}) {
 					encoder.pipeline.portable = portable;
 					encoder._isIndexedDraw = indexed;
-					bool deferred = portable && indexed;
 					encoder.subpass.softwareResolveCalls = 0;
 					for (unsigned split = 0; split < 2; ++split) {
 						encoder._mtlRenderEncoder = metal;
 						encoder.finalizeDrawState(kMVKGraphicsStageVertex);
-						MTLStoreAction expected = deferred ? MTLStoreActionStore : combined ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionMultisampleResolve;
+						MTLStoreAction expected = combined ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionMultisampleResolve;
 						for (auto action : encoder.atSplit) { assert(action == expected); }
 						encoder.endMetalRenderEncoding();
-						assert(!encoder._isPerVertexRenderSplit && !encoder._mtlRenderEncoder);
-						assert(encoder.subpass.softwareResolveCalls == (deferred ? 0 : split + 1));
+						assert(!encoder._mtlRenderEncoder);
+						assert(encoder.subpass.softwareResolveCalls == split + 1);
 						for (unsigned i = 0; i < 4; ++i) {
 							auto* descriptor = [MTLRenderPassColorAttachmentDescriptor new];
 							bool clear = pass._attachments[i].populateMTLRenderPassAttachmentDescriptor(descriptor, &encoder.subpass, &images[i], true, true, true, i == 3, true);
@@ -205,12 +230,13 @@ int main() {
 						MTLStoreAction finalAction = combined && storeOp == VK_ATTACHMENT_STORE_OP_STORE ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionMultisampleResolve;
 						assert(metal->colors[0] == finalAction && metal->colors[2] == finalAction && metal->depth == finalAction && metal->stencil == finalAction);
 						encoder.endMetalRenderEncoding();
-						assert(encoder.subpass.softwareResolveCalls == (deferred ? 0 : 2) + ++finalEnds);
+						assert(encoder.subpass.softwareResolveCalls == 2 + ++finalEnds);
 					}
 				}
 			}
 		}
 		[metal release];
-		puts("PASS: production split Store and restart Load for all active MSAA color/depth/stencil aspects; final discard retained; PerVertex-only intermediate resolve suppression and final-boundary resolve; non-PerVertex unchanged (CPU only)");
+		for (auto& resolve : resolves) { [resolve.texture release]; }
+		puts("PASS: production descriptor resolve textures and valid native split store actions; MSAA Store/Load preservation; final resolve retained; non-PerVertex unchanged (CPU only)");
 	}
 }

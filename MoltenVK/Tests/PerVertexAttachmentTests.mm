@@ -53,6 +53,8 @@ struct MVKRenderSubpass {
 	VkSampleCountFlagBits getSampleCount() { return samples; }
 };
 struct MVKRenderPass {
+	VkRenderingFlags flags = 0;
+	VkRenderingFlags getRenderingFlags() { return flags; }
 	struct Attachment { VkFormat format; VkFormat getFormat() { return format; } };
 	std::vector<Attachment> _attachments;
 	MVKRenderSubpass subpass;
@@ -301,6 +303,7 @@ static void checkMultisampleAdmission() {
 	info.pDepthAttachment = &depth;
 	info.pStencilAttachment = &stencil;
 	auto beginDynamic = [&] {
+		pass.flags = info.flags;
 		cb._currentSubpassInfo = {};
 		cb.recordRendering(&info);
 		pass.subpass._colorAttachments.clear();
@@ -323,12 +326,20 @@ static void checkMultisampleAdmission() {
 			attachment->resolveMode = attachment == &color ? VK_RESOLVE_MODE_AVERAGE_BIT : VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
 			beginDynamic();
 			check(true);
+			info.flags = VK_RENDERING_SUSPENDING_BIT;
+			beginDynamic();
+			check(false); // Native resolve texture + suspension's Store is invalid in Metal.
+			info.flags = 0;
 			// Recording re-evaluates device-dependent resolve support at beginRendering.
 			testFeatures.combinedStoreResolveAction = testFeatures.depthResolve = testFeatures.stencilResolve = false;
 		}
 		attachment->resolveImageView = VK_NULL_HANDLE;
 		attachment->resolveMode = VK_RESOLVE_MODE_NONE;
 	}
+	info.flags = VK_RENDERING_SUSPENDING_BIT;
+	beginDynamic();
+	check(true); // Suspension without resolves still stores the persistent MSAA source.
+	info.flags = 0;
 	// Begin-rendering mode validation is necessary: the dynamic subpass stores color references, not modes.
 	testFeatures.combinedStoreResolveAction = testFeatures.depthResolve = testFeatures.stencilResolve = true;
 	color.resolveImageView = reinterpret_cast<VkImageView>(&target);
