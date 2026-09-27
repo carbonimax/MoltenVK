@@ -156,7 +156,7 @@ public:
 	/** Called when a MVKCmdExecuteCommands is added to this command buffer. */
 	VkResult recordExecuteCommands(MVKArrayRef<MVKCommandBuffer*const> secondaryCommandBuffers);
 
-	void recordRenderPass(MVKFramebuffer* framebuffer) { _recordedFramebuffer = framebuffer; _recordedRenderingError = nullptr; }
+	void recordRenderPass(MVKArrayRef<MVKImageView*> attachments, bool attachmentsKnown = true);
 	void recordRendering(const VkRenderingInfo* renderingInfo);
 	void recordIndexType(VkIndexType indexType) { _recordedIndexType = indexType; }
 	VkResult recordPerVertexDraw(uint32_t vertexCount, uint32_t instanceCount, bool indexed = false);
@@ -215,7 +215,7 @@ protected:
 	MVKPerVertexScratchReservations _prefilledPerVertexScratch;
 	MVKGraphicsPipeline* _recordedPerVertexPipeline = nullptr;
 
-	MVKFramebuffer* _recordedFramebuffer = nullptr;
+	bool _recordedAttachmentsKnown = false;
 	const char* _recordedRenderingError = nullptr;
 	VkIndexType _recordedIndexType = VK_INDEX_TYPE_MAX_ENUM;
 	bool _needsInheritedPerVertexAttachments = false;
@@ -319,6 +319,9 @@ public:
 
 	/** Returns the render subpass that is currently active. */
 	MVKRenderSubpass* getSubpass();
+
+	/** Checks the actual views that must survive an indexed PerVertex compute capture. */
+	const char* getIndexedPerVertexAttachmentError();
 
 	/** Returns the sample count of the current render subpass. */
 	VkSampleCountFlagBits getSampleCount() { return getSubpass()->getSampleCount(); }
