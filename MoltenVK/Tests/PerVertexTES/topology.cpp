@@ -12,7 +12,8 @@
 // "ordinary-levels-*" scenarios need neither the barycentric extension nor the test adapter, so they also run on
 // the shipping library: for TCS levels that half precision would change (nextafter(1,+inf), underflow, infinity),
 // the ordinary pipeline must render and tessellate exactly like the Vulkan level representative computed on the
-// host, and its TES must read the levels exactly as the TCS wrote them. Each Vulkan draw command is covered.
+// host, and its TES must read the levels exactly as the TCS wrote them. Each Vulkan draw command is covered, as
+// one draw and as two draws in the same render pass (two indirect commands for the indirect variants).
 #define VK_ENABLE_BETA_EXTENSIONS 1 // VK_KHR_portability_subset
 #include <vulkan/vulkan.h>
 
@@ -217,11 +218,12 @@ int main(int argc, char** argv) {
 		barycentric.pNext = &drawParameters;
 		if (ordinaryOnly) features.pNext = &drawParameters;
 		vkGetPhysicalDeviceFeatures2(physical, &features);
-		if (!drawParameters.shaderDrawParameters || !features.features.vertexPipelineStoresAndAtomics || !features.features.fragmentStoresAndAtomics) throw std::runtime_error("Draw parameters, vertex or fragment stores unavailable");
+		if (!drawParameters.shaderDrawParameters || !features.features.vertexPipelineStoresAndAtomics || !features.features.fragmentStoresAndAtomics || !features.features.multiDrawIndirect) throw std::runtime_error("Draw parameters, multi-draw indirect, vertex or fragment stores unavailable");
 		features.features = {};
 		features.features.tessellationShader = VK_TRUE;
 		features.features.vertexPipelineStoresAndAtomics = VK_TRUE;
 		features.features.fragmentStoresAndAtomics = VK_TRUE;
+		features.features.multiDrawIndirect = VK_TRUE;
 		float priority = 1;
 		VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
 		queueInfo.queueFamilyIndex = family;
@@ -284,7 +286,8 @@ int main(int argc, char** argv) {
 		// Identity indices and one indirect command for the indexed and indirect draw commands.
 		Buffer indices = makeBuffer(9 * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 		for (uint32_t i = 0; i < 9; ++i) reinterpret_cast<uint32_t*>(indices.data)[i] = i;
-		Buffer indirect = makeBuffer(sizeof(VkDrawIndexedIndirectCommand), VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+		Buffer indirect = makeBuffer(2 * sizeof(VkDrawIndexedIndirectCommand), VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+		bool splitDraw = false;  // Ordinary-only: first patch, then the others, in the same render pass.
 		Buffer fragmentCapture = makeBuffer(kWidth * kHeight * 18 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 		const float scaleValue[4] = {1.0f, 0.5f, 1.0f, 1.0f};
 		memcpy(scale.data, scaleValue, sizeof(scaleValue));
@@ -556,18 +559,19 @@ int main(int argc, char** argv) {
 			VkDeviceSize offset = 0;
 			vkCmdBindVertexBuffers(command, 0, 1, &vertices.buffer, &offset);
 			const uint32_t drawCount = scenario.vertexCount ? scenario.vertexCount : uint32_t(3 * patches.size());
-			if (drawMode == "direct") vkCmdDraw(command, drawCount, instances, firstVertex, 0);
+			const uint32_t parts = splitDraw ? 2 : 1, counts[2] = {splitDraw ? 3 : drawCount, drawCount - 3}, starts[2] = {0, 3};
+			if (drawMode == "direct") for (uint32_t part = 0; part < parts; ++part) vkCmdDraw(command, counts[part], instances, firstVertex + starts[part], 0);
 			else {
 				if (drawMode != "indirect") vkCmdBindIndexBuffer(command, indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-				if (drawMode == "indexed") vkCmdDrawIndexed(command, drawCount, instances, 0, int32_t(firstVertex), 0);
+				if (drawMode == "indexed") for (uint32_t part = 0; part < parts; ++part) vkCmdDrawIndexed(command, counts[part], instances, starts[part], int32_t(firstVertex), 0);
 				else if (drawMode == "indirect") {
-					const VkDrawIndirectCommand arguments{drawCount, instances, firstVertex, 0};
-					memcpy(indirect.data, &arguments, sizeof(arguments));
-					vkCmdDrawIndirect(command, indirect.buffer, 0, 1, sizeof(arguments));
+					const VkDrawIndirectCommand arguments[2] = {{counts[0], instances, firstVertex, 0}, {counts[1], instances, firstVertex + 3, 0}};
+					memcpy(indirect.data, arguments, sizeof(arguments));
+					vkCmdDrawIndirect(command, indirect.buffer, 0, parts, sizeof(VkDrawIndirectCommand));
 				} else {
-					const VkDrawIndexedIndirectCommand arguments{drawCount, instances, 0, int32_t(firstVertex), 0};
-					memcpy(indirect.data, &arguments, sizeof(arguments));
-					vkCmdDrawIndexedIndirect(command, indirect.buffer, 0, 1, sizeof(arguments));
+					const VkDrawIndexedIndirectCommand arguments[2] = {{counts[0], instances, 0, int32_t(firstVertex), 0}, {counts[1], instances, 3, int32_t(firstVertex), 0}};
+					memcpy(indirect.data, arguments, sizeof(arguments));
+					vkCmdDrawIndexedIndirect(command, indirect.buffer, 0, parts, sizeof(VkDrawIndexedIndirectCommand));
 				}
 			}
 			vkCmdEndRenderPass(command);
@@ -634,41 +638,55 @@ int main(int argc, char** argv) {
 			};
 			bool pass = true;
 			auto verdict = [&](bool ok, const char* what) { std::printf("  %s %s\n", ok ? "ok  " : "FAIL", what); pass &= ok; };
-			auto coordinates = [&](const Image& image) {
-				Coordinates result;
+			// TES records keyed by their position too: gl_PrimitiveID restarts with each draw of a split draw.
+			using Records = std::set<std::array<uint32_t, 6>>;
+			auto records = [&](const Image& image, bool primitive) {
+				Records result;
 				for (uint32_t slot = 0; slot < std::min(image.tesCapture[0], kTesCaptureSlots); ++slot) {
 					const uint32_t* w = &image.tesCapture[1 + kCaptureWords * slot];
-					result[{w[0], w[1], w[2], w[3]}] = {w[4], w[5]};
+					result.insert({primitive ? w[0] : 0u, w[1], w[2], w[3], w[4], w[5]});
 				}
 				return result;
 			};
+			auto alpha = [](const Image& image) { std::vector<uint8_t> result; for (size_t i = 3; i < image.rgba.size(); i += 4) result.push_back(image.rgba[i]); return result; };
 			std::printf("draw command: %s\n", drawMode.c_str());
 			for (size_t c = 0; c < cases.size(); ++c) {
 				const Case& test = cases[c];
-				const std::string name = "case" + std::to_string(c);
-				PipelineOptions o{"topology.tesc.spv", tese, "ordinary.frag.spv"};
-				Image image = render(o, test.levels, name + "-levels"), reference = render(o, test.representative, name + "-representative");
-				o.tese = captureTese;
-				o.capture = 1;
-				Image captured = render(o, test.levels, name + "-levels-capture"), referenceCaptured = render(o, test.representative, name + "-representative-capture");
-				bool submitted = true;
-				for (const Image* i : {&image, &reference, &captured, &referenceCaptured}) submitted &= i->submit == VK_SUCCESS && i->wait == VK_SUCCESS;
-				uint32_t pixels = 0;
-				for (uint32_t i = 0; i < kWidth * kHeight; ++i) pixels += image.rgba[4 * i + 3] != 0;
-				// The TES must see the TCS values, not their half conversion nor their Vulkan rounding.
-				uint32_t levelMismatch = 0, invocations = std::min(captured.tesCapture[0], kTesCaptureSlots);
-				for (uint32_t slot = 0; slot < invocations; ++slot) {
-					const uint32_t* w = &captured.tesCapture[1 + kCaptureWords * slot];
-					for (int k = 0; k < 4; ++k) levelMismatch += w[0] >= test.levels.size() || w[6 + k] != test.levels[w[0]].levels[k];
+				Image single, singleCaptured;
+				for (bool split : {false, true}) {
+					splitDraw = split;
+					const std::string name = "case" + std::to_string(c) + (split ? "-split" : "");
+					PipelineOptions o{"topology.tesc.spv", tese, "ordinary.frag.spv"};
+					Image image = render(o, test.levels, name + "-levels"), reference = render(o, test.representative, name + "-representative");
+					o.tese = captureTese;
+					o.capture = 1;
+					Image captured = render(o, test.levels, name + "-levels-capture"), referenceCaptured = render(o, test.representative, name + "-representative-capture");
+					bool submitted = true;
+					for (const Image* i : {&image, &reference, &captured, &referenceCaptured}) submitted &= i->submit == VK_SUCCESS && i->wait == VK_SUCCESS;
+					uint32_t pixels = 0;
+					for (uint32_t i = 0; i < kWidth * kHeight; ++i) pixels += image.rgba[4 * i + 3] != 0;
+					// The TES must see the TCS values, not their half conversion nor their Vulkan rounding. The patch is
+					// the cell of the vertex, since gl_PrimitiveID restarts with each draw.
+					uint32_t levelMismatch = 0, invocations = std::min(captured.tesCapture[0], kTesCaptureSlots);
+					for (uint32_t slot = 0; slot < invocations; ++slot) {
+						const uint32_t* w = &captured.tesCapture[1 + kCaptureWords * slot];
+						uint32_t patch = uint32_t(asFloat(w[4])) / kCell;
+						for (int k = 0; k < 4; ++k) levelMismatch += patch >= test.levels.size() || w[6 + k] != test.levels[patch].levels[k];
+					}
+					Records mine = records(captured, true), theirs = records(referenceCaptured, true);
+					std::printf("  case %zu%s (%s): covered=%u image_equal=%d vertices=%zu representative_vertices=%zu coordinates_equal=%d tes_invocations=%u tes_level_mismatch=%u\n",
+					            c, split ? " split" : "", test.name, pixels, image.rgba == reference.rgba, mine.size(), theirs.size(), mine == theirs, invocations, levelMismatch);
+					verdict(submitted && captured.tesCapture[0] <= kTesCaptureSlots, "submissions succeed and the TES capture fits");
+					verdict(pixels > 0 && image.rgba == reference.rgba, "image identical to the Vulkan level representative");
+					verdict(!mine.empty() && mine == theirs, "tessellation coordinates and positions identical to the representative's");
+					verdict(invocations > 0 && levelMismatch == 0, "TES reads every level exactly as the TCS wrote it");
+					if (!split) { single = image; singleCaptured = captured; continue; }
+					bool complete = alpha(image) == alpha(single) && records(captured, false) == records(singleCaptured, false);
+					std::printf("  case %zu split vs one draw: coverage_equal=%d vertices_equal=%d\n", c, alpha(image) == alpha(single), records(captured, false) == records(singleCaptured, false));
+					verdict(complete, "two draws in one render pass cover and tessellate exactly like one draw");
 				}
-				Coordinates mine = coordinates(captured), theirs = coordinates(referenceCaptured);
-				std::printf("  case %zu (%s): covered=%u image_equal=%d vertices=%zu representative_vertices=%zu coordinates_equal=%d tes_invocations=%u tes_level_mismatch=%u\n",
-				            c, test.name, pixels, image.rgba == reference.rgba, mine.size(), theirs.size(), mine == theirs, invocations, levelMismatch);
-				verdict(submitted && captured.tesCapture[0] <= kTesCaptureSlots, "submissions succeed and the TES capture fits");
-				verdict(pixels > 0 && image.rgba == reference.rgba, "image identical to the Vulkan level representative");
-				verdict(!mine.empty() && mine == theirs, "tessellation coordinates and positions identical to the representative's");
-				verdict(invocations > 0 && levelMismatch == 0, "TES reads every level exactly as the TCS wrote it");
 			}
+			splitDraw = false;
 			// Information only: Vulkan treats an inner level of 1 as 1 + epsilon when an outer level exceeds 1.
 			PipelineOptions o{"topology.tesc.spv", tese, "ordinary.frag.spv"};
 			Image innerOne = render(o, {{{two, two, two, one}}}, "inner-one"), innerTwo = render(o, {{{two, two, two, two}}}, "inner-two");
