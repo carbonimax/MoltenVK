@@ -784,7 +784,8 @@ int main(int argc, char** argv) {
 		uint32_t countMismatch = 0, coordinateMismatch = 0, positionMismatch = 0;
 		for (uint32_t p = 0; p < scenario.patches.size(); ++p) {
 			uint32_t level = vulkanLevel(scenario.patches[p]);
-			bool culled = scenario.cull && scenario.patches[p].mirrored;
+			// Back-face culling keeps the mirrored patch with ccw and the others with cw.
+			bool culled = scenario.cull && scenario.patches[p].mirrored != ccw;
 			uint32_t expected = culled ? 0 : level == 1 ? 3 : level == 2 ? 7 : level == 3 ? 12 : 0;
 			Coordinates mine, theirs;
 			for (const auto& entry : perVertex) if (entry.first[0] == p) mine.insert(entry);
