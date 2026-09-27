@@ -158,7 +158,9 @@ int main(int argc, char** argv) {
 		// Ordinary-only scenarios select the draw command: direct, indexed, indirect or indexed-indirect.
 		const std::string ordinaryPrefix = "ordinary-levels-";
 		const bool ordinaryOnly = scenarioName.rfind(ordinaryPrefix, 0) == 0;
-		const std::string drawMode = ordinaryOnly ? scenarioName.substr(ordinaryPrefix.size()) : "direct";
+		const bool indexedScratchLimit = scenarioName == "ordinary-levels-indexed-scratch-limit";
+		const bool scratchLimit = scenarioName == "ordinary-levels-scratch-limit" || indexedScratchLimit;
+		const std::string drawMode = scratchLimit ? (indexedScratchLimit ? "indexed" : "direct") : ordinaryOnly ? scenarioName.substr(ordinaryPrefix.size()) : "direct";
 		if (drawMode != "direct" && drawMode != "indexed" && drawMode != "indirect" && drawMode != "indexed-indirect") throw std::runtime_error("Unknown draw command");
 		if (ordinaryOnly) scenarios[scenarioName] = {{uniform(two)}, {}};
 		if (!rejection && !scenarios.count(scenarioName)) throw std::runtime_error("Unknown scenario");
@@ -623,6 +625,23 @@ int main(int argc, char** argv) {
 
 		const std::string tese = ccw ? "ccw.tese.spv" : "cw.tese.spv";
 		const std::string captureTese = ccw ? "capture-ccw.tese.spv" : "capture-cw.tese.spv";
+		if (scratchLimit) {
+			// One patch per instance. Exceed the advertised Metal-backed allocation limit without submitting a draw.
+			VkPhysicalDeviceVulkan11Properties props11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES};
+			VkPhysicalDeviceProperties2 props2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+			props2.pNext = &props11;
+			vkGetPhysicalDeviceProperties2(physical, &props2);
+			constexpr uint64_t levelBytesPerPatch = 6 * sizeof(float);
+			uint64_t instances = props11.maxMemoryAllocationSize / levelBytesPerPatch + 1;
+			if (instances > UINT32_MAX) { std::printf("TES_TOPOLOGY SKIP %s: buffer limit exceeds addressable patch count\n", scenarioName.c_str()); return 0; }
+			PipelineOptions o{"topology.tesc.spv", tese, "ordinary.frag.spv"};
+			VkPipeline pipeline = VK_NULL_HANDLE;
+			check(createPipeline(o, pipeline), "Create ordinary float32 pipeline");
+			VkResult actual = record(pipeline, {uniform(two)}, 0, uint32_t(instances), o);
+			bool pass = actual == VK_ERROR_OUT_OF_DEVICE_MEMORY;
+			std::printf("TES_TOPOLOGY %s %s: vkEndCommandBuffer=%d expected=%d, patches=%llu limit=%llu, nothing submitted\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), actual, VK_ERROR_OUT_OF_DEVICE_MEMORY, (unsigned long long)instances, (unsigned long long)props11.maxMemoryAllocationSize);
+			return pass ? 0 : 2;
+		}
 		if (ordinaryOnly) {
 			// Vulkan discards a patch when a relevant outer level is <= 0 or NaN; equal spacing otherwise clamps every
 			// level to [1, maxTessellationGenerationLevel] and rounds it up. Each case pairs float32 TCS levels with
