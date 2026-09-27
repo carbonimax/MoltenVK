@@ -7,7 +7,7 @@ root=$(cd "$test_dir/../.." && pwd)
 output=${1:-$(mktemp -d /private/tmp/mvk-indirect.XXXXXX)}
 mkdir -p "$output"
 # Compile the actual recording methods with CPU doubles, without a Metal device.
-# A negative control removes one guard in the generated copy only.
+# A negative control removes one scratch reservation in the generated copy only.
 python3 - "$root" "$output" <<'PY'
 from pathlib import Path
 import os, re, sys
@@ -30,7 +30,7 @@ if mutation:
     matches = 0
     for i, method in enumerate(methods):
         if method.startswith('VkResult ' + mutation + '::'):
-            methods[i], removed = re.subn(r'\tif \(drawCount && cmdBuff->recordedGraphicsPipelineUsesPerVertexInput\(\)\) \{[^\n]*\}\n', '', method)
+            methods[i], removed = re.subn(r'return (?:result == VK_SUCCESS && )?drawCount \? cmdBuff->recordPerVertexIndirectDraw\((?:true|false)\) : (VK_SUCCESS|result);', r'return \1;', method)
             matches += removed
     assert matches == 1
 (output / 'IndirectRecording.inc').write_text('\n'.join(classes + methods))

@@ -495,6 +495,49 @@ VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t in
 	return _immediateCmdEncoder ? reservePrefilledPerVertexScratch(firstRequest) : VK_SUCCESS;
 }
 
+// Vulkan places no bound on indirect vertex and instance counts, and they may be written on the GPU
+// earlier in the same submission. Reserve a bounded capacity before submission instead; the GPU admits
+// a command only if every draw fits, otherwise none executes and the device is lost at completion.
+static uint64_t mvkPerVertexIndirectRecordCapacity() {
+	// Prototype budget read from the environment. A public MVKConfiguration member needs API review.
+	double capacity = mvkGetEnvVarNumber("MVK_PERVERTEX_INDIRECT_RECORD_CAPACITY", 1 << 20);
+	return capacity < 1 ? 0 : capacity > UINT32_MAX ? UINT32_MAX : uint64_t(capacity);
+}
+
+VkResult MVKCommandBuffer::recordPerVertexIndirectDraw(bool indexed) {
+	if (!_recordedPerVertexPipeline) { return VK_SUCCESS; }
+	auto* pipeline = _recordedPerVertexPipeline;
+	if (pipeline->getZeroDivisorVertexBindings().size()) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indirect draws do not support zero-divisor vertex bindings yet."); }
+	if (indexed) {
+		if (!mvkPerVertexIndexSize(_recordedIndexType)) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed capture requires uint8, uint16 or uint32 indices."); }
+		if (pipeline->getDynamicStateFlags().has(MVKRenderStateFlag::PrimitiveRestartEnable) || pipeline->getStaticStateData().enable.has(MVKRenderStateEnableFlag::PrimitiveRestart)) {
+			return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed indirect draws do not support primitive restart yet.");
+		}
+	}
+	// Each indirect draw plans on the GPU in compute, which ends and restarts the render encoder.
+	if (_doesContinueRenderPass) { _needsInheritedPerVertexAttachments = true; }
+	VkResult result = validateIndexedPerVertexAttachments();
+	if (result != VK_SUCCESS) { return result; }
+	auto topology = pipeline->getVkPrimitiveTopology();
+	uint32_t stride = pipeline->getPerVertexCapturedLayout().stride;
+	// Largest capacity within the requested budget whose buffers satisfy the direct-draw limits.
+	uint64_t capacity = mvkPerVertexIndirectRecordCapacity();
+	while (capacity && !mvkCanEncodePerVertexDraw(uint32_t(capacity), 1, stride, topology, getMetalFeatures().maxMTLBufferSize)) { capacity /= 2; }
+	if (!capacity) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR indirect capture capacity is empty."); }
+	uint64_t primitives = std::max<uint64_t>(mvkPerVertexPrimitiveCount(uint32_t(capacity), topology), 1);
+	uint64_t occurrences = primitives * mvkPerVertexReplayVertexCount(topology);
+	MVKPerVertexScratchRequest request = {NSUInteger(capacity * stride), NSUInteger(occurrences * 2 * sizeof(uint32_t)), NSUInteger(primitives * 3 * sizeof(uint32_t)), pipeline->usesPortableBarycentrics() ? NSUInteger(occurrences * sizeof(uint32_t)) : 0, indexed ? NSUInteger(capacity * sizeof(uint32_t)) : 0};
+	request.indirectCapacity = uint32_t(capacity);
+	request.planSize = 1024;
+	// Capacity counts physical records, so every multiview pass reserves the same bounded scratch.
+	uint32_t passCount = std::max(getDevice()->getMultiviewMetalPassCount(getViewMask()), 1u);
+	size_t firstRequest = _perVertexScratchRequests.size();
+	try {
+		_perVertexScratchRequests.insert(_perVertexScratchRequests.end(), passCount, request);
+	} catch (const std::bad_alloc&) { return reportError(VK_ERROR_OUT_OF_HOST_MEMORY, "Portable PerVertexKHR scratch recording allocation failed."); }
+	return _immediateCmdEncoder ? reservePrefilledPerVertexScratch(firstRequest) : VK_SUCCESS;
+}
+
 VkResult MVKCommandBuffer::reservePrefilledPerVertexScratch(size_t firstRequest) {
 	try {
 		std::vector<MVKPerVertexScratchRequest> requests(_perVertexScratchRequests.begin() + firstRequest, _perVertexScratchRequests.end());
@@ -528,6 +571,14 @@ VkResult MVKCommandBuffer::reservePerVertexScratch(const std::vector<MVKPerVerte
 	}
 	auto* pool = _commandPool->getCommandEncodingPool();
 	for (size_t i = 0; i < requests.size(); ++i) {
+		if (requests[i].indirectCapacity) {
+			id<MTLComputePipelineState> state = pool->getPerVertexIndirectMTLComputePipelineState();
+			VkResult result = _device->getConfigurationResult();
+			if (result != VK_SUCCESS) { return result; }
+			if (!state || !state.maxTotalThreadsPerThreadgroup || !state.threadExecutionWidth) { return reportError(VK_ERROR_INITIALIZATION_FAILED, "Portable PerVertexKHR indirect planning pipeline is unavailable or has invalid dispatch limits."); }
+			pending[i]->indirectPipeline = [state retain];
+			continue;
+		}
 		if (!requests[i].indexSize) { continue; }
 		// Secondary requests are flattened into the primary. Prepare in its pool
 		// and retain with scratch so encoding never compiles a helper after success.

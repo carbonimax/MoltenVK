@@ -59,12 +59,13 @@ struct TestCommandPool;
 struct TestDevice {
 	atomic<VkResult> result{VK_SUCCESS};
 	Failure failure = Failure::None;
-	atomic<unsigned> creations[3]{};
+	atomic<unsigned> creations[4]{};
 	VkResult getConfigurationResult() { return result.load(); }
 	TestDevice* getCommandResourceFactory() { return this; }
 	id<MTLComputePipelineState> create(unsigned slot);
 	id<MTLComputePipelineState> newPerVertexRestartMTLComputePipelineState(TestCommandPool*) { return create(2); }
 	id<MTLComputePipelineState> newConvertUint8IndicesMTLComputePipelineState(TestCommandPool*, bool preserveValues) { return create(preserveValues ? 1 : 0); }
+	id<MTLComputePipelineState> newPerVertexIndirectMTLComputePipelineState(TestCommandPool*) { return create(3); }
 };
 struct TestCommandPool { TestDevice* device; TestDevice* getDevice() { return device; } };
 id<MTLComputePipelineState> TestDevice::create(unsigned slot) {
@@ -85,12 +86,15 @@ struct MVKCommandEncodingPool {
 	mutex _lock;
 	id<MTLComputePipelineState> _mtlPerVertexRestartComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlConvertUint8IndicesComputePipelineState[2] = {};
+	id<MTLComputePipelineState> _mtlPerVertexIndirectComputePipelineState = nil;
 	id<MTLComputePipelineState> getPerVertexRestartMTLComputePipelineState();
+	id<MTLComputePipelineState> getPerVertexIndirectMTLComputePipelineState();
 	id<MTLComputePipelineState> getConvertUint8IndicesMTLComputePipelineState(bool preserveValues = false);
 	void clear() {
 		lock_guard<mutex> lock(_lock);
 		[_mtlPerVertexRestartComputePipelineState release]; _mtlPerVertexRestartComputePipelineState = nil;
 		for (auto& state : _mtlConvertUint8IndicesComputePipelineState) { [state release]; state = nil; }
+		[_mtlPerVertexIndirectComputePipelineState release]; _mtlPerVertexIndirectComputePipelineState = nil;
 	}
 	~MVKCommandEncodingPool() { clear(); }
 };
@@ -117,17 +121,34 @@ struct MVKCommandBuffer {
 #include "HelperPreflightMethods.inc"
 
 static MVKPerVertexScratchRequest request(bool restart) { return {48, 24, 12, 12, restart ? 12u : 6u, restart}; }
+#if MVK_TEST_HAS_INDIRECT
+// Indirect scratch prepares its planning helper instead of an index helper; the plan fits the fake buffer.
+static MVKPerVertexScratchRequest indirectRequest() {
+	MVKPerVertexScratchRequest indirect = {48, 24, 12, 12, 16};
+	indirect.indirectCapacity = 4;
+	indirect.planSize = 256;
+	return indirect;
+}
+#endif
 struct Submission { MVKPerVertexScratchReservations scratch; };
 
 static bool checkRejection() {
 	bool passed = true;
-	for (bool restart : {false, true}) {
+	for (unsigned kind : {0u, 1u, 2u}) {
+		bool restart = kind == 1;
+#if !MVK_TEST_HAS_INDIRECT
+		if (kind == 2) { continue; }
+#endif
 		for (Failure failure : {Failure::Missing, Failure::Timeout, Failure::ZeroWidth, Failure::ZeroMaximum, Failure::DeviceLostNil, Failure::DeviceLostValid}) {
 			for (unsigned prefill : {0u, 1u, 2u}) {
 				TestDevice device;
 				RecordingPool pool{{&device}};
 				auto* metal = [PreflightDevice new];
+#if MVK_TEST_HAS_INDIRECT
+				MVKCommandBuffer cb{&device, &pool, (id<MTLDevice>)metal, VK_SUCCESS, false, {kind == 2 ? indirectRequest() : request(restart)}, {}};
+#else
 				MVKCommandBuffer cb{&device, &pool, (id<MTLDevice>)metal, VK_SUCCESS, false, {request(restart)}, {}};
+#endif
 				device.failure = failure;
 				unsigned dispatched = 0;
 				unordered_set<MVKCommandBuffer*> prefilled;
@@ -150,7 +171,7 @@ static bool checkRejection() {
 					passed = false;
 					continue;
 				}
-				assert(device.creations[restart ? 2 : 1] == 1);
+				assert(device.creations[kind == 2 ? 3 : restart ? 2 : 1] == 1);
 				[metal release];
 			}
 		}
@@ -252,10 +273,35 @@ static void checkConcurrentCache() {
 	assert(results[0][0] != results[0][1]); // Regular UINT8 keeps its sentinel semantics.
 }
 
+#if MVK_TEST_HAS_INDIRECT
+static void checkIndirect() {
+	TestDevice device;
+	RecordingPool pool{{&device}};
+	auto* metal = [PreflightDevice new];
+	MVKCommandBuffer cb{&device, &pool, (id<MTLDevice>)metal, VK_SUCCESS, false, {indirectRequest(), indirectRequest()}, {}};
+	unordered_set<MVKCommandBuffer*> prefilled;
+	MVKPerVertexScratchReservations saved;
+	assert(cb.reservePerVertexScratch(saved, prefilled) == VK_SUCCESS && saved.size() == 2);
+	for (auto& scratch : saved) {
+		// Planning helper retained, no index helper, plan buffer present and zeroed before any submission.
+		assert(scratch->indirectPipeline && !scratch->indexPipeline && scratch->indirectCapacity == 4);
+		assert(scratch->buffers[7] && scratch->buffers[7].length == 256);
+		auto* bytes = (const uint8_t*)scratch->buffers[7].contents;
+		for (unsigned i = 0; i < 256; ++i) { assert(!bytes[i]); }
+	}
+	assert(saved[0]->buffers[7] != saved[1]->buffers[7] && device.creations[3] == 1 && !device.creations[1] && !device.creations[2]);
+	[metal release];
+}
+#endif
+
 int main() {
 	@autoreleasepool {
 		if (!checkRejection()) { return 1; }
 		checkTransactions();
+#if MVK_TEST_HAS_INDIRECT
+		checkIndirect();
+		assert(!liveBuffers && !livePipelines);
+#endif
 		assert(!liveBuffers && !livePipelines);
 		checkConcurrentCache();
 		assert(!liveBuffers && !livePipelines);

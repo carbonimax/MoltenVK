@@ -635,4 +635,79 @@ kernel void perVertexRestart(const device uint8_t* source [[buffer(0)]], device 
     triplets[3 * (primitives - 1) + 1] = b;
     triplets[3 * (primitives - 1) + 2] = c;
 }
+// Portable PerVertexKHR indirect draws, planned from Vulkan arguments and Count read on the GPU.
+// p: maxDrawCount, stride, indexBytes, index capacity lo/hi, record capacity, views, topology,
+//    provokingLast, corners, hasCount, draw, table/gather/capture threadgroup widths, phase.
+// Phases: admit every draw of the command, plan one draw, build replay tables, gather indices.
+// Plan words: 0 status (1 capacity, 2 index range), 4 capture draw, 8 capture dispatch,
+// 12 stage-in region, 20 replay draw, 24 table dispatch, 28 gather dispatch, 32 table params,
+// 64 replay constants (byte 256), 128 capture params (byte 512).
+kernel void perVertexIndirect(const device uint8_t* args [[buffer(0)]], const device uint* count [[buffer(1)]], device uint* w [[buffer(2)]], const device uint8_t* source [[buffer(3)]], device uint* gathered [[buffer(4)]], device uint* pairs [[buffer(5)]], device uint* triplets [[buffer(6)]], device uint* corners [[buffer(7)]], constant uint* p [[buffer(8)]], uint i [[thread_position_in_grid]]) {
+    uint draws = p[10] ? min(p[0], count[0]) : p[0], topology = p[7], rasterVertices = topology == 0 ? 1 : topology <= 2 ? 2 : 3;
+    if (p[15] == 0) {
+        if (i >= draws) { return; }
+        const device uint* a = reinterpret_cast<const device uint*>(args + ulong(i) * p[1]);
+        if (!a[0] || !a[1]) { return; }
+        // Physical records are instances x views x vertices; dense record IDs stay below the reserved capacity.
+        if (ulong(a[0]) * a[1] > ulong(p[5]) / p[6]) { atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint*>(w), 1u, memory_order_relaxed); }
+        if (p[2] && ulong(a[2]) + a[0] > ((ulong(p[4]) << 32) | p[3])) { atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint*>(w), 2u, memory_order_relaxed); }
+        return;
+    }
+    if (p[15] == 1) {
+        if (i) { return; }
+        const device uint* a = reinterpret_cast<const device uint*>(args + ulong(p[11]) * p[1]);
+        bool enabled = !w[0] && p[11] < draws && a[0] && a[1];
+        uint vertices = enabled ? a[0] : 0, instances = enabled ? a[1] * p[6] : 0;
+        uint first = p[2] ? a[3] : a[2], firstInstance = p[2] ? a[4] : a[3];
+        uint primitives = perVertexRestartPrimitiveCount(vertices, topology), occurrences = primitives * rasterVertices;
+        w[4] = vertices; w[5] = instances; w[6] = first; w[7] = firstInstance;
+        w[8] = uint((ulong(vertices) + p[14] - 1) / p[14]); w[9] = instances; w[10] = 1;
+        w[12] = first; w[13] = firstInstance; w[14] = 0; w[15] = vertices; w[16] = instances; w[17] = 1;
+        w[20] = occurrences; w[21] = occurrences ? instances : 0; w[22] = 0; w[23] = firstInstance;
+        w[24] = uint((ulong(primitives) * instances + p[12] - 1) / p[12]); w[25] = 1; w[26] = 1;
+        w[28] = p[2] ? uint((ulong(vertices) + p[13] - 1) / p[13]) : 0; w[29] = 1; w[30] = 1;
+        w[32] = vertices; w[33] = instances; w[34] = primitives; w[35] = p[2] ? a[2] : 0;
+        w[64] = 0; w[65] = 0; w[66] = firstInstance; w[67] = occurrences;
+        w[128] = vertices;
+        return;
+    }
+    if (p[15] == 3) {
+        if (i >= w[32]) { return; }
+        uint index = 0;
+        ulong offset = (ulong(w[35]) + i) * p[2];
+        for (uint b = 0; b < p[2]; ++b) { index |= uint(source[offset + b]) << (8 * b); }
+        gathered[i] = index;
+        return;
+    }
+    uint vertices = w[32], primitives = w[34];
+    if (!primitives || i >= primitives * w[33]) { return; }
+    // Same records, keys and corner order as mvkPopulatePerVertexReplay().
+    uint instance = i / primitives, primitive = i % primitives;
+    uint v[3] = {primitive * 3, primitive * 3 + 1, primitive * 3 + 2};
+    if (topology == 0) {
+        v[0] = v[1] = v[2] = primitive;
+    } else if (rasterVertices == 2) {
+        v[0] = topology == 1 ? primitive * 2 : primitive;
+        v[1] = v[2] = v[0] + 1;
+    } else if (topology == 4) {
+        v[0] = primitive; v[1] = primitive + 1; v[2] = primitive + 2;
+        if (primitive & 1) {
+            uint x = p[8] ? 0 : 1, tmp = v[x];
+            v[x] = v[x + 1]; v[x + 1] = tmp;
+        }
+    } else if (topology == 5) {
+        v[0] = p[8] ? 0 : primitive + 1;
+        v[1] = p[8] ? primitive + 1 : primitive + 2;
+        v[2] = p[8] ? primitive + 2 : 0;
+    }
+    for (uint corner = 0; corner < 3; ++corner) {
+        uint record = instance * vertices + v[corner];
+        triplets[3 * i + corner] = record;
+        if (corner >= rasterVertices) { continue; }
+        uint occurrence = i * rasterVertices + corner;
+        pairs[2 * occurrence] = record;
+        pairs[2 * occurrence + 1] = i;
+        if (p[9]) { corners[occurrence] = corner; }
+    }
+}
 )";

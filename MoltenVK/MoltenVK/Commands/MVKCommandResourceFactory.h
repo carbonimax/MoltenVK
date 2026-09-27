@@ -385,6 +385,9 @@ public:
 	/** Returns a new MTLComputePipelineState for converting a Uint8 index buffer to Uint16. */
 	id<MTLComputePipelineState> newPerVertexRestartMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
 
+	/** Returns a new MTLComputePipelineState for planning portable PerVertexKHR indirect draws on the GPU. */
+	id<MTLComputePipelineState> newPerVertexIndirectMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
+
 	id<MTLComputePipelineState> newConvertUint8IndicesMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner, bool preserveValues = false);
 
 
