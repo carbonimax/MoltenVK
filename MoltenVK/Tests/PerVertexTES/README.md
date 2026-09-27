@@ -22,12 +22,15 @@ Any other pipeline mode returns `VK_ERROR_FEATURE_NOT_PRESENT` at `vkCreateGraph
    - a patch is discarded when one of its first three outer levels is ≤ 0 or NaN;
    - otherwise each level is clamped to `[1, maxTessellationGenerationLevel]` and rounded up;
    - uniform levels 1, 2 and 3 emit the Metal topologies (1, 6 and 13 triangles) that the ordinary Vulkan oracles proved on M4;
+   - the tessellation coordinates are those of the M4 tessellator, in 1/65536 steps: `1.0 - x` is exact and every edge vertex `(x, 1-x)` has its exact mirror, as Vulkan invariance rules 3, 4 and 8 require, so patches sharing an edge give bitwise-equal positions on it;
    - the corner order is clockwise in (u,v) and reversed for `ccw`, as Vulkan specifies for the upper-left origin;
-   - a serial prefix assigns patch offsets.
+   - a serial prefix assigns patch offsets;
+   - each generated triangle records its patch index, which the fragment reads as `gl_PrimitiveID` (without a geometry shader, Vulkan gives the fragment the TES patch index, not the index of a tessellated triangle).
 3. **Refusal.** Any other level (non-uniform, above 3, NaN inner) refuses the whole draw: nothing is captured or replayed. The submission reports `VK_ERROR_DEVICE_LOST` in `finish()`, before signalling its fence. The VS and TCS of that draw have already run.
 4. **Capture and replay.** TES runs in compute over the generated corner records, one per triangle corner. Vulkan allows more than one TES invocation per unique vertex. The replay draws the GPU-written count indirectly.
-5. **Capacity.** Scratch is reserved before submission for the proven maximum of 39 records per patch, including the float32 levels and the plan buffer. Every allocation is transactional.
-6. **Synchronization.** Compute buffer barriers separate VS, TCS, the generator phases and TES. Ending compute makes the tracked scratch visible to the restarted render pass.
+5. **Incomplete patches.** Vertices that complete no patch are not tessellated, but the VS still runs once for each of them, including draws of one or two vertices.
+6. **Capacity.** Scratch is reserved before submission for the proven maximum of 39 records per patch, including the float32 levels and the plan buffer. Every allocation is transactional.
+7. **Synchronization.** Compute buffer barriers separate VS, TCS, the generator phases and TES. Ending compute makes the tracked scratch visible to the restarted render pass.
 
 ## Oracles (`topology.cpp`)
 
@@ -37,6 +40,8 @@ Positions and levels are vertex attributes that the GPU copies into a host-zeroe
 - **Barycentric order.** Every covered pixel must show that PerVertexKHR follows the BaryCoordKHR order, which is Vulkan's only ordering requirement for tessellation.
 - **CPU model.** Every triangle is sampled against an independent CPU model of the ordered topology.
 - **Negative control.** A corner-swapped fragment must fail that model.
+- **Tessellation coordinates.** A fragment stores the raw bits of its three PerVertex TES vertices per pixel; an ordinary TES appends the hardware coordinates to a storage buffer. The PerVertex coordinates must satisfy rules 3 and 8 and equal the hardware ones bit for bit, positions included, with the full vertex set of every rendered patch. The TES evaluates positions from integer pixel control points, so products and sums are exact and a shared edge is compared independently of the evaluation order.
+- **Fragment `gl_PrimitiveID`.** It must equal the TES patch index on every covered pixel.
 
 Scenarios cover:
 
@@ -48,6 +53,8 @@ Scenarios cover:
 - `gl_DrawID` folded into the VS output;
 - a VS storage-buffer counter and a fragment uniform scale under default argument buffers: the VS runs exactly once per vertex, discarded patches included;
 - both windings;
+- seams: two patches of level 1, 2 or 3 sharing an edge, which is the `u = 0` edge of one and the `w = 0` edge of the other (rule 4);
+- draws of 1, 2, 4 and 5 vertices, counted by the VS storage counter;
 - level 4, non-uniform levels and a NaN inner level, which must be refused with `VK_ERROR_DEVICE_LOST` and no pixel.
 
 `main.cpp` keeps the earlier pilot checks that still apply: the factor-1 fixture with the ordered, swapped and wrong-patch fragments, the compute-bind recording guards, and the refusals for cache, patch size, specialization, instances, first vertex, indexed draws and the no-admission build.
@@ -63,7 +70,7 @@ bash MoltenVK/Tests/run-pervertex-tes-tests.sh /private/tmp/mvk-tes-topology
 The runner builds from `HEAD`:
 
 - three Debug arm64 libraries: development, without admission, and shipping;
-- three generator mutations that must be caught: reversed winding, a wrong level-3 interior, and ignored patch offsets.
+- three generator mutations that must be caught: reversed winding, moved level-3 interior coordinates, and ignored patch offsets.
 
 It also checks that the float32 TessLevel ABI is live in the generated TCS and TES, and writes `EVIDENCE.sha256` and `SOURCE-INDEX.txt`.
 
@@ -75,6 +82,8 @@ Proven on one Apple M4 Pro (macOS 27.2, Xcode 27.1) only. Not supported:
 - point mode;
 - descriptors or push constants in TCS/TES, instancing, multiview, indexed or indirect draws;
 - pipeline caches;
-- other GPU families.
+- other GPU families. The coordinates are copied from the M4 tessellator; on another GPU they still satisfy the Vulkan rules, but need not match that GPU's ordinary TES bit for bit.
+
+A TES PerVertex pipeline also needs one more free fragment buffer slot, for the patch-index table.
 
 Ordinary point-mode TES pipelines already fail in MoltenVK, independently of this path. The ordinary TES path keeps its half factors, so it diverges from the PerVertex path on levels that half cannot represent.

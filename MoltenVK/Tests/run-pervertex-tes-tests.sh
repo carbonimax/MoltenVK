@@ -125,10 +125,10 @@ pilot dev control control.frag
 for mode in ordered-compute reject-first-compute reject-first-instance-compute reject-cache reject-patch-size reject-specialization reject-instance reject-first reject-indexed; do pilot dev "$mode" ordered.frag; done
 pilot no-admission reject-public ordered.frag
 pilot no-admission control control.frag
-# 4. Generator mutations must be caught: reversed winding, wrong level-3 interior, patch offsets ignored.
+# 4. Generator mutations must be caught: reversed winding, moved level-3 interior coordinates, patch offsets ignored.
 topology mutation-winding cull ccw 2 "FAIL PerVertex replay matches ordinary TES coverage"
 topology mutation-winding f3 ccw 2 "FAIL ordered PerVertex values match the CPU model"
-topology mutation-interior f3 ccw 2 "FAIL PerVertex replay matches ordinary TES coverage"
+topology mutation-interior f3 ccw 2 "FAIL PerVertex coordinates and positions bitwise equal to the hardware tessellator's"
 topology mutation-offset mixed ccw 2 "FAIL PerVertex replay matches ordinary TES coverage"
 # 5. The float32 level ABI is live in the PerVertex TCS and TES compute kernels.
 mkdir -p "$output/dump"
