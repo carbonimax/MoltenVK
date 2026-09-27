@@ -160,6 +160,36 @@ namespace mvk {
 	}
 
 	/**
+	 * Returns the Locations of the fragment PerVertexKHR inputs that the corner copies of a mesh pipeline support:
+	 * arrays of one to three 16- or 32-bit scalars or vectors below Location 32, outside blocks.
+	 * Returns zero if any other form is read. Parser errors throw, as in the other mesh admission checks.
+	 */
+	template<typename Vs>
+	static inline uint32_t getMeshPerVertexCornerLocations(const Vs& spirv, const std::string& entryName) {
+		SPIRV_CROSS_NAMESPACE::CompilerReflection reflect(spirv);
+		reflect.set_entry_point(entryName, spv::ExecutionModelFragment);
+		uint32_t locations = 0;
+		for (auto varID : reflect.get_active_interface_variables()) {
+			if (reflect.get_storage_class(varID) != spv::StorageClassInput) { continue; }
+			const auto& type = reflect.get_type(reflect.get_type_from_variable(varID).parent_type);
+			if (!reflect.has_decoration(varID, spv::DecorationPerVertexKHR)) {
+				if (hasPerVertexInputMember(reflect, type)) { return 0; }
+				continue;
+			}
+			if (type.array.size() != 1 || !type.array_size_literal[0] || type.array[0] < 1 || type.array[0] > 3) { return 0; }
+			const auto& element = reflect.get_type(type.parent_type);
+			bool scalarOrVector = element.array.empty() && element.columns == 1 &&
+				(element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Float || element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Half ||
+				 element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Int || element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::UInt ||
+				 element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::Short || element.basetype == SPIRV_CROSS_NAMESPACE::SPIRType::UShort);
+			uint32_t location = reflect.get_decoration(varID, spv::DecorationLocation);
+			if (!scalarOrVector || reflect.has_decoration(varID, spv::DecorationBuiltIn) || !reflect.has_decoration(varID, spv::DecorationLocation) || location >= 32) { return 0; }
+			locations |= 1u << location;
+		}
+		return locations;
+	}
+
+	/**
 	 * Given a tessellation control shader and a tessellation evaluation shader,
 	 * both in SPIR-V format, returns tessellation reflection data.
 	 */
