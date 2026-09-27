@@ -8,12 +8,21 @@
 #include <cstdio>
 #include <functional>
 
+static MVKPhysicalDeviceMetalFeatures testFeatures = [] { MVKPhysicalDeviceMetalFeatures f{}; f.indirectDrawing = true; f.maxMTLBufferSize = 1 << 20; return f; }();
+constexpr uint32_t kMVKMTLFmtCapsResolve = 1;
+struct MVKPixelFormats {
+	uint32_t getCapabilities(VkFormat format) { return format == VK_FORMAT_R8G8B8A8_UINT ? 0 : kMVKMTLFmtCapsResolve; }
+};
+static MVKPixelFormats testFormats;
 struct MVKImage {
 	MTLStorageMode storage = MTLStorageModePrivate;
 	MTLStorageMode getMTLStorageMode() { return storage; }
 };
 struct MVKImageView {
 	MVKImage image;
+	MTLPixelFormat format = MTLPixelFormatRGBA8Unorm;
+	MTLPixelFormat getMTLPixelFormat() { return format; }
+	VkFormat getVkFormat() { return format == MTLPixelFormatRGBA8Uint ? VK_FORMAT_R8G8B8A8_UINT : VK_FORMAT_R8G8B8A8_UNORM; }
 	VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
 	MVKImage* getImage() { return &image; }
 	VkSampleCountFlagBits getSampleCount() { return samples; }
@@ -37,15 +46,20 @@ struct MVKRenderSubpass {
 	bool isDepthAttachmentUsed() const { return _depthAttachment.attachment != VK_ATTACHMENT_UNUSED; }
 	bool isStencilAttachmentUsed() const { return _stencilAttachment.attachment != VK_ATTACHMENT_UNUSED; }
 	bool hasResolveAttachments() const;
+	const char* getPerVertexResolveError();
 	void initDynamic(MVKRenderPass*, const VkRenderingInfo*);
 	void populatePipelineRenderingCreateInfo() {}
 	VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
 	VkSampleCountFlagBits getSampleCount() { return samples; }
 };
 struct MVKRenderPass {
+	struct Attachment { VkFormat format; VkFormat getFormat() { return format; } };
+	std::vector<Attachment> _attachments;
 	MVKRenderSubpass subpass;
 	std::vector<int> _subpasses;
 	MVKRenderSubpass* getSubpass(uint32_t) { return &subpass; }
+	const MVKPhysicalDeviceMetalFeatures& getMetalFeatures() { return testFeatures; }
+	MVKPixelFormats* getPixelFormats() { return &testFormats; }
 };
 struct MVKCurrentSubpassInfo {
 	MVKRenderPass* renderpass = nullptr;
@@ -69,7 +83,6 @@ struct MVKGraphicsPipeline {
 	VkPrimitiveTopology getVkPrimitiveTopology() { return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; }
 	bool usesPortableBarycentrics() { return false; }
 };
-struct TestFeatures { bool indirectDrawing = true; uint64_t maxMTLBufferSize = 1 << 20; };
 struct MVKCommandEncoder;
 struct MVKCommand {
 	MVKCommand* _next = nullptr;
@@ -88,7 +101,8 @@ struct MVKCommandBuffer {
 	VkCommandBufferInheritanceInfo _secondaryInheritanceInfo{};
 	VkCommandBufferInheritanceRenderingInfo _secondaryInheritanceRenderingInfo{};
 	std::vector<MVKPerVertexScratchRequest> _perVertexScratchRequests;
-	TestFeatures getMetalFeatures() { return {}; }
+	const MVKPhysicalDeviceMetalFeatures& getMetalFeatures() { return testFeatures; }
+	MVKPixelFormats* getPixelFormats() { return &testFormats; }
 	VkResult getConfigurationResult() { return VK_SUCCESS; }
 	VkResult reportError(VkResult result, const char*, ...) { return result; }
 	VkResult reservePrefilledPerVertexScratch(size_t) { return VK_SUCCESS; }
@@ -141,6 +155,7 @@ struct MVKCmdEndRendering { VkResult setContent(MVKCommandBuffer*); };
 void MVKCommand::encode(MVKCommandEncoder* encoder) { rejected = encoder->getIndexedPerVertexAttachmentError() != nullptr; }
 
 static void begin(MVKCommandBuffer& cb, MVKCommandEncoder& encoder, MVKRenderPass& pass, MVKFramebuffer& framebuffer, MVKArrayRef<MVKImageView*> views, bool imageless) {
+	pass.subpass._renderPass = &pass;
 	VkRenderPassAttachmentBeginInfo viewInfo{};
 	viewInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO;
 	viewInfo.attachmentCount = uint32_t(views.size());
@@ -154,6 +169,8 @@ static void begin(MVKCommandBuffer& cb, MVKCommandEncoder& encoder, MVKRenderPas
 	VkSubpassBeginInfo subpass{};
 	subpass.sType = VK_STRUCTURE_TYPE_SUBPASS_BEGIN_INFO;
 	MVKCmdBeginRenderPass<1, 4> cmd;
+	pass._attachments.clear();
+	for (auto* view : beginViews(&info)) { pass._attachments.push_back({view ? view->getVkFormat() : VK_FORMAT_UNDEFINED}); }
 	assert(cmd.setContent(&cb, &info, &subpass, beginViews(&info)) == VK_SUCCESS);
 	encoder.beginRenderpass(nullptr, cmd._contents, cmd._renderPass, cmd._framebuffer, cmd._renderArea, cmd._clearValues.contents(), cmd._attachments.contents(), kMVKCommandUseBeginRenderPass);
 }
@@ -204,6 +221,19 @@ static void checkMultisampleAdmission() {
 			pass.subpass._inputAttachments.clear();
 			pass.subpass._resolveAttachments.push_back(reference(1));
 			check(false);
+			testFeatures.combinedStoreResolveAction = true;
+			check(true);
+			target.format = MTLPixelFormatRGBA8Uint;
+			begin(cb, encoder, pass, framebuffer, resolved, imageless);
+			check(false); // Software color resolves remain excluded.
+			target.format = MTLPixelFormatRGBA8Unorm;
+			target.image.storage = MTLStorageModeMemoryless;
+			begin(cb, encoder, pass, framebuffer, resolved, imageless);
+			check(false);
+			target.image.storage = MTLStorageModePrivate;
+			begin(cb, encoder, pass, framebuffer, resolved, imageless);
+			check(true);
+			testFeatures.combinedStoreResolveAction = false;
 			// Resolve detection must not depend on the first color attachment's sample count.
 			pass.subpass.samples = VK_SAMPLE_COUNT_1_BIT;
 			check(false);
@@ -216,6 +246,21 @@ static void checkMultisampleAdmission() {
 			pass.subpass._resolveAttachments.clear();
 		}
 	}
+	// Static inherited metadata is sufficient even when the secondary has no framebuffer/views.
+	pass.subpass._resolveAttachments.push_back(reference(1));
+	secondary._secondaryInheritanceInfo.renderPass = reinterpret_cast<VkRenderPass>(&pass);
+	secondary.inherit();
+	assert(!secondary._recordedAttachmentsKnown);
+	assert(secondary.recordPerVertexDraw(3, 1, true) == VK_ERROR_FEATURE_NOT_PRESENT);
+	testFeatures.combinedStoreResolveAction = true;
+	assert(secondary.recordPerVertexDraw(3, 1, true) == VK_SUCCESS);
+	pass.subpass._resolveAttachments[0] = reference(uint32_t(pass._attachments.size()));
+	assert(secondary.recordPerVertexDraw(3, 1, true) == VK_ERROR_FEATURE_NOT_PRESENT);
+	assert(encoder.getIndexedPerVertexAttachmentError()); // Bounds-checked metadata, no view dereference.
+	pass.subpass._resolveAttachments.clear();
+	testFeatures.combinedStoreResolveAction = false;
+	secondary._secondaryInheritanceInfo.renderPass = VK_NULL_HANDLE;
+	secondary.inherit();
 	// Dynamic rendering's iterator includes source/resolve pairs for color, depth, and stencil.
 	pass.subpass._colorAttachments.clear();
 	for (bool stencil : {false, true}) {
@@ -226,6 +271,17 @@ static void checkMultisampleAdmission() {
 		resolveRef = reference(1);
 		mode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
 		check(false);
+		testFeatures.combinedStoreResolveAction = true;
+		check(false); // Depth/stencil capabilities are independently required.
+		testFeatures.depthResolve = testFeatures.stencilResolve = true;
+		check(true);
+		mode = VK_RESOLVE_MODE_MIN_BIT;
+		check(!stencil);
+		mode = VK_RESOLVE_MODE_MAX_BIT;
+		check(!stencil);
+		mode = VK_RESOLVE_MODE_AVERAGE_BIT;
+		check(false);
+		testFeatures.combinedStoreResolveAction = testFeatures.depthResolve = testFeatures.stencilResolve = false;
 		mode = VK_RESOLVE_MODE_NONE;
 		check(true);
 		mode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
@@ -250,8 +306,9 @@ static void checkMultisampleAdmission() {
 		pass.subpass._colorAttachments.clear();
 		pass.subpass._resolveAttachments.clear();
 		pass.subpass.initDynamic(&pass, &info);
+		pass._attachments.clear();
 		MVKSmallVector<MVKImageView*, 8> dynamicViews;
-		MVKRenderingAttachmentIterator(&info).iterate([&](const VkRenderingAttachmentInfo*, VkImageAspectFlagBits, MVKImageView* view, bool) { dynamicViews.push_back(view); });
+		MVKRenderingAttachmentIterator(&info).iterate([&](const VkRenderingAttachmentInfo*, VkImageAspectFlagBits, MVKImageView* view, bool) { dynamicViews.push_back(view); pass._attachments.push_back({view ? view->getVkFormat() : VK_FORMAT_UNDEFINED}); });
 		encoder.beginRenderpass(nullptr, VK_SUBPASS_CONTENTS_INLINE, &pass, &framebuffer, {{0, 0}, {32, 32}}, {}, dynamicViews.contents(), kMVKCommandUseBeginRendering);
 	};
 	beginDynamic();
@@ -262,10 +319,32 @@ static void checkMultisampleAdmission() {
 			attachment->resolveImageView = reinterpret_cast<VkImageView>(&target);
 			beginDynamic();
 			check(attachment != &color && mode == VK_RESOLVE_MODE_NONE); // Color currently resolves a non-null view even with NONE.
+			testFeatures.combinedStoreResolveAction = testFeatures.depthResolve = testFeatures.stencilResolve = true;
+			attachment->resolveMode = attachment == &color ? VK_RESOLVE_MODE_AVERAGE_BIT : VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+			beginDynamic();
+			check(true);
+			// Recording re-evaluates device-dependent resolve support at beginRendering.
+			testFeatures.combinedStoreResolveAction = testFeatures.depthResolve = testFeatures.stencilResolve = false;
 		}
 		attachment->resolveImageView = VK_NULL_HANDLE;
 		attachment->resolveMode = VK_RESOLVE_MODE_NONE;
 	}
+	// Begin-rendering mode validation is necessary: the dynamic subpass stores color references, not modes.
+	testFeatures.combinedStoreResolveAction = testFeatures.depthResolve = testFeatures.stencilResolve = true;
+	color.resolveImageView = reinterpret_cast<VkImageView>(&target);
+	for (auto mode : {VK_RESOLVE_MODE_NONE, VK_RESOLVE_MODE_SAMPLE_ZERO_BIT, VK_RESOLVE_MODE_MIN_BIT, VK_RESOLVE_MODE_MAX_BIT}) {
+		color.resolveMode = mode;
+		beginDynamic();
+		assert(cb.recordPerVertexDraw(3, 1, true) == VK_ERROR_FEATURE_NOT_PRESENT);
+		assert(cb.recordExecuteCommands(secondaries) == VK_ERROR_FEATURE_NOT_PRESENT);
+	}
+	color.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+	target.format = MTLPixelFormatRGBA8Uint;
+	beginDynamic();
+	check(false);
+	target.format = MTLPixelFormatRGBA8Unorm;
+	color.resolveImageView = VK_NULL_HANDLE;
+	testFeatures.combinedStoreResolveAction = testFeatures.depthResolve = testFeatures.stencilResolve = false;
 	// Null color pairs must not shift the depth/stencil resolve indexes.
 	color.imageView = VK_NULL_HANDLE;
 	stencil.resolveImageView = reinterpret_cast<VkImageView>(&target);
@@ -395,5 +474,5 @@ int main() {
 	cb.recordRendering(&rendering);
 	MVKCmdEndRendering{}.setContent(&cb);
 	assert(!cb._recordedAttachmentsKnown && !cb._recordedRenderingError);
-	puts("PASS: production attachment flow/admission; imageless and zero views; inherited primary revalidation; persistent MSAA admission; memoryless/resolve rejection (CPU only)");
+	puts("PASS: production attachment flow/admission; imageless and zero views; inherited primary revalidation; persistent MSAA/native resolve admission; memoryless/software/noncombined/unsupported-mode rejection (CPU only)");
 }

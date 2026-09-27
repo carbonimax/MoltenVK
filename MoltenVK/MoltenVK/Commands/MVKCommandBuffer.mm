@@ -438,7 +438,10 @@ void MVKCommandBuffer::recordRendering(const VkRenderingInfo* renderingInfo) {
 	attachments.iterate([&](const VkRenderingAttachmentInfo* info, VkImageAspectFlagBits aspect, MVKImageView* attachment, bool isResolveAttachment) {
 		if (!attachment) { return; }
 		// Match MVKRenderSubpass: color uses non-null resolve views; depth/stencil also require a resolve mode.
-		if (isResolveAttachment && info->imageView && (aspect == VK_IMAGE_ASPECT_COLOR_BIT || info->resolveMode != VK_RESOLVE_MODE_NONE)) { _recordedRenderingError = "indexed compute capture cannot split rendering with resolve attachments."; }
+		if (isResolveAttachment && info->imageView && (aspect == VK_IMAGE_ASPECT_COLOR_BIT || info->resolveMode != VK_RESOLVE_MODE_NONE)) {
+			if (aspect == VK_IMAGE_ASPECT_COLOR_BIT && info->resolveMode != VK_RESOLVE_MODE_AVERAGE_BIT) { _recordedRenderingError = "indexed capture requires average-mode dynamic color resolve."; }
+			if (const char* error = mvkGetPerVertexResolveError(getMetalFeatures(), getPixelFormats(), attachment->getVkFormat(), aspect, info->resolveMode)) { _recordedRenderingError = error; }
+		}
 		if (attachment->getImage()->getMTLStorageMode() == MTLStorageModeMemoryless) { _recordedRenderingError = "indexed compute capture cannot preserve memoryless attachments."; }
 	});
 }
@@ -446,7 +449,9 @@ void MVKCommandBuffer::recordRendering(const VkRenderingInfo* renderingInfo) {
 VkResult MVKCommandBuffer::validateIndexedPerVertexAttachments() {
 	const char* error = _recordedRenderingError;
 	if (!_recordedAttachmentsKnown && !_doesContinueRenderPass) { error = "indexed compute capture requires known rendering attachments."; }
-	if (_currentSubpassInfo.renderpass && _currentSubpassInfo.renderpass->getSubpass(_currentSubpassInfo.subpassIndex)->hasResolveAttachments()) { error = "indexed compute capture cannot split rendering with resolve attachments."; }
+	if (_currentSubpassInfo.renderpass) {
+		if (const char* resolveError = _currentSubpassInfo.renderpass->getSubpass(_currentSubpassInfo.subpassIndex)->getPerVertexResolveError()) { error = resolveError; }
+	}
 	return error ? reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR %s", error) : VK_SUCCESS;
 }
 
@@ -614,7 +619,7 @@ void MVKCommandEncoder::encodeSecondary(MVKCommandBuffer* secondaryCmdBuffer) {
 
 const char* MVKCommandEncoder::getIndexedPerVertexAttachmentError() {
 	if (!isInRenderPass()) { return "indexed compute capture requires known rendering attachments."; }
-	if (getSubpass()->hasResolveAttachments()) { return "indexed compute capture cannot split rendering with resolve attachments."; }
+	if (const char* error = getSubpass()->getPerVertexResolveError()) { return error; }
 	// These are the begin-render-pass views, including imageless and dynamic rendering attachments.
 	// An empty list in an active render pass is valid; there is no image content to preserve.
 	for (auto* attachment : _attachments) {
@@ -1125,6 +1130,7 @@ void MVKCommandEncoder::updateAttachmentInputIndices(const MVKArrayRef<uint32_t>
 void MVKCommandEncoder::finalizeDrawState(MVKGraphicsStage stage) {
     if (stage == kMVKGraphicsStageVertex) {
         // Must happen before switching encoders.
+		_isPerVertexRenderSplit = _mtlRenderEncoder && _isIndexedDraw && getGraphicsPipeline() && getGraphicsPipeline()->usesPerVertexInputBuffer();
         encodeStoreActions(true);
     }
 	if (stage == kMVKGraphicsStageRasterization) {
@@ -1215,7 +1221,9 @@ void MVKCommandEncoder::endMetalRenderEncoding() {
 	encodeBarrierUpdates();
 	endMetalEncoding(_mtlRenderEncoder);
 
-	getSubpass()->resolveUnresolvableAttachments(this, _attachments.contents());
+	bool resolve = !_isPerVertexRenderSplit;
+	_isPerVertexRenderSplit = false;
+	if (resolve) { getSubpass()->resolveUnresolvableAttachments(this, _attachments.contents()); }
 	endCurrentMetalEncoding();
 
     _occlusionQueryState.endMetalRenderPass(this);
