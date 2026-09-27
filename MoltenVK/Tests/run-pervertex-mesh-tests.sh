@@ -28,9 +28,17 @@ spirv-as --target-env vulkan1.3 "$output/shaders/draw-id-uint.spvasm" -o "$outpu
 spirv-val --target-env vulkan1.3 "$output/shaders/draw-id-uint.mesh.spv"
 grep -q 'OpLoad %uint %gl_DrawIDARB' "$output/shaders/draw-id-uint.spvasm"
 compile mesh.mesh buffer-address.mesh.spv -DBUFFER_ADDRESS
+compile mesh.mesh permuted.mesh.spv -DPERMUTED
+compile mesh.mesh block.mesh.spv -DBLOCK_OUTPUT
+compile mesh.mesh matrix.mesh.spv -DMATRIX_OUTPUT
 compile task.task task.task.spv
 compile interp.frag interp.frag.spv
 compile pervertex.frag pervertex.frag.spv
+compile pervertex.frag pervertex-swapped.frag.spv -DSWAPPED
+compile pervertex.frag barycentric.frag.spv -DBARYCENTRIC
+compile pervertex.frag pervertex-consistency.frag.spv -DCONSISTENCY
+compile pervertex.frag pervertex-block.frag.spv -DBLOCK
+compile pervertex.frag pervertex-matrix.frag.spv -DMATRIX
 for name in dev shipping; do
 	tree=$output/$name/src
 	rm -rf "$tree" && mkdir -p "$tree/External"
@@ -40,7 +48,7 @@ for name in dev shipping; do
 	bash "$tree/MoltenVK/Tests/PerVertexTES/build-library.sh" "$output/$name" OFF "$device" > /dev/null
 	cat "$output/$name/PROVENANCE.txt"
 	lib=$output/$name/build/moltenvk/MoltenVK
-	xcrun clang++ -std=c++17 -arch arm64 -O1 -Wall -Wextra -Werror -Wno-missing-field-initializers -I"$root/External/Vulkan-Headers/include" "$mesh/mesh-draw.cpp" "$lib/libMoltenVK.1.4.3.dylib" -Wl,-rpath,"$lib" -Wl,-U,_mvkEnableMeshTestDevice -o "$output/$name/mesh-draw"
+	xcrun clang++ -std=c++17 -arch arm64 -O1 -Wall -Wextra -Werror -Wno-missing-field-initializers -I"$root/External/Vulkan-Headers/include" "$mesh/mesh-draw.cpp" "$lib/libMoltenVK.1.4.3.dylib" -Wl,-rpath,"$lib" -Wl,-U,_mvkEnableMeshTestDevice -Wl,-U,_mvkEnableTESFixtureDevice -o "$output/$name/mesh-draw"
 done
 cases=0
 run() { # library scenario
@@ -56,7 +64,9 @@ run() { # library scenario
 	grep -E '^  |^MESH_DRAW|^VK_EXT|^DEVICE' "$log" | sed 's/^/    /' | head -6
 	if [[ $verdict != PASS ]]; then echo "STOP: inspect $log before any further GPU work"; exit 1; fi
 }
-for scenario in draw grid twice reject-task reject-descriptor reject-per-primitive reject-pervertex reject-specialization reject-indirect reject-draw-id reject-draw-id-uint reject-buffer-address no-adapter; do run dev "$scenario"; done
+for scenario in draw grid twice pervertex pervertex-swapped pervertex-permuted barycentric barycentric-permuted pervertex-consistency \
+	reject-task reject-descriptor reject-per-primitive reject-pervertex-block reject-pervertex-matrix reject-specialization reject-indirect \
+	reject-draw-id reject-draw-id-uint reject-buffer-address no-adapter; do run dev "$scenario"; done
 run shipping public-device-gate
 rm -f "$output"/runs/*.rgba
 ( cd "$output" && shasum -a 256 shaders/* */PROVENANCE.txt runs/* dev/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib shipping/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib > EVIDENCE.sha256 )
