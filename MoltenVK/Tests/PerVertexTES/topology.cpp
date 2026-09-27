@@ -6,6 +6,9 @@
 // Each scenario compares the PerVertex replay with the ordinary hardware TES pipeline (coverage and
 // interpolated values), with the barycentric-order consistency Vulkan requires, and with an independent
 // CPU model of the ordered triangles; a corner-swapped fragment must fail that model.
+// Every rendered scenario also checks Vulkan's fragment gl_PrimitiveID (the TES patch index) and the
+// tessellation coordinates the fragment receives: invariance rules 3, 4 and 8 and bitwise equality with the
+// coordinates the hardware tessellator gives the ordinary TES. Seam scenarios share one edge between patches.
 #define VK_ENABLE_BETA_EXTENSIONS 1 // VK_KHR_portability_subset
 #include <vulkan/vulkan.h>
 
@@ -18,6 +21,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -59,6 +63,8 @@ struct Scenario {
 	bool cull = false;
 	std::string vertex = "topology.vert.spv";
 	bool resources = false;  // VS storage-buffer counter and fragment uniform scale.
+	uint32_t vertexCount = 0;  // Draw size when it is not three vertices per patch.
+	bool seam = false;  // The second patch shares an edge with the first one.
 };
 
 // Vulkan levels after clamp and round-up, or 0 for a discarded patch.
@@ -87,14 +93,23 @@ static void provenTopology(uint32_t level, std::vector<Point>& points, std::vect
 	} else { points.clear(); triangles.clear(); }
 }
 
-static std::array<std::array<double, 2>, 3> controlPoints(uint32_t patch, bool mirrored) {
+// Integer pixel positions. A seam pair shares the edge (60,60)-(32,4): the u = 0 edge of the first patch is
+// the w = 0 edge of the second one, traversed in the opposite direction (invariance rules 3 and 4).
+static std::array<std::array<double, 2>, 3> controlPoints(uint32_t patch, bool mirrored, bool seam) {
+	if (seam && patch == 1) return {{{32, 4}, {60, 60}, {88, 4}}};
 	std::array<std::array<double, 2>, 3> points{{{4, 60}, {60, 60}, {32, 4}}};
 	for (auto& point : points) point[0] += kCell * patch;
 	if (mirrored) std::swap(points[1], points[2]);
 	return points;
 }
 
-struct Image { std::vector<uint8_t> rgba; VkResult submit = VK_SUCCESS, wait = VK_SUCCESS; uint32_t invocations = 0; };
+// One tessellated vertex: patch, then u, v, w bits, mapped to its pixel-position bits.
+using CoordinateKey = std::array<uint32_t, 4>;
+using Coordinates = std::map<CoordinateKey, std::array<uint32_t, 2>>;
+
+static float asFloat(uint32_t word) { float value; memcpy(&value, &word, 4); return value; }
+
+struct Image { std::vector<uint8_t> rgba; VkResult submit = VK_SUCCESS, wait = VK_SUCCESS; uint32_t invocations = 0; std::vector<uint32_t> tesCapture, fragmentCapture; };
 
 int main(int argc, char** argv) {
 	try {
@@ -120,6 +135,17 @@ int main(int argc, char** argv) {
 		scenarios["drawid"] = {{uniform(two), uniform(three)}, {}, false, false, "drawid.vert.spv"};
 		scenarios["resources"] = {{uniform(two), {{0, three, three, three}}, uniform(three)}, {}, false, false, "resources.vert.spv", true};
 		scenarios["inner-nan"] = {{{{two, two, two, nan}}}, {}, true};
+		for (uint32_t level : {1u, 2u, 3u}) {
+			Scenario seam{{uniform(bits(float(level))), uniform(bits(float(level)))}};
+			seam.seam = true;
+			scenarios["seam" + std::to_string(level)] = seam;
+		}
+		// Vulkan runs the VS for every vertex of a draw, including vertices that do not complete a patch.
+		for (uint32_t vertexCount : {1u, 2u, 4u, 5u}) {
+			Scenario partial{vertexCount < 3 ? std::vector<Patch>{} : std::vector<Patch>{uniform(two)}, {}, false, false, "resources.vert.spv", true};
+			partial.vertexCount = vertexCount;
+			scenarios["vertices" + std::to_string(vertexCount)] = partial;
+		}
 		const bool rejection = scenarioName.rfind("reject-", 0) == 0 || scenarioName == "public-device-gate";
 		if (!rejection && !scenarios.count(scenarioName)) throw std::runtime_error("Unknown scenario");
 		Scenario scenario = rejection ? Scenario{{uniform(two)}, {}} : scenarios[scenarioName];
@@ -175,10 +201,11 @@ int main(int argc, char** argv) {
 		VkPhysicalDeviceShaderDrawParametersFeatures drawParameters{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES};
 		barycentric.pNext = &drawParameters;
 		vkGetPhysicalDeviceFeatures2(physical, &features);
-		if (!drawParameters.shaderDrawParameters || !features.features.vertexPipelineStoresAndAtomics) throw std::runtime_error("Draw parameters or vertex stores unavailable");
+		if (!drawParameters.shaderDrawParameters || !features.features.vertexPipelineStoresAndAtomics || !features.features.fragmentStoresAndAtomics) throw std::runtime_error("Draw parameters, vertex or fragment stores unavailable");
 		features.features = {};
 		features.features.tessellationShader = VK_TRUE;
 		features.features.vertexPipelineStoresAndAtomics = VK_TRUE;
+		features.features.fragmentStoresAndAtomics = VK_TRUE;
 		float priority = 1;
 		VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
 		queueInfo.queueFamilyIndex = family;
@@ -233,6 +260,11 @@ int main(int argc, char** argv) {
 		Buffer readback = makeBuffer(kWidth * kHeight * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 		Buffer counter = makeBuffer(256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 		Buffer scale = makeBuffer(256, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+		// Tessellation coordinates: every ordinary TES invocation appends six words; the PerVertex fragment
+		// stores three vertices of six words per pixel.
+		constexpr uint32_t kTesCaptureSlots = 4096;
+		Buffer tesCapture = makeBuffer(4 + 24 * kTesCaptureSlots, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+		Buffer fragmentCapture = makeBuffer(kWidth * kHeight * 18 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 		const float scaleValue[4] = {1.0f, 0.5f, 1.0f, 1.0f};
 		memcpy(scale.data, scaleValue, sizeof(scaleValue));
 
@@ -304,9 +336,18 @@ int main(int argc, char** argv) {
 		setLayoutInfo.pBindings = resourceBindings;
 		VkDescriptorSetLayout resourceSetLayout = VK_NULL_HANDLE;
 		check(vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &resourceSetLayout), "Create resource set layout");
-		VkDescriptorPoolSize poolSizes[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}, {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}};
+		// Coordinate captures: an ordinary TES storage buffer and a PerVertex fragment storage buffer.
+		VkDescriptorSetLayoutBinding tesCaptureBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, nullptr};
+		VkDescriptorSetLayoutBinding fragmentCaptureBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+		setLayoutInfo.bindingCount = 1;
+		setLayoutInfo.pBindings = &tesCaptureBinding;
+		VkDescriptorSetLayout tesCaptureSetLayout = VK_NULL_HANDLE, fragmentCaptureSetLayout = VK_NULL_HANDLE;
+		check(vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &tesCaptureSetLayout), "Create TES capture set layout");
+		setLayoutInfo.pBindings = &fragmentCaptureBinding;
+		check(vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &fragmentCaptureSetLayout), "Create fragment capture set layout");
+		VkDescriptorPoolSize poolSizes[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3}, {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}};
 		VkDescriptorPoolCreateInfo descriptorPoolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-		descriptorPoolInfo.maxSets = 1;
+		descriptorPoolInfo.maxSets = 3;
 		descriptorPoolInfo.poolSizeCount = 2;
 		descriptorPoolInfo.pPoolSizes = poolSizes;
 		VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
@@ -328,14 +369,32 @@ int main(int argc, char** argv) {
 			writes[i].pBufferInfo = &bufferInfos[i];
 		}
 		vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+		VkDescriptorSet tesCaptureSet = VK_NULL_HANDLE, fragmentCaptureSet = VK_NULL_HANDLE;
+		setAllocation.pSetLayouts = &tesCaptureSetLayout;
+		check(vkAllocateDescriptorSets(device, &setAllocation, &tesCaptureSet), "Allocate TES capture set");
+		setAllocation.pSetLayouts = &fragmentCaptureSetLayout;
+		check(vkAllocateDescriptorSets(device, &setAllocation, &fragmentCaptureSet), "Allocate fragment capture set");
+		VkDescriptorBufferInfo captureInfos[2] = {{tesCapture.buffer, 0, VK_WHOLE_SIZE}, {fragmentCapture.buffer, 0, VK_WHOLE_SIZE}};
+		const VkDescriptorSet captureSets[2] = {tesCaptureSet, fragmentCaptureSet};
+		for (uint32_t i = 0; i < 2; ++i) {
+			writes[i].dstSet = captureSets[i];
+			writes[i].dstBinding = 0;
+			writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+			writes[i].pBufferInfo = &captureInfos[i];
+		}
+		vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
 		VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-		VkPipelineLayout emptyLayout = VK_NULL_HANDLE, uniformLayout = VK_NULL_HANDLE, resourceLayout = VK_NULL_HANDLE, pushLayout = VK_NULL_HANDLE;
+		VkPipelineLayout emptyLayout = VK_NULL_HANDLE, uniformLayout = VK_NULL_HANDLE, resourceLayout = VK_NULL_HANDLE, pushLayout = VK_NULL_HANDLE, tesCaptureLayout = VK_NULL_HANDLE, fragmentCaptureLayout = VK_NULL_HANDLE;
 		check(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &emptyLayout), "Create pipeline layout");
 		layoutInfo.setLayoutCount = 1;
 		layoutInfo.pSetLayouts = &setLayout;
 		check(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &uniformLayout), "Create uniform pipeline layout");
 		layoutInfo.pSetLayouts = &resourceSetLayout;
 		check(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &resourceLayout), "Create resource pipeline layout");
+		layoutInfo.pSetLayouts = &tesCaptureSetLayout;
+		check(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &tesCaptureLayout), "Create TES capture pipeline layout");
+		layoutInfo.pSetLayouts = &fragmentCaptureSetLayout;
+		check(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &fragmentCaptureLayout), "Create fragment capture pipeline layout");
 		VkPushConstantRange pushRange{VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 0, 4};
 		layoutInfo.setLayoutCount = 0;
 		layoutInfo.pushConstantRangeCount = 1;
@@ -354,7 +413,9 @@ int main(int argc, char** argv) {
 			check(vkCreateShaderModule(device, &info, nullptr, &result), "Create shader module");
 			return modules[name] = result;
 		};
-		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, cache = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; };
+		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, cache = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; };
+		auto pipelineLayout = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureLayout : o.capture == 2 ? fragmentCaptureLayout : o.uniform ? uniformLayout : o.resources ? resourceLayout : o.push ? pushLayout : emptyLayout; };
+		auto descriptorSet = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureSet : o.capture == 2 ? fragmentCaptureSet : o.resources ? resourceSet : VK_NULL_HANDLE; };
 		auto createPipeline = [&](const PipelineOptions& o, VkPipeline& pipeline) {
 			VkPipelineShaderStageCreateInfo stages[4]{};
 			const VkShaderStageFlagBits stageBits[4] = {VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, VK_SHADER_STAGE_FRAGMENT_BIT};
@@ -408,7 +469,7 @@ int main(int argc, char** argv) {
 			info.pRasterizationState = &raster;
 			info.pMultisampleState = &multisample;
 			info.pColorBlendState = &blend;
-			info.layout = o.uniform ? uniformLayout : o.resources ? resourceLayout : o.push ? pushLayout : emptyLayout;
+			info.layout = pipelineLayout(o);
 			info.renderPass = renderPass;
 			VkPipelineCache cache = VK_NULL_HANDLE;
 			if (o.cache) {
@@ -433,13 +494,13 @@ int main(int argc, char** argv) {
 		VkFence fence = VK_NULL_HANDLE;
 		check(vkCreateFence(device, &fenceInfo, nullptr, &fence), "Create fence");
 
-		// Records: host zeros the vertex buffer; the GPU copies positions and levels, then draws.
-		auto record = [&](VkPipeline pipeline, const std::vector<Patch>& patches, uint32_t firstVertex, uint32_t instances, bool resources) {
+		// Records: host zeros the vertex buffer; the GPU copies pixel positions and levels, then draws.
+		auto record = [&](VkPipeline pipeline, const std::vector<Patch>& patches, uint32_t firstVertex, uint32_t instances, const PipelineOptions& o) {
 			memset(staging.data, 0, staging.size);
 			for (uint32_t p = 0; p < patches.size(); ++p) {
-				auto points = controlPoints(p, patches[p].mirrored);
+				auto points = controlPoints(p, patches[p].mirrored, scenario.seam);
 				for (uint32_t c = 0; c < 3; ++c) {
-					float position[2] = {float(points[c][0] * 2 / kWidth - 1), float(points[c][1] * 2 / kHeight - 1)};
+					float position[2] = {float(points[c][0]), float(points[c][1])};
 					memcpy(staging.data + (3 * p + c) * kVertexStride, position, 8);
 					memcpy(staging.data + (3 * p + c) * kVertexStride + 16, patches[p].levels.data(), 16);
 				}
@@ -469,10 +530,11 @@ int main(int argc, char** argv) {
 			VkClearRect priorRect{{{0, 0}, {2, 2}}, 0, 1};
 			vkCmdClearAttachments(command, 1, &prior, 1, &priorRect);
 			vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-			if (resources) vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, resourceLayout, 0, 1, &resourceSet, 0, nullptr);
+			VkDescriptorSet set = descriptorSet(o);
+			if (set) vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout(o), 0, 1, &set, 0, nullptr);
 			VkDeviceSize offset = 0;
 			vkCmdBindVertexBuffers(command, 0, 1, &vertices.buffer, &offset);
-			vkCmdDraw(command, uint32_t(3 * patches.size()), instances, firstVertex, 0);
+			vkCmdDraw(command, scenario.vertexCount ? scenario.vertexCount : uint32_t(3 * patches.size()), instances, firstVertex, 0);
 			vkCmdEndRenderPass(command);
 			VkImageMemoryBarrier toTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
 			toTransfer.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -490,15 +552,17 @@ int main(int argc, char** argv) {
 			VkMemoryBarrier toHost{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
 			toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
 			toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-			vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, nullptr, 0, nullptr);
+			vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, nullptr, 0, nullptr);
 			return vkEndCommandBuffer(command);
 		};
 		auto render = [&](const PipelineOptions& o, const std::vector<Patch>& patches, const std::string& name) {
 			VkPipeline pipeline = VK_NULL_HANDLE;
 			check(createPipeline(o, pipeline), ("Create pipeline " + name).c_str());
-			check(record(pipeline, patches, 0, 1, o.resources), ("Record " + name).c_str());
+			check(record(pipeline, patches, 0, 1, o), ("Record " + name).c_str());
 			memset(vertices.data, 0, vertices.size);
 			memset(counter.data, 0, counter.size);
+			memset(tesCapture.data, 0, tesCapture.size);
+			memset(fragmentCapture.data, 0, fragmentCapture.size);
 			memset(readback.data, 0, readback.size);
 			check(vkResetFences(device, 1, &fence), "Reset fence");
 			VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -510,6 +574,10 @@ int main(int argc, char** argv) {
 			result.rgba.assign(readback.data, readback.data + readback.size);
 			std::ofstream(prefix + "-" + name + ".rgba", std::ios::binary).write(reinterpret_cast<const char*>(result.rgba.data()), result.rgba.size());
 			memcpy(&result.invocations, counter.data, 4);
+			result.tesCapture.resize(tesCapture.size / 4);
+			memcpy(result.tesCapture.data(), tesCapture.data, tesCapture.size);
+			result.fragmentCapture.resize(fragmentCapture.size / 4);
+			memcpy(result.fragmentCapture.data(), fragmentCapture.data, fragmentCapture.size);
 			std::printf("render %s submit=%d wait=%d vs_counter=%u\n", name.c_str(), result.submit, result.wait, result.invocations);
 			return result;
 		};
@@ -530,7 +598,7 @@ int main(int argc, char** argv) {
 			else if (scenarioName == "reject-no-admission") {}
 			else if (scenarioName == "reject-first-vertex" || scenarioName == "reject-instances") {
 				check(createPipeline(o, pipeline), "Create admitted pipeline");
-				actual = record(pipeline, {uniform(two)}, scenarioName == "reject-first-vertex" ? 3 : 0, scenarioName == "reject-instances" ? 2 : 1, false);
+				actual = record(pipeline, {uniform(two)}, scenarioName == "reject-first-vertex" ? 3 : 0, scenarioName == "reject-instances" ? 2 : 1, o);
 				std::printf("TES_TOPOLOGY %s %s: vkEndCommandBuffer=%d expected=%d, nothing submitted\n", actual == expected ? "PASS" : "FAIL", scenarioName.c_str(), actual, expected);
 				return actual == expected ? 0 : 2;
 			} else throw std::runtime_error("Unknown refusal");
@@ -569,6 +637,21 @@ int main(int argc, char** argv) {
 			return o;
 		};
 		const std::string suffix = scenario.resources ? "-resources.frag.spv" : ".frag.spv";
+		if (scenario.patches.empty()) {
+			// One or two vertices form no patch: nothing is tessellated, yet Vulkan runs the VS for each vertex.
+			Image ordinaryImage = render(options("ordinary" + suffix), {}, "ordinary");
+			Image interp = render(options("interp" + suffix), {}, "interp");
+			uint32_t ordinaryPixels = 0, pixels = 0;
+			for (uint32_t i = 0; i < kWidth * kHeight; ++i) { ordinaryPixels += covered(ordinaryImage.rgba, i); pixels += covered(interp.rgba, i); }
+			verdict(ordinaryImage.submit == VK_SUCCESS && ordinaryImage.wait == VK_SUCCESS && interp.submit == VK_SUCCESS && interp.wait == VK_SUCCESS, "all submissions and fences succeed");
+			std::printf("  VS storage counter: expected=%u ordinary=%u pervertex=%u\n", scenario.vertexCount, ordinaryImage.invocations, interp.invocations);
+			verdict(ordinaryImage.invocations == scenario.vertexCount && interp.invocations == scenario.vertexCount, "VS side effects run once per vertex in ordinary and PerVertex pipelines without a complete patch");
+			std::printf("  covered pixels: ordinary=%u pervertex=%u\n", ordinaryPixels, pixels);
+			verdict(pixels == 0 && prior(interp.rgba), "no PerVertex pixel, earlier attachment write preserved");
+			std::printf("TES_TOPOLOGY %s %s %s\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), winding.c_str());
+			vkDeviceWaitIdle(device);
+			return pass ? 0 : 2;
+		}
 		Image ordinaryImage = render(options("ordinary" + suffix), scenario.reference, "ordinary");
 		Image interp = render(options("interp" + suffix), scenario.patches, "interp");
 		Image ordered = render(options("flat-ordered.frag.spv"), scenario.patches, "ordered");
@@ -578,7 +661,7 @@ int main(int argc, char** argv) {
 		verdict(pass, "all submissions and fences succeed");
 		if (scenario.resources) {
 			// Vulkan runs the VS for every vertex, discarded patches included; MoltenVK runs it exactly once.
-			uint32_t vertexCount = uint32_t(3 * scenario.patches.size());
+			uint32_t vertexCount = scenario.vertexCount ? scenario.vertexCount : uint32_t(3 * scenario.patches.size());
 			bool exact = true;
 			for (const Image* image : {&ordinaryImage, &interp, &ordered, &swapped, &consistency}) exact &= image->invocations == vertexCount;
 			std::printf("  VS storage counter: expected=%u ordinary=%u pervertex=%u\n", vertexCount, ordinaryImage.invocations, interp.invocations);
@@ -616,7 +699,7 @@ int main(int argc, char** argv) {
 			std::vector<Point> points;
 			std::vector<Triangle> topology;
 			provenTopology(level, points, topology);
-			auto control = controlPoints(p, scenario.patches[p].mirrored);
+			auto control = controlPoints(p, scenario.patches[p].mirrored, scenario.seam);
 			for (auto triangle : topology) {
 				if (ccw) std::swap(triangle[1], triangle[2]);
 				double cx = 0, cy = 0, expected[3] = {};
@@ -644,6 +727,108 @@ int main(int argc, char** argv) {
 		verdict(triangles > 0 && orderedWrong == 0, "ordered PerVertex values match the CPU model at every triangle");
 		verdict(swappedWrong > 0, "negative control: swapped corners fail the CPU model");
 		verdict(prior(ordinaryImage.rgba) && prior(interp.rgba), "earlier attachment write preserved");
+
+		// 4. Tessellation coordinates: the PerVertex fragment stores its three TES vertices per pixel and an
+		// ordinary TES appends the hardware coordinates. Fragment gl_PrimitiveID is checked on the same pixels.
+		PipelineOptions extra = options("coords.frag.spv");
+		extra.vert = scenario.resources ? "topology.vert.spv" : scenario.vertex;
+		extra.resources = false;
+		extra.capture = 2;
+		Image fragmentCoordinates = render(extra, scenario.patches, "coords");
+		extra.frag = "ordinary.frag.spv";
+		extra.tese = ccw ? "capture-ccw.tese.spv" : "capture-cw.tese.spv";
+		extra.capture = 1;
+		Image hardwareCoordinates = render(extra, scenario.reference, "hardware-coords");
+		extra.tese = tese;
+		extra.capture = 0;
+		extra.frag = "primitive-id.frag.spv";
+		Image primitive = render(extra, scenario.patches, "primitive-id");
+		extra.frag = "primitive-id-ordinary.frag.spv";
+		Image ordinaryPrimitive = render(extra, scenario.reference, "ordinary-primitive-id");
+		bool submitted = true;
+		for (const Image* image : {&fragmentCoordinates, &hardwareCoordinates, &primitive, &ordinaryPrimitive}) submitted &= image->submit == VK_SUCCESS && image->wait == VK_SUCCESS;
+		verdict(submitted, "coordinate and gl_PrimitiveID submissions succeed");
+		Coordinates perVertex, hardware;
+		for (uint32_t i = 0; i < kWidth * kHeight; ++i)
+			for (uint32_t k = 0; k < 3; ++k) {
+				const uint32_t* w = &fragmentCoordinates.fragmentCapture[18 * i + 6 * k];
+				if (w[1] || w[2] || w[3]) perVertex[{uint32_t(asFloat(w[0])), w[1], w[2], w[3]}] = {w[4], w[5]};
+			}
+		const uint32_t tesInvocations = hardwareCoordinates.tesCapture[0];
+		for (uint32_t slot = 0; slot < std::min(tesInvocations, kTesCaptureSlots); ++slot) {
+			const uint32_t* w = &hardwareCoordinates.tesCapture[1 + 6 * slot];
+			hardware[{w[0], w[1], w[2], w[3]}] = {w[4], w[5]};
+		}
+		// Rule 8: 1.0 - x is exact for every component. Rule 3: an edge vertex (x, 1-x) has its exact mirror (1-x, x).
+		auto invariance = [](const Coordinates& set, uint32_t& inexact, uint32_t& asymmetric) {
+			inexact = asymmetric = 0;
+			for (const auto& entry : set) {
+				const CoordinateKey& key = entry.first;
+				for (int c = 1; c <= 3; ++c) {
+					float x = asFloat(key[c]);
+					inexact += !(x >= 0.0f && x <= 1.0f && double(1.0f - x) == 1.0 - double(x));
+				}
+				for (int zero = 1; zero <= 3; ++zero) {
+					int a = zero == 1 ? 2 : 1, b = zero == 3 ? 2 : 3;
+					if (key[zero] || !key[a] || !key[b]) continue;
+					CoordinateKey mirror = key;
+					std::swap(mirror[a], mirror[b]);
+					asymmetric += bits(1.0f - asFloat(key[a])) != key[b] || !set.count(mirror);
+				}
+			}
+		};
+		uint32_t inexact = 0, asymmetric = 0, hardwareInexact = 0, hardwareAsymmetric = 0;
+		invariance(perVertex, inexact, asymmetric);
+		invariance(hardware, hardwareInexact, hardwareAsymmetric);
+		// Every rendered patch has its full vertex set, identical to the hardware coordinates of that patch.
+		uint32_t countMismatch = 0, coordinateMismatch = 0, positionMismatch = 0;
+		for (uint32_t p = 0; p < scenario.patches.size(); ++p) {
+			uint32_t level = vulkanLevel(scenario.patches[p]);
+			bool culled = scenario.cull && scenario.patches[p].mirrored;
+			uint32_t expected = culled ? 0 : level == 1 ? 3 : level == 2 ? 7 : level == 3 ? 12 : 0;
+			Coordinates mine, theirs;
+			for (const auto& entry : perVertex) if (entry.first[0] == p) mine.insert(entry);
+			for (const auto& entry : hardware) if (entry.first[0] == p) theirs.insert(entry);
+			countMismatch += mine.size() != expected;
+			if (culled || scenarioName == "next") continue;  // "next" renders a different level on the ordinary path.
+			for (const auto& entry : theirs) {
+				auto found = mine.find(entry.first);
+				if (found == mine.end()) ++coordinateMismatch;
+				else positionMismatch += found->second != entry.second;
+			}
+			coordinateMismatch += mine.size() > theirs.size() ? uint32_t(mine.size() - theirs.size()) : 0;
+		}
+		std::printf("  tessellation coordinates: pervertex_vertices=%zu inexact_complement=%u asymmetric_edge=%u count_mismatch=%u; hardware_vertices=%zu tes_invocations=%u inexact_complement=%u asymmetric_edge=%u; coordinate_mismatch=%u position_mismatch=%u\n",
+		            perVertex.size(), inexact, asymmetric, countMismatch, hardware.size(), tesInvocations, hardwareInexact, hardwareAsymmetric, coordinateMismatch, positionMismatch);
+		verdict(!perVertex.empty() && inexact == 0, "rule 8: 1.0 - x is exact for every PerVertex tessellation coordinate");
+		verdict(asymmetric == 0, "rule 3: every PerVertex edge vertex (x, 1-x) has the exact mirror (1-x, x)");
+		verdict(countMismatch == 0, "every rendered patch shows its full vertex set");
+		verdict(tesInvocations <= kTesCaptureSlots && coordinateMismatch == 0 && positionMismatch == 0, "PerVertex coordinates and positions bitwise equal to the hardware tessellator's");
+		if (scenario.seam) {
+			// Rule 4: the u = 0 edge of the first patch and the w = 0 edge of the second give the same vertices.
+			auto edge = [](const Coordinates& set, uint32_t patch, int zero) {
+				std::set<std::array<uint32_t, 2>> pixels;
+				for (const auto& entry : set) if (entry.first[0] == patch && !entry.first[zero]) pixels.insert(entry.second);
+				return pixels;
+			};
+			auto first = edge(perVertex, 0, 1), second = edge(perVertex, 1, 3);
+			auto hardwareFirst = edge(hardware, 0, 1), hardwareSecond = edge(hardware, 1, 3);
+			std::printf("  seam: pervertex first=%zu second=%zu equal=%d; hardware first=%zu second=%zu equal=%d\n", first.size(), second.size(), first == second, hardwareFirst.size(), hardwareSecond.size(), hardwareFirst == hardwareSecond);
+			verdict(first.size() == vulkanLevel(scenario.patches[0]) + 1 && first == second, "rule 4: both patches give bitwise-equal positions on the shared edge");
+			verdict(hardwareFirst == hardwareSecond, "reference: the hardware tessellator is watertight on the same edge");
+		}
+		uint32_t primitivePixels = 0, primitiveWrong = 0, uncaptured = 0, ordinaryPrimitiveWrong = 0;
+		for (uint32_t i = 0; i < kWidth * kHeight; ++i) {
+			if (!covered(primitive.rgba, i)) continue;
+			const uint32_t* w = &fragmentCoordinates.fragmentCapture[18 * i];
+			if (!w[1] && !w[2] && !w[3]) { ++uncaptured; continue; }
+			uint32_t patch = uint32_t(asFloat(w[0]));
+			++primitivePixels;
+			primitiveWrong += primitive.rgba[4 * i] != patch;
+			ordinaryPrimitiveWrong += covered(ordinaryPrimitive.rgba, i) && ordinaryPrimitive.rgba[4 * i] != patch;
+		}
+		std::printf("  fragment gl_PrimitiveID: pixels=%u pervertex_wrong=%u uncaptured=%u ordinary_wrong=%u (ordinary informative)\n", primitivePixels, primitiveWrong, uncaptured, ordinaryPrimitiveWrong);
+		verdict(primitivePixels > 0 && primitiveWrong == 0 && uncaptured == 0, "PerVertex fragment gl_PrimitiveID is the TES patch index on every covered pixel");
 		if (scenarioName == "next") {
 			// Same Vulkan level 2 as exact 2.0 for PerVertex; the ordinary half path renders level 1 instead.
 			Image twoImage = render({"topology.tesc.spv", tese, "interp.frag.spv"}, {uniform(two), uniform(two)}, "interp-two");
