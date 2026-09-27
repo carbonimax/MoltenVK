@@ -294,7 +294,9 @@ void MVKRenderSubpass::populateMTLRenderPassDescriptor(MTLRenderPassDescriptor* 
 #endif
 }
 
-const char* mvkGetPerVertexResolveError(const MVKPhysicalDeviceMetalFeatures& features, MVKPixelFormats* formats, VkFormat resolveFormat, VkImageAspectFlagBits aspect, VkResolveModeFlagBits mode) {
+const char* mvkGetPerVertexResolveError(const MVKPhysicalDeviceMetalFeatures& features, MVKPixelFormats* formats, VkFormat resolveFormat, VkImageAspectFlagBits aspect, VkResolveModeFlagBits mode, VkRenderingFlags renderingFlags) {
+	// Suspension selects Store, which Metal forbids while a native resolve texture is attached.
+	if (mvkIsAnyFlagEnabled(renderingFlags, VK_RENDERING_SUSPENDING_BIT)) { return "indexed capture cannot suspend rendering with resolve attachments."; }
 	if (!features.combinedStoreResolveAction) { return "indexed capture with resolve requires combined store/resolve to preserve the final source."; }
 	if (aspect == VK_IMAGE_ASPECT_COLOR_BIT && !mvkAreAllFlagsEnabled(formats->getCapabilities(resolveFormat), kMVKMTLFmtCapsResolve)) { return "indexed capture does not support software color resolve."; }
 	if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT && (!features.depthResolve || (mode != VK_RESOLVE_MODE_SAMPLE_ZERO_BIT && mode != VK_RESOLVE_MODE_MIN_BIT && mode != VK_RESOLVE_MODE_MAX_BIT))) { return "indexed capture requires supported native depth resolve."; }
@@ -306,7 +308,7 @@ const char* MVKRenderSubpass::getPerVertexResolveError() {
 	auto check = [&](uint32_t index, VkImageAspectFlagBits aspect, VkResolveModeFlagBits mode) {
 		// Render-pass formats match valid framebuffer/imageless views; dynamic rendering records their effective formats.
 		if (index >= _renderPass->_attachments.size()) { return "indexed capture resolve attachment index is out of range."; }
-		return mvkGetPerVertexResolveError(_renderPass->getMetalFeatures(), _renderPass->getPixelFormats(), _renderPass->_attachments[index].getFormat(), aspect, mode);
+		return mvkGetPerVertexResolveError(_renderPass->getMetalFeatures(), _renderPass->getPixelFormats(), _renderPass->_attachments[index].getFormat(), aspect, mode, _renderPass->getRenderingFlags());
 	};
 	for (size_t i = 0; i < _colorAttachments.size() && i < _resolveAttachments.size(); ++i) {
 		if (_colorAttachments[i].attachment != VK_ATTACHMENT_UNUSED && _resolveAttachments[i].attachment != VK_ATTACHMENT_UNUSED) {
@@ -876,9 +878,8 @@ void MVKAttachmentDescription::encodeStoreAction(MVKCommandEncoder* cmdEncoder,
 	bool isColorFormat = !(isDepthFormat || isStencilFormat);
 
 	bool isMemorylessAttachment = attachment->getImage()->getMTLStorageMode() == MTLStorageModeMemoryless;
-	// An internal capture split stores the multisample source; resolve belongs to the Vulkan boundary.
 	MTLStoreAction storeAction = getMTLStoreAction(subpass, isRenderingEntireAttachment, isMemorylessAttachment,
-												   hasResolveAttachment && !cmdEncoder->_isPerVertexRenderSplit, canResolveFormat, isStencil, storeOverride);
+												   hasResolveAttachment, canResolveFormat, isStencil, storeOverride);
 	if (isColorFormat) {
 		[cmdEncoder->_mtlRenderEncoder setColorStoreAction: storeAction atIndex: caIdx];
 	} else if (isDepthFormat && !isStencil) {

@@ -533,9 +533,6 @@ public:
 	/** Indicates whether the current draw is an indexed draw. */
 	bool _isIndexedDraw;
 
-	/** Only the render encoder ending for an indexed portable capture defers its resolves. */
-	bool _isPerVertexRenderSplit = false;
-
 	/** Consume a preflight reservation and retain its resources until Metal completes. */
 	MVKPerVertexScratch* nextPerVertexScratch();
 

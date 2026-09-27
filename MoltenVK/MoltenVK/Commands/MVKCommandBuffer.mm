@@ -440,7 +440,7 @@ void MVKCommandBuffer::recordRendering(const VkRenderingInfo* renderingInfo) {
 		// Match MVKRenderSubpass: color uses non-null resolve views; depth/stencil also require a resolve mode.
 		if (isResolveAttachment && info->imageView && (aspect == VK_IMAGE_ASPECT_COLOR_BIT || info->resolveMode != VK_RESOLVE_MODE_NONE)) {
 			if (aspect == VK_IMAGE_ASPECT_COLOR_BIT && info->resolveMode != VK_RESOLVE_MODE_AVERAGE_BIT) { _recordedRenderingError = "indexed capture requires average-mode dynamic color resolve."; }
-			if (const char* error = mvkGetPerVertexResolveError(getMetalFeatures(), getPixelFormats(), attachment->getVkFormat(), aspect, info->resolveMode)) { _recordedRenderingError = error; }
+			if (const char* error = mvkGetPerVertexResolveError(getMetalFeatures(), getPixelFormats(), attachment->getVkFormat(), aspect, info->resolveMode, renderingInfo->flags)) { _recordedRenderingError = error; }
 		}
 		if (attachment->getImage()->getMTLStorageMode() == MTLStorageModeMemoryless) { _recordedRenderingError = "indexed compute capture cannot preserve memoryless attachments."; }
 	});
@@ -1130,7 +1130,6 @@ void MVKCommandEncoder::updateAttachmentInputIndices(const MVKArrayRef<uint32_t>
 void MVKCommandEncoder::finalizeDrawState(MVKGraphicsStage stage) {
     if (stage == kMVKGraphicsStageVertex) {
         // Must happen before switching encoders.
-		_isPerVertexRenderSplit = _mtlRenderEncoder && _isIndexedDraw && getGraphicsPipeline() && getGraphicsPipeline()->usesPerVertexInputBuffer();
         encodeStoreActions(true);
     }
 	if (stage == kMVKGraphicsStageRasterization) {
@@ -1221,9 +1220,7 @@ void MVKCommandEncoder::endMetalRenderEncoding() {
 	encodeBarrierUpdates();
 	endMetalEncoding(_mtlRenderEncoder);
 
-	bool resolve = !_isPerVertexRenderSplit;
-	_isPerVertexRenderSplit = false;
-	if (resolve) { getSubpass()->resolveUnresolvableAttachments(this, _attachments.contents()); }
+	getSubpass()->resolveUnresolvableAttachments(this, _attachments.contents());
 	endCurrentMetalEncoding();
 
     _occlusionQueryState.endMetalRenderPass(this);

@@ -68,8 +68,10 @@ elif mutation == 'encoder-resolve':
     joined = joined.replace('return error; }\n\t// These are the begin-render-pass', '(void)error; }\n\t// These are the begin-render-pass')
 elif mutation == 'single-sample-inference':
     joined = joined.replace('for (auto* attachment : _attachments) {', 'for (auto* attachment : _attachments) { if (attachment && getSubpass()->getSampleCount() != VK_SAMPLE_COUNT_1_BIT && attachment->getSampleCount() == VK_SAMPLE_COUNT_1_BIT) { return "old sample inference"; }')
+elif mutation == 'suspended-resolve':
+    joined = joined.replace('if (mvkIsAnyFlagEnabled(renderingFlags, VK_RENDERING_SUSPENDING_BIT))', 'if (false && mvkIsAnyFlagEnabled(renderingFlags, VK_RENDERING_SUSPENDING_BIT))')
 else:
-    assert mutation in (None, 'store', 'load', 'early-native-resolve', 'early-software-resolve', 'leaked-split', 'non-pervertex'), mutation
+    assert mutation in (None, 'store', 'load', 'store-with-resolve'), mutation
 (output / 'AttachmentMethods.inc').write_text(joined)
 # Test production store/load selection and the actual split call chain.
 datatypes = (root / 'MoltenVK/MoltenVK/Vulkan/mvk_datatypes.mm').read_text()
@@ -80,21 +82,21 @@ store = [method(datatypes, 'MTLLoadAction mvkMTLLoadActionFromVkAttachmentLoadOp
 store += [method(renderpass, signature) for signature in (
     'MTLStoreAction MVKAttachmentDescription::getMTLStoreAction(',
     'void MVKAttachmentDescription::encodeStoreAction(', 'void MVKRenderSubpass::encodeStoreActions(',
-    'bool MVKAttachmentDescription::populateMTLRenderPassAttachmentDescriptor(')]
+    'bool MVKAttachmentDescription::populateMTLRenderPassAttachmentDescriptor(', 'void MVKRenderSubpass::populateMTLRenderPassDescriptor(')]
+store = [method(datatypes, signature) for signature in (
+    'MVK_PUBLIC_SYMBOL uint32_t mvkSampleCountFromVkSampleCountFlagBits(',
+    'MTLMultisampleDepthResolveFilter mvkMTLMultisampleDepthResolveFilterFromVkResolveModeFlagBitsInObj(',
+    'MVK_PUBLIC_SYMBOL MTLMultisampleDepthResolveFilter mvkMTLMultisampleDepthResolveFilterFromVkResolveModeFlagBits(',
+    'MTLMultisampleStencilResolveFilter mvkMTLMultisampleStencilResolveFilterFromVkResolveModeFlagBitsInObj(',
+    'MVK_PUBLIC_SYMBOL MTLMultisampleStencilResolveFilter mvkMTLMultisampleStencilResolveFilterFromVkResolveModeFlagBits(')] + store
 store += [method(source, 'void MVKCommandEncoder::encodeStoreActions('), method(source, 'void MVKCommandEncoder::finalizeDrawState('), method(source, 'void MVKCommandEncoder::endMetalRenderEncoding(')]
 store = '\n\n'.join(store)
 if mutation == 'store':
     store = store.replace('encodeStoreActions(true);', 'encodeStoreActions(false);')
 if mutation == 'load':
     store = store.replace('if (loadOverride ||', 'if (false ||')
-if mutation == 'early-native-resolve':
-    store = store.replace('hasResolveAttachment && !cmdEncoder->_isPerVertexRenderSplit', 'hasResolveAttachment')
-if mutation == 'early-software-resolve':
-    store = store.replace('if (resolve) { getSubpass()->resolveUnresolvableAttachments', 'if (resolve || true) { getSubpass()->resolveUnresolvableAttachments')
-if mutation == 'leaked-split':
-    store = store.replace('_isPerVertexRenderSplit = false;', '')
-if mutation == 'non-pervertex':
-    store = store.replace('_mtlRenderEncoder && _isIndexedDraw && getGraphicsPipeline() && getGraphicsPipeline()->usesPerVertexInputBuffer()', '_mtlRenderEncoder != nil')
+if mutation == 'store-with-resolve':
+    store = store.replace('hasResolveAttachment, canResolveFormat, isStencil, storeOverride);', 'hasResolveAttachment && !(cmdEncoder->_isIndexedDraw && cmdEncoder->getGraphicsPipeline()->usesPerVertexInputBuffer()), canResolveFormat, isStencil, storeOverride);')
 (output / 'MultisampleStoreMethods.inc').write_text(store)
 restart = method(source, 'void MVKCommandEncoder::beginMetalRenderPass(')
 assert 'bool isRestart = cmdUse == kMVKCommandUseRestartSubpass;' in restart

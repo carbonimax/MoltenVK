@@ -1139,21 +1139,36 @@ VkResult MVKImage::useIOSurface(IOSurfaceRef ioSurface) {
 }
 
 MTLStorageMode MVKImage::getMTLStorageMode() {
-    if ( !_memoryBindings[0]->_deviceMemory ) return MTLStorageModePrivate;
+    // Imported textures cannot be promoted. Report their real storage so render-pass
+    // load/store selection and indexed PerVertex capture still reject true memoryless backing.
+    if (_planes[0]->_mtlTexture) { return _planes[0]->_mtlTexture.storageMode; }
+    MVKImageMemoryBinding* memoryBinding = _memoryBindings[0];
+    MVKDeviceMemory* dvcMem = memoryBinding->_deviceMemory;
+    if (!dvcMem) { return MTLStorageModePrivate; }
+    if ((dvcMem->_externalMemoryHandleType & VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLTEXTURE_BIT_EXT) && dvcMem->_mtlTexture) { return dvcMem->_mtlTexture.storageMode; }
+    // Match the dedicated-alias texture reuse in MVKImagePlane::getMTLTexture().
+    if (!_ioSurface && !memoryBinding->_mtlTexelBuffer && !(dvcMem->getMTLHeap() && !getIsDepthStencil()) && _isAliasable && dvcMem->isDedicatedAllocation() && !mvkContains(dvcMem->_imageMemoryBindings, memoryBinding)) {
+        return dvcMem->_imageMemoryBindings[0]->_image->getMTLStorageMode();
+    }
 
-    MTLStorageMode stgMode = _memoryBindings[0]->_deviceMemory->getMTLStorageMode();
-
-    if (_ioSurface && stgMode == MTLStorageModePrivate) { stgMode = MTLStorageModeShared; }
+    MTLStorageMode stgMode = dvcMem->getMTLStorageMode();
 
 	// An input attachment is read through a texture binding, which memoryless storage does not
 	// support, so commit the memory instead. Lazily allocated memory only promises that an
 	// implementation may defer the allocation, and never that it must.
 	// TODO: support framebuffer fetch so VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT reads color(m) in the
 	// shader rather than a texture binding, and memoryless storage can be kept here.
+	// Indexed PerVertex capture also needs store/load across a render -> compute -> render split.
+	// Extension enablement is immutable before image creation, unlike the eventual pipeline choice.
+	// Commit lazy attachments on these devices, trading tile-only storage for memory and bandwidth.
+	const auto& extensions = getEnabledExtensions();
 	if (stgMode == MTLStorageModeMemoryless &&
-		mvkIsAnyFlagEnabled(getCombinedUsage(), VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)) {
+		(mvkIsAnyFlagEnabled(getCombinedUsage(), VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) ||
+		 extensions.vk_KHR_fragment_shader_barycentric.enabled || extensions.vk_NV_fragment_shader_barycentric.enabled)) {
 		stgMode = MTLStorageModePrivate;
 	}
+
+    if (_ioSurface && stgMode == MTLStorageModePrivate) { stgMode = MTLStorageModeShared; }
 
     return stgMode;
 }
