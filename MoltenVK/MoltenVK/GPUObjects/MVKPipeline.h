@@ -255,7 +255,14 @@ public:
 	bool usesPerVertexInputBuffer() const { return _usesPerVertexInputBuffer; }
 	const SPIRV_CROSS_NAMESPACE::MSLCapturedOutputReplayBarycentricBinding& getPerVertexReplayBarycentricBinding() const { return _perVertexReplayBarycentricBinding; }
 	bool usesPortableBarycentrics() const { return _usesPerspectiveBarycentrics || _usesNoPerspectiveBarycentrics; }
-	id<MTLRenderPipelineState> getPerVertexCapturePipelineState() const { return _mtlPerVertexCapturePipelineState; }
+	id<MTLRenderPipelineState> getPerVertexCapturePipelineState(uint32_t viewCount) const {
+		auto itr = _perVertexCapturePipelineStates.find(viewCount);
+		return itr == _perVertexCapturePipelineStates.end() ? nil : itr->second.direct;
+	}
+	id<MTLComputePipelineState> getPerVertexIndexedCapturePipelineState(bool index32, uint32_t viewCount) const {
+		auto itr = _perVertexCapturePipelineStates.find(viewCount);
+		return itr == _perVertexCapturePipelineStates.end() ? nil : (index32 ? itr->second.index32 : itr->second.index16);
+	}
 	const SPIRV_CROSS_NAMESPACE::MSLCapturedVertexLayout& getPerVertexCapturedLayout() const { return _perVertexCapturedLayout; }
 	const SPIRV_CROSS_NAMESPACE::MSLCapturedOutputReplayBinding& getPerVertexReplayBinding() const { return _perVertexReplayBinding; }
 	const SPIRV_CROSS_NAMESPACE::MSLPerVertexInputBinding& getPerVertexInputBinding() const { return _perVertexInputBinding; }
@@ -353,7 +360,7 @@ protected:
 	void initDynamicState(const VkGraphicsPipelineCreateInfo* pCreateInfo);
 	void initSampleLocations(const VkGraphicsPipelineCreateInfo* pCreateInfo);
 	bool initPerVertexInputPipeline(const VkGraphicsPipelineCreateInfo* pCreateInfo, const VkPipelineShaderStageCreateInfo* pVertexSS, const VkPipelineShaderStageCreateInfo* pFragmentSS);
-	bool addPerVertexIndexedCapturePipelines(MTLVertexDescriptor* vertexDesc, const mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkPipelineShaderStageCreateInfo* pVertexSS);
+	bool addPerVertexIndexedCapturePipelines(MTLVertexDescriptor* vertexDesc, const mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkPipelineShaderStageCreateInfo* pVertexSS, uint32_t viewCount);
 	bool addPerVertexReplayShaderToPipeline(MTLRenderPipelineDescriptor* plDesc, const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkPipelineShaderStageCreateInfo* pVertexSS, const VkPipelineShaderStageCreateInfo* pFragmentSS, SPIRVShaderOutputs& vertexOutputs);
     void initMTLRenderPipelineState(const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVTessReflectionData& reflectData, VkPipelineCreationFeedback* pPipelineFB, const VkPipelineShaderStageCreateInfo* pVertexSS, VkPipelineCreationFeedback* pVertexFB, const VkPipelineShaderStageCreateInfo* pTessCtlSS, VkPipelineCreationFeedback* pTessCtlFB, const VkPipelineShaderStageCreateInfo* pTessEvalSS, VkPipelineCreationFeedback* pTessEvalFB, const VkPipelineShaderStageCreateInfo* pFragmentSS, VkPipelineCreationFeedback* pFragmentFB);
     void initShaderConversionConfig(mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVTessReflectionData& reflectData);
@@ -409,7 +416,12 @@ protected:
 	id<MTLComputePipelineState> _mtlTessVertexStageIndex32State = nil;
 	id<MTLComputePipelineState> _mtlTessControlStageState = nil;
 	id<MTLRenderPipelineState> _mtlPipelineState = nil;
-	id<MTLRenderPipelineState> _mtlPerVertexCapturePipelineState = nil;
+	struct PerVertexCapturePipelineStates {
+		id<MTLRenderPipelineState> direct = nil;
+		id<MTLComputePipelineState> index16 = nil;
+		id<MTLComputePipelineState> index32 = nil;
+	};
+	std::unordered_map<uint32_t, PerVertexCapturePipelineStates> _perVertexCapturePipelineStates;
 	SPIRV_CROSS_NAMESPACE::MSLCapturedVertexLayout _perVertexCapturedLayout;
 	SPIRV_CROSS_NAMESPACE::MSLCapturedOutputReplayBinding _perVertexReplayBinding;
 	SPIRV_CROSS_NAMESPACE::MSLPerVertexInputBinding _perVertexInputBinding;

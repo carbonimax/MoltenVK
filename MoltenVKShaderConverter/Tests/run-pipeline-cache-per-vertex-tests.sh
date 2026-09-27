@@ -8,8 +8,9 @@ build="$root/build/portable-pervertex"
 output=${1:-$(mktemp -d "$build/cache-roundtrip.XXXXXX")}
 mkdir -p "$output"
 output=$(cd "$output" && pwd)
-library="$build/cmake/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib"
-cross_source="$build/spirv-cross-bcc63e30"
+library=${MVK_CACHE_LIBRARY:-"$build/cmake/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib"}
+arch=${MVK_CACHE_ARCH:-x86_64}
+cross_source=${MVK_CACHE_CROSS_SOURCE:-"$build/spirv-cross-bcc63e30"}
 
 # Copy the real definitions, not a test reimplementation. Mutations affect only generated copies.
 python3 - "$root" "$output" <<'PY'
@@ -22,7 +23,7 @@ end = 'template<class Archive>\nvoid serialize(Archive & archive, MVKShaderModul
 assert source.count(start) == source.count(end) == 1, 'Serializer extraction boundaries changed'
 serializers = source.split(start, 1)[1].split(end, 1)[0]
 variants = {'baseline': (serializers, header)}
-for name, field in [('omit-cfg', 'cfg.perVertexInputBuffer'), ('omit-used-flag', 'scr.needsPerVertexInputBuffer'), ('omit-result-layout', 'scr.capturedVertexLayout')]:
+for name, field in [('omit-multiview', 'opt.multiview'), ('omit-layered', 'opt.multiview_layered_rendering'), ('omit-cfg', 'cfg.perVertexInputBuffer'), ('omit-used-flag', 'scr.needsPerVertexInputBuffer'), ('omit-result-layout', 'scr.capturedVertexLayout')]:
     changed, count = re.subn(r',\s*' + re.escape(field) + r'\b', '', serializers)
     assert count == 1, f'Missing or repeated production field: {field}'
     variants[name] = (changed, header)
@@ -40,9 +41,9 @@ for name, (definitions, declarations) in variants.items():
     (directory / 'SPIRVToMSLConverter.h').write_text(declarations)
 PY
 shasum -a 256 "$root/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm" "$root/MoltenVKShaderConverter/MoltenVKShaderConverter/SPIRVToMSLConverter.h" "$library" > "$output/sources.sha256"
-for variant in baseline omit-cfg omit-export-layout omit-used-flag omit-result-layout omit-user-fields omit-builtins; do
+for variant in baseline omit-multiview omit-layered omit-cfg omit-export-layout omit-used-flag omit-result-layout omit-user-fields omit-builtins; do
     directory="$output/$variant"
-    xcrun clang++ -arch x86_64 -mmacosx-version-min=11.0 -std=c++17 -O0 -g \
+    xcrun clang++ -arch "$arch" -mmacosx-version-min=11.0 -std=c++17 -O0 -g \
         -DSPIRV_CROSS_NAMESPACE_OVERRIDE=MVK_spirv_cross \
         -I "$directory" -I "$cross_source" -I "$root/External/cereal/include" \
         "$test_dir/PipelineCachePerVertexTests.cpp" "$library" \
@@ -62,4 +63,4 @@ for variant in baseline omit-cfg omit-export-layout omit-used-flag omit-result-l
         cat "$directory/result.log"
     fi
 done
-echo "PASS: production cfg/scr round-trip and all six omission controls; evidence: $output"
+echo "PASS: production cfg/scr round-trip and all eight omission controls; evidence: $output"

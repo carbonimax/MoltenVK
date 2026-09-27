@@ -174,11 +174,18 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	auto reject = [&](VkResult result, const char* message) {
 		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(result, "Portable PerVertexKHR %s", message));
 	};
+	auto* subpass = cmdEncoder->getSubpass();
+	uint32_t viewCount = subpass->isMultiview() ? subpass->getViewCountInMetalPass(cmdEncoder->getMultiviewPassIndex()) : 1;
+	uint64_t physicalInstances = uint64_t(instanceCount) * viewCount;
+	if (!viewCount || physicalInstances > UINT32_MAX) { reject(VK_ERROR_OUT_OF_DEVICE_MEMORY, "view-expanded instance count exceeds uint32."); return; }
+	instanceCount = uint32_t(physicalInstances);
 	// Vulkan ignores primitiveRestartEnable for nonindexed draws.
 	bool restart = mvkPerVertexRequiresRestartAssembly(indexBinding != nullptr, cmdEncoder->getVkGraphics().isPrimitiveRestartEnabled());
 	if (restart && !mvkCanAssemblePerVertexRestart(vertexCount, instanceCount, cmdEncoder->getMetalFeatures().indirectDrawing)) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "restart requires indirect drawing and uint32 dense capture record IDs."); return; }
 	auto* scratch = cmdEncoder->nextPerVertexScratch();
 	if (!scratch) { return; }
+	id<MTLRenderPipelineState> directCaptureState = indexBinding ? nil : pipeline->getPerVertexCapturePipelineState(viewCount);
+	if (!indexBinding && !directCaptureState) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "direct capture view-count pipeline is unavailable."); return; }
 	id<MTLComputePipelineState> captureState = nil;
 	id<MTLComputePipelineState> widenState = nil;
 	id<MTLComputePipelineState> restartState = nil;
@@ -189,7 +196,7 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 		if (!indexSize) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "indexed capture requires uint8, uint16 or uint32 indices."); return; }
 		if (!indexBuffer || !mvkPerVertexIndexRange(vertexCount, firstIndex, indexBinding->vkIndexType, indexBinding->size, indexBinding->offset, indexBuffer.length)) { reject(VK_ERROR_UNKNOWN, "indexed capture exceeds the bound index buffer range."); return; }
 		indexOffset = indexBinding->offset + uint64_t(firstIndex) * indexSize;
-		captureState = restart || indexSize == 4 ? pipeline->getTessVertexStageIndex32State() : pipeline->getTessVertexStageIndex16State();
+		captureState = pipeline->getPerVertexIndexedCapturePipelineState(restart || indexSize == 4, viewCount);
 		if (restart) {
 			if (!scratch->buffers[5] || scratch->buffers[5].length < mvkPerVertexRestartIndexScratchSize(vertexCount) || !scratch->buffers[6] || scratch->buffers[6].length < 68 * sizeof(uint32_t)) { reject(VK_ERROR_OUT_OF_DEVICE_MEMORY, "restart assembly scratch is unavailable."); return; }
 			restartState = scratch->indexPipeline;
@@ -294,7 +301,7 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	id<MTLRenderCommandEncoder> encoder = cmdEncoder->_mtlRenderEncoder;
 	auto& metalState = cmdEncoder->getMtlGraphics();
 	if (!indexBinding) {
-		[encoder setRenderPipelineState: pipeline->getPerVertexCapturePipelineState()];
+		[encoder setRenderPipelineState: directCaptureState];
 		MTLPrimitiveType captureType = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ? MTLPrimitiveTypeTriangle : MTLPrimitiveTypePoint;
 		metalState.bindVertexBuffer(encoder, captured, 0, pipeline->getPerVertexCaptureBufferIndex());
 		metalState.bindVertexBuffer(encoder, captureParams, 0, pipeline->getPerVertexCaptureParamsBufferIndex());
