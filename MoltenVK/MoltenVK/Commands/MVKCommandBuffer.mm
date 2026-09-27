@@ -520,6 +520,7 @@ VkResult MVKCommandBuffer::recordPerVertexIndirectDraw(bool indexed) {
 	VkResult result = validateIndexedPerVertexAttachments();
 	if (result != VK_SUCCESS) { return result; }
 	auto topology = pipeline->getVkPrimitiveTopology();
+	if (!mvkPerVertexReplayVertexCount(topology)) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indirect draws do not support this primitive topology."); }
 	uint32_t stride = pipeline->getPerVertexCapturedLayout().stride;
 	// Largest capacity within the requested budget whose buffers satisfy the direct-draw limits.
 	uint64_t capacity = mvkPerVertexIndirectRecordCapacity();
