@@ -13,11 +13,13 @@ struct MVKPerVertexScratchRequest {
 	NSUInteger indexSize = 0;
 	bool restart = false;
 	bool widenUint8 = false;
+	// TES invocation ABI followed by VS, TCS vertex, patch and factor scratch.
+	NSUInteger tessSizes[5] = {};
 };
 
 // Individually owned allocations: the shared scratch pool cannot recover from a nil Metal buffer.
 struct MVKPerVertexScratch {
-	id<MTLBuffer> buffers[7] = {};
+	id<MTLBuffer> buffers[12] = {};
 	id<MTLComputePipelineState> indexPipeline = nil;
 	id<MTLComputePipelineState> widenUint8Pipeline = nil;
 	MVKPerVertexScratch() = default;
@@ -27,10 +29,10 @@ struct MVKPerVertexScratch {
 
 	bool reserve(id<MTLDevice> device, const MVKPerVertexScratchRequest& request) {
 		// Indirect dispatch/draw arguments plus replay constants aligned to 256 bytes.
-		NSUInteger lengths[] = {request.captureSize, sizeof(uint32_t), request.occurrenceSize, request.primitiveSize, request.cornerSize, request.indexSize, request.restart ? 68 * sizeof(uint32_t) : 0};
-		for (size_t i = 0; i < 7; ++i) {
+		NSUInteger lengths[] = {request.captureSize, sizeof(uint32_t), request.occurrenceSize, request.primitiveSize, request.cornerSize, request.indexSize, request.restart ? 68 * sizeof(uint32_t) : 0, request.tessSizes[0], request.tessSizes[1], request.tessSizes[2], request.tessSizes[3], request.tessSizes[4]};
+		for (size_t i = 0; i < std::size(buffers); ++i) {
 			if (!lengths[i]) { continue; }
-			bool shared = i != 0 && i != 5 && i != 6;
+			bool shared = (i > 0 && i < 5) || i == 7;
 			id<MTLBuffer> buffer = [device newBufferWithLength:lengths[i] options:shared ? MTLResourceStorageModeShared : MTLResourceStorageModePrivate];
 			if (!buffer || buffer.length < lengths[i] || (shared && !buffer.contents)) { [buffer release]; return false; }
 			buffers[i] = buffer;
