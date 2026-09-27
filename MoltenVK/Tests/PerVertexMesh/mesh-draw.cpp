@@ -7,7 +7,8 @@
 // deterministically. The shipping library must expose neither the extension nor the feature.
 // Usage: mesh-draw <shader-dir> <scenario>
 //   draw | grid | twice | reject-task | reject-descriptor | reject-per-primitive | reject-pervertex | reject-specialization | reject-indirect
-//   | no-adapter | public-device-gate
+//   | reject-draw-id | reject-buffer-address | no-adapter | public-device-gate
+// The refusal scenarios only create pipelines: nothing they build is ever submitted.
 #define VK_ENABLE_BETA_EXTENSIONS 1
 #include <vulkan/vulkan.h>
 
@@ -118,8 +119,22 @@ int main(int argc, char** argv) {
 		            properties.properties.deviceName, meshProperties.maxMeshWorkGroupInvocations, meshProperties.maxMeshOutputVertices, meshProperties.maxMeshOutputPrimitives,
 		            meshProperties.maxMeshWorkGroupCount[0], meshProperties.maxMeshWorkGroupCount[1], meshProperties.maxMeshWorkGroupCount[2], meshProperties.maxMeshWorkGroupTotalCount);
 
+		VkPhysicalDeviceVulkan12Features supported12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+		VkPhysicalDeviceVulkan11Features supported11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+		supported11.pNext = &supported12;
+		VkPhysicalDeviceFeatures2 supportedFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+		supportedFeatures.pNext = &supported11;
+		vkGetPhysicalDeviceFeatures2(physical, &supportedFeatures);
+		if (!supported11.shaderDrawParameters || !supported12.bufferDeviceAddress) throw std::runtime_error("shaderDrawParameters or bufferDeviceAddress unavailable");
+		// gl_DrawID and device addresses must be legal in the device, so that only the mesh path refuses them.
+		VkPhysicalDeviceVulkan12Features enable12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+		enable12.bufferDeviceAddress = VK_TRUE;
+		VkPhysicalDeviceVulkan11Features enable11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+		enable11.shaderDrawParameters = VK_TRUE;
+		enable11.pNext = &enable12;
 		VkPhysicalDeviceMeshShaderFeaturesEXT enableMesh{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
 		enableMesh.meshShader = VK_TRUE;
+		enableMesh.pNext = &enable11;
 		float priority = 1;
 		VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
 		queueInfo.queueCount = 1;
@@ -280,12 +295,15 @@ int main(int argc, char** argv) {
 			return vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline);
 		};
 
-		if (scenario == "reject-task" || scenario == "reject-descriptor" || scenario == "reject-per-primitive" || scenario == "reject-pervertex" || scenario == "reject-specialization") {
+		if (scenario == "reject-task" || scenario == "reject-descriptor" || scenario == "reject-per-primitive" || scenario == "reject-pervertex" || scenario == "reject-specialization" ||
+		    scenario == "reject-draw-id" || scenario == "reject-buffer-address") {
 			VkPipeline pipeline = VK_NULL_HANDLE;
 			VkResult result = scenario == "reject-task" ? createPipeline("mesh.mesh.spv", true, emptyLayout, pipeline)
 			                : scenario == "reject-descriptor" ? createPipeline("descriptor.mesh.spv", false, uniformLayout, pipeline)
 			                : scenario == "reject-pervertex" ? createPipeline("mesh.mesh.spv", false, emptyLayout, pipeline, "pervertex.frag.spv")
 			                : scenario == "reject-specialization" ? createPipeline("mesh.mesh.spv", false, emptyLayout, pipeline, "interp.frag.spv", true)
+			                : scenario == "reject-draw-id" ? createPipeline("draw-id.mesh.spv", false, emptyLayout, pipeline)
+			                : scenario == "reject-buffer-address" ? createPipeline("buffer-address.mesh.spv", false, emptyLayout, pipeline)
 			                : createPipeline("per-primitive.mesh.spv", false, emptyLayout, pipeline);
 			bool pass = result == VK_ERROR_FEATURE_NOT_PRESENT;
 			std::printf("MESH_DRAW %s %s: vkCreateGraphicsPipelines=%d expected=%d\n", pass ? "PASS" : "FAIL", scenario.c_str(), result, VK_ERROR_FEATURE_NOT_PRESENT);
