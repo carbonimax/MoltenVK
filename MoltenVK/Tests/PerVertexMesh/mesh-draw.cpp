@@ -7,9 +7,16 @@
 // deterministically. The shipping library must expose neither the extension nor the feature.
 // PerVertexKHR scenarios read the three corners of each triangle in index order: each image must match its own model
 // and differ from a rival model (swapped weights, or the other index order) on at least 90% of the checked pixels.
+// The form-* scenarios (forms.mesh, forms.frag) render into a 128-bit integer target and compare every checked pixel
+// bit for bit with the folded corner values; each must also differ, on at least 90% of the checked pixels, from a
+// rival with the corners rotated, from a rival with the values degraded as a type error would (32-bit integers
+// through float, floats through half, half bits read as an integer, 16-bit integers with the other extension) and,
+// on two workgroups, from a rival where each workgroup reads the other's values.
 // Usage: mesh-draw <shader-dir> <scenario>
 //   draw | grid | twice | pervertex | pervertex-swapped | pervertex-permuted | barycentric | barycentric-permuted
-//   | pervertex-consistency | reject-task | reject-descriptor | reject-per-primitive | reject-pervertex-block
+//   | pervertex-consistency | form-uint | form-swapped | form-ivec2 | form-vec3 | form-uvec3 | form-components
+//   | form-fewer | form-scalar | form-array1 | form-array2 | form-half | form-int16 | form-uint16 | form-mixed
+//   | form-grid | reject-task | reject-descriptor | reject-per-primitive | reject-pervertex-block
 //   | reject-pervertex-matrix | reject-specialization | reject-indirect | reject-draw-id | reject-draw-id-uint
 //   | reject-buffer-address | no-adapter | public-device-gate
 // The refusal scenarios only create pipelines: nothing they build is ever submitted.
@@ -61,13 +68,14 @@ static const int kPermuted[2][3] = {{1, 2, 0}, {2, 1, 3}};  // The same triangle
 // weighted by 0.2, 0.3, 0.5 and 0.3, 0.2, 0.5. Barycentric: the barycentrics themselves, in index order.
 enum Model { None, Interpolated, Ordered, Swapped, Barycentric };
 
-// Expected colour of the pixel centre, or false near an edge; outside is set for pixels that must keep the clear.
-static bool expected(int x, int y, uint32_t groups, Model model, bool permuted, float rgb[3], bool& outside) {
-	static const float kOrdered[3] = {0.2f, 0.3f, 0.5f}, kSwapped[3] = {0.3f, 0.2f, 0.5f};
-	const auto& triangles = permuted ? kPermuted : kTriangles;
+// Finds the triangle whose interior holds the pixel centre, away from its edges: its workgroup, its corners in index
+// order (workgroups whose bit is set in permutedGroups use kPermuted) and their barycentrics. Returns false near an
+// edge or outside; outside is set for pixels that must keep the clear.
+static bool locate(int x, int y, uint32_t groups, uint32_t permutedGroups, uint32_t& group, const int*& corners, float lambda[3], bool& outside) {
 	float px = (x + 0.5f) / (kSize / 2) - 1, py = (y + 0.5f) / (kSize / 2) - 1;  // Vulkan framebuffer: y down.
 	outside = true;
 	for (uint32_t g = 0; g < groups; ++g) {
+		const auto& triangles = (permutedGroups >> g) & 1 ? kPermuted : kTriangles;
 		float scale = groups == 1 ? 1.0f : 0.5f, offset = groups == 1 ? 0.0f : (g ? 0.5f : -0.5f);
 		float left = -0.75f * scale + offset, right = 0.75f * scale + offset;
 		if (px > left - 0.05f && px < right + 0.05f && std::fabs(py) < 0.8f) outside = false;
@@ -79,12 +87,11 @@ static bool expected(int x, int y, uint32_t groups, Model model, bool permuted, 
 			float l1 = ((v[2][0] - px) * (v[0][1] - py) - (v[0][0] - px) * (v[2][1] - py)) / area;
 			float l2 = 1 - l0 - l1, margin = 0.04f;
 			if (l0 > margin && l1 > margin && l2 > margin) {
-				const float lambda[3] = {l0, l1, l2};
-				const float* weights = model == Ordered ? kOrdered : model == Swapped ? kSwapped : lambda;
-				for (int k = 0; k < 3; ++k) {
-					rgb[k] = model == Barycentric ? lambda[k] : 0;
-					for (int c = 0; c < 3 && model != Barycentric; ++c) rgb[k] += weights[c] * kColors[triangles[t][c]][k];
-				}
+				group = g;
+				corners = triangles[t];
+				lambda[0] = l0;
+				lambda[1] = l1;
+				lambda[2] = l2;
 				return true;
 			}
 		}
@@ -92,10 +99,131 @@ static bool expected(int x, int y, uint32_t groups, Model model, bool permuted, 
 	return false;
 }
 
+// Expected colour of the pixel centre, or false near an edge; outside is set for pixels that must keep the clear.
+static bool expected(int x, int y, uint32_t groups, Model model, bool permuted, float rgb[3], bool& outside) {
+	static const float kOrdered[3] = {0.2f, 0.3f, 0.5f}, kSwapped[3] = {0.3f, 0.2f, 0.5f};
+	uint32_t group = 0;
+	const int* corners = nullptr;
+	float lambda[3];
+	if (!locate(x, y, groups, permuted ? ~0u : 0u, group, corners, lambda, outside)) return false;
+	const float* weights = model == Ordered ? kOrdered : model == Swapped ? kSwapped : lambda;
+	for (int k = 0; k < 3; ++k) {
+		rgb[k] = model == Barycentric ? lambda[k] : 0;
+		for (int c = 0; c < 3 && model != Barycentric; ++c) rgb[k] += weights[c] * kColors[corners[c]][k];
+	}
+	return true;
+}
+
+// The scalars of forms.mesh, as the fragment turns them into 32-bit patterns: n = vertex + 1 + 4 * workgroup,
+// k = 8 * Location + Component. degrade applies the conversion a type error would: 32-bit integers through float,
+// floats through half, half bits read as an integer, 16-bit integers with the other extension.
+enum Kind { U32, I32, F32, F16, I16, U16 };
+static uint32_t floatBits(float value) { uint32_t bits; memcpy(&bits, &value, 4); return bits; }
+static uint32_t scalarBits(Kind kind, uint32_t n, uint32_t k, bool degrade) {
+	switch (kind) {
+		case U32: { uint32_t v = n * 0x9E3779B9u + k * 0x01000193u; return degrade ? uint32_t(uint64_t(float(v))) : v; }
+		case I32: { int32_t v = -int32_t(n * 0x01000193u) - int32_t(k); return uint32_t(degrade ? int32_t(float(v)) : v); }
+		case F32: { float v = float(n) + float(k) * 0.25f + float(n) * 0.0009765625f; return floatBits(degrade ? float(_Float16(v)) : v); }
+		case F16: {
+			_Float16 v = _Float16(float(n) + float(k) * 0.25f);
+			uint16_t bits;
+			memcpy(&bits, &v, 2);
+			return degrade ? bits : floatBits(float(v));
+		}
+		case I16: { int16_t v = int16_t(-1000 * int32_t(n) - int32_t(k)); return degrade ? uint32_t(uint16_t(v)) : uint32_t(int32_t(v)); }
+		case U16: { uint16_t v = uint16_t(0x8000u + n * 0x111u + k); return degrade ? uint32_t(int32_t(int16_t(v))) : uint32_t(v); }
+	}
+	return 0;
+}
+
+// A form reads count scalars of kind from each Read, in this order, and folds them per corner as forms.frag does.
+struct Read { uint32_t location, component, count; Kind kind; };
+struct Form { const char *name, *mesh, *fragment; uint32_t corners; std::vector<Read> reads; bool swapped, grid; };
+static const uint32_t kTag = 0x600DF00Du, kClear = 0xDEADBEEFu;
+static uint32_t fold(const Form& form, uint32_t n, bool degrade) {
+	uint32_t h = 0;
+	for (const auto& read : form.reads) {
+		for (uint32_t c = 0; c < read.count; ++c) h = ((h << 5) | (h >> 27)) ^ scalarBits(read.kind, n, 8 * read.location + read.component + c, degrade);
+	}
+	return h;
+}
+// The form-* scenarios; reads follow the fold order of forms.frag.
+static const std::vector<Form> kForms = {
+	{"form-uint", "forms.mesh.spv", "form-uint.frag.spv", 3, {{0, 0, 1, U32}}, false, false},
+	{"form-swapped", "forms.mesh.spv", "form-swapped.frag.spv", 3, {{0, 0, 1, U32}}, true, false},
+	{"form-ivec2", "forms.mesh.spv", "form-ivec2.frag.spv", 3, {{1, 0, 2, I32}}, false, false},
+	{"form-vec3", "forms.mesh.spv", "form-vec3.frag.spv", 3, {{2, 0, 3, F32}}, false, false},
+	{"form-uvec3", "forms.mesh.spv", "form-uvec3.frag.spv", 3, {{5, 0, 3, U32}}, false, false},
+	{"form-components", "forms.mesh.spv", "form-components.frag.spv", 3, {{3, 0, 1, F32}, {3, 1, 2, F32}, {3, 3, 1, F32}}, false, false},
+	{"form-fewer", "forms.mesh.spv", "form-fewer.frag.spv", 3, {{4, 0, 2, F32}}, false, false},
+	{"form-scalar", "forms.mesh.spv", "form-scalar.frag.spv", 3, {{6, 0, 1, F32}}, false, false},
+	{"form-array1", "forms.mesh.spv", "form-array1.frag.spv", 1, {{6, 0, 1, F32}}, false, false},
+	{"form-array2", "forms.mesh.spv", "form-array2.frag.spv", 2, {{6, 0, 1, F32}}, false, false},
+	{"form-half", "forms16.mesh.spv", "form-half.frag.spv", 3, {{7, 0, 2, F16}}, false, false},
+	{"form-int16", "forms16.mesh.spv", "form-int16.frag.spv", 3, {{8, 0, 3, I16}}, false, false},
+	{"form-uint16", "forms16.mesh.spv", "form-uint16.frag.spv", 3, {{30, 0, 1, U16}}, false, false},
+	{"form-mixed", "forms.mesh.spv", "form-mixed.frag.spv", 3, {{0, 0, 1, U32}, {2, 0, 3, F32}, {3, 0, 1, F32}, {3, 1, 2, F32}, {3, 3, 1, F32}, {6, 0, 1, F32}}, false, false},
+	{"form-grid", "forms-grid.mesh.spv", "form-mixed.frag.spv", 3, {{0, 0, 1, U32}, {2, 0, 3, F32}, {3, 0, 1, F32}, {3, 1, 2, F32}, {3, 3, 1, F32}, {6, 0, 1, F32}}, false, true},
+};
+
+// Expected pixel for the triangle corners of a workgroup: order selects which corner each output word holds.
+static void formExpected(const Form& form, uint32_t group, const int* corners, const int order[3], bool degrade, bool otherGroup, uint32_t out[4]) {
+	uint32_t g = otherGroup ? group ^ 1 : group;
+	for (uint32_t j = 0; j < 3; ++j) out[j] = j < form.corners ? fold(form, uint32_t(corners[order[j]]) + 1 + 4 * g, degrade) : 0;
+	out[3] = kTag;
+}
+
+// Compares a form-* image with its model and with the rivals, which must each match at most 10% of the checked pixels.
+// With a null image, compares the model with itself: the CPU check that every rival is told apart before any GPU run.
+static bool checkForm(const Form& form, const uint32_t* image) {
+	static const int kOrder[3] = {0, 1, 2}, kSwap[3] = {1, 0, 2}, kRotate[3] = {1, 2, 0};
+	const int* order = form.swapped ? kSwap : kOrder;
+	const int* rivalOrder = form.swapped ? kOrder : kRotate;
+	uint32_t checked = 0, mismatch = 0, background = 0, cornerRival = 0, typeRival = 0, groupRival = 0;
+	for (uint32_t y = 0; y < kSize; ++y) for (uint32_t x = 0; x < kSize; ++x) {
+		uint32_t group = 0, want[4], rival[4];
+		const int* corners = nullptr;
+		float lambda[3];
+		bool outside = false;
+		const uint32_t* p = image ? &image[4 * (y * kSize + x)] : nullptr;
+		if (!locate(int(x), int(y), form.grid ? 2 : 1, form.grid ? 2u : 0u, group, corners, lambda, outside)) {
+			if (outside && p) background += p[0] != kClear || p[1] != kClear || p[2] != kClear || p[3] != kClear;
+			continue;
+		}
+		++checked;
+		formExpected(form, group, corners, order, false, false, want);
+		if (!p) p = want;
+		auto same = [&](const uint32_t* words) { return !memcmp(p, words, sizeof(want)); };
+		if (!same(want) && !mismatch++) {
+			std::printf("  first mismatch at (%u,%u): got %08x %08x %08x %08x, expected %08x %08x %08x %08x\n", x, y, p[0], p[1], p[2], p[3], want[0], want[1], want[2], want[3]);
+		}
+		formExpected(form, group, corners, rivalOrder, false, false, rival);
+		cornerRival += same(rival);
+		formExpected(form, group, corners, order, true, false, rival);
+		typeRival += same(rival);
+		if (form.grid) {
+			formExpected(form, group, corners, order, false, true, rival);
+			groupRival += same(rival);
+		}
+	}
+	bool pass = checked > 0 && !mismatch && !background && cornerRival * 10 <= checked && typeRival * 10 <= checked && groupRival * 10 <= checked;
+	std::printf("  %s exact corners: checked=%u mismatch=%u background_changed=%u rival_matches corner=%u type=%u group=%u (at most %u)\n",
+	            form.name, checked, mismatch, background, cornerRival, typeRival, groupRival, checked / 10);
+	return pass;
+}
+
 int main(int argc, char** argv) {
 	try {
 		if (argc != 3) throw std::runtime_error("Usage: mesh-draw <shader-dir> <scenario>");
 		const std::string shaders = argv[1], scenario = argv[2];
+	if (scenario == "model-check") {  // CPU only: no Vulkan instance, no GPU.
+		bool pass = true;
+		for (const auto& form : kForms) pass &= checkForm(form, nullptr);
+		std::printf("MESH_DRAW %s model-check: %zu form models tell their corner, type and workgroup rivals apart\n", pass ? "PASS" : "FAIL", kForms.size());
+		return pass ? 0 : 2;
+	}
+	const Form* form = nullptr;
+	for (const auto& candidate : kForms) if (scenario == candidate.name) form = &candidate;
 		VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
 		app.pApplicationName = "PerVertexKHR mesh draw";
 		app.apiVersion = VK_API_VERSION_1_3;
@@ -147,14 +275,21 @@ int main(int argc, char** argv) {
 		vkGetPhysicalDeviceFeatures2(physical, &supportedFeatures);
 		if (!supported11.shaderDrawParameters || !supported12.bufferDeviceAddress) throw std::runtime_error("shaderDrawParameters or bufferDeviceAddress unavailable");
 		if (!hasExtension(physical, VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME) || !supportedBarycentric.fragmentShaderBarycentric) throw std::runtime_error("fragmentShaderBarycentric unavailable through the test adapter");
+		// The 16-bit forms need 16-bit stage I/O and arithmetic.
+		const bool sixteen = supported11.storageInputOutput16 && supported12.shaderFloat16 && supportedFeatures.features.shaderInt16;
+		if (form && !strcmp(form->mesh, "forms16.mesh.spv") && !sixteen) throw std::runtime_error("storageInputOutput16, shaderFloat16 or shaderInt16 unavailable");
 		// gl_DrawID and device addresses must be legal in the device, so that only the mesh path refuses them.
 		VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR enableBarycentric{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR};
 		enableBarycentric.fragmentShaderBarycentric = VK_TRUE;
 		VkPhysicalDeviceVulkan12Features enable12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
 		enable12.bufferDeviceAddress = VK_TRUE;
+		enable12.shaderFloat16 = sixteen;
 		enable12.pNext = &enableBarycentric;
 		VkPhysicalDeviceVulkan11Features enable11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
 		enable11.shaderDrawParameters = VK_TRUE;
+		enable11.storageInputOutput16 = sixteen;
+		VkPhysicalDeviceFeatures enableCore{};
+		enableCore.shaderInt16 = sixteen;
 		enable11.pNext = &enable12;
 		VkPhysicalDeviceMeshShaderFeaturesEXT enableMesh{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
 		enableMesh.meshShader = VK_TRUE;
@@ -167,6 +302,7 @@ int main(int argc, char** argv) {
 		if (hasExtension(physical, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) extensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
 		VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
 		deviceInfo.pNext = &enableMesh;
+		deviceInfo.pEnabledFeatures = &enableCore;
 		deviceInfo.queueCreateInfoCount = 1;
 		deviceInfo.pQueueCreateInfos = &queueInfo;
 		deviceInfo.enabledExtensionCount = uint32_t(extensions.size());
@@ -187,7 +323,8 @@ int main(int argc, char** argv) {
 			throw std::runtime_error("No memory type");
 		};
 		VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-		bufferInfo.size = kSize * kSize * 4;
+		const uint32_t pixelBytes = form ? 16 : 4;
+		bufferInfo.size = kSize * kSize * 16;
 		bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 		VkBuffer readback = VK_NULL_HANDLE;
 		check(vkCreateBuffer(device, &bufferInfo, nullptr, &readback), "Create buffer");
@@ -204,7 +341,7 @@ int main(int argc, char** argv) {
 
 		VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
 		imageInfo.imageType = VK_IMAGE_TYPE_2D;
-		imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+		imageInfo.format = form ? VK_FORMAT_R32G32B32A32_UINT : VK_FORMAT_R8G8B8A8_UNORM;
 		imageInfo.extent = {kSize, kSize, 1};
 		imageInfo.mipLevels = imageInfo.arrayLayers = 1;
 		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -351,10 +488,10 @@ int main(int argc, char** argv) {
 		};
 		const Render* render = nullptr;
 		for (const auto& candidate : renders) if (scenario == candidate.name) render = &candidate;
-		if (!render) throw std::runtime_error("Unknown scenario");
-		const bool grid = scenario == "grid", twice = scenario == "twice", indirect = scenario == "reject-indirect";
+		if (!render && !form) throw std::runtime_error("Unknown scenario");
+		const bool grid = scenario == "grid" || (form && form->grid), twice = scenario == "twice", indirect = scenario == "reject-indirect";
 		VkPipeline pipeline = VK_NULL_HANDLE;
-		check(createPipeline(render->mesh, false, emptyLayout, pipeline, render->fragment), "Create mesh pipeline");
+		check(createPipeline(form ? form->mesh : render->mesh, false, emptyLayout, pipeline, form ? form->fragment : render->fragment), "Create mesh pipeline");
 		VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
 		VkCommandPool pool = VK_NULL_HANDLE;
 		check(vkCreateCommandPool(device, &poolInfo, nullptr, &pool), "Create command pool");
@@ -367,6 +504,7 @@ int main(int argc, char** argv) {
 		check(vkBeginCommandBuffer(command, &begin), "Begin command buffer");
 		VkClearValue clear{};
 		clear.color.float32[0] = clear.color.float32[2] = clear.color.float32[3] = 1.0f;
+		if (form) for (auto& word : clear.color.uint32) word = kClear;
 		VkRenderPassBeginInfo passBegin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
 		passBegin.renderPass = renderPass;
 		passBegin.framebuffer = framebuffer;
@@ -390,13 +528,19 @@ int main(int argc, char** argv) {
 			return pass ? 0 : 2;
 		}
 		check(ended, "End command buffer");
-		memset(mapped, 0, kSize * kSize * 4);
+		memset(mapped, 0, kSize * kSize * pixelBytes);
 		VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
 		submit.commandBufferCount = 1;
 		submit.pCommandBuffers = &command;
 		check(vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE), "Submit");
 		check(vkQueueWaitIdle(queue), "Wait");
-		std::ofstream(scenario + ".rgba", std::ios::binary).write(static_cast<const char*>(mapped), kSize * kSize * 4);
+		std::ofstream(scenario + ".rgba", std::ios::binary).write(static_cast<const char*>(mapped), kSize * kSize * pixelBytes);
+		if (form) {
+			bool pass = checkForm(*form, static_cast<const uint32_t*>(mapped));
+			std::printf("MESH_DRAW %s %s\n", pass ? "PASS" : "FAIL", scenario.c_str());
+			vkDeviceWaitIdle(device);
+			return pass ? 0 : 2;
+		}
 
 		const auto* rgba = static_cast<const uint8_t*>(mapped);
 		uint32_t checked = 0, mismatch = 0, background = 0, rivalMatch = 0;
