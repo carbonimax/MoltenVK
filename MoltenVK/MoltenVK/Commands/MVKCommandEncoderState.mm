@@ -1817,6 +1817,7 @@ void MVKCommandEncoderState::bindIndexBuffer(const MVKIndexMTLBufferBinding& buf
 }
 
 void MVKCommandEncoderState::offsetZeroDivisorVertexBuffers(MVKCommandEncoder& mvkEncoder, MVKGraphicsStage stage, MVKGraphicsPipeline* pipeline, uint32_t firstInstance) {
+	bool dynamicStride = pipeline->getDynamicStateFlags().has(MVKRenderStateFlag::VertexStride);
 	for (const auto& binding : pipeline->getZeroDivisorVertexBindings()) {
 		uint32_t mtlBuffIdx = pipeline->getMetalBufferIndexForVertexAttributeBinding(binding.first);
 		uint32_t sourceBinding = binding.first;
@@ -1828,14 +1829,22 @@ void MVKCommandEncoderState::offsetZeroDivisorVertexBuffers(MVKCommandEncoder& m
 			break;
 		}
 		const auto& buffer = _vkGraphics._vertexBuffers[sourceBinding];
-		VkDeviceSize stride = pipeline->getDynamicStateFlags().has(MVKRenderStateFlag::VertexStride) ? buffer.stride : binding.second;
+		VkDeviceSize stride = dynamicStride ? buffer.stride : binding.second;
 		offset += buffer.offset + VkDeviceSize(firstInstance) * stride;
 		switch (stage) {
 			case kMVKGraphicsStageVertex:
-				[mvkEncoder.getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl) setBufferOffset: offset atIndex: mtlBuffIdx];
+				if (dynamicStride) {
+					[mvkEncoder.getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl) setBufferOffset:offset attributeStride:stride atIndex:mtlBuffIdx];
+				} else {
+					[mvkEncoder.getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl) setBufferOffset: offset atIndex: mtlBuffIdx];
+				}
 				break;
 			case kMVKGraphicsStageRasterization:
-				[mvkEncoder._mtlRenderEncoder setVertexBufferOffset:offset atIndex:mtlBuffIdx];
+				if (dynamicStride) {
+					[mvkEncoder._mtlRenderEncoder setVertexBufferOffset:offset attributeStride:stride atIndex:mtlBuffIdx];
+				} else {
+					[mvkEncoder._mtlRenderEncoder setVertexBufferOffset:offset atIndex:mtlBuffIdx];
+				}
 				break;
 			default:
 				assert(false); // If we hit this, something went wrong.
