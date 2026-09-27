@@ -108,7 +108,7 @@ static Buffer makeBuffer(const Device& d, VkDeviceSize size, VkBufferUsageFlags 
 
 int main(int argc, char** argv) {
 	try {
-		if (argc != 7) throw std::runtime_error("Usage: pervertex-indirect-gpu shader-dir draw|indexed|draw-count|indexed-count u8|u16|u32 decisive|zero|two|repeat|overflow|overflow-second|huge|index-oob|restart|restart-two|restart-overflow|restart-dynamic-on|restart-dynamic-off|stress update|copy|compute output-prefix");
+		if (argc != 7) throw std::runtime_error("Usage: pervertex-indirect-gpu shader-dir draw|indexed|draw-count|indexed-count u8|u16|u32 decisive|single|zero|two|repeat|overflow|overflow-second|huge|index-oob|restart|restart-two|restart-overflow|restart-dynamic-on|restart-dynamic-off|stress update|copy|compute output-prefix");
 		const std::string shaders = argv[1], form = argv[2], indexName = argv[3], scenarioName = argv[4], producer = argv[5], prefix = argv[6];
 		const bool withTES = getenv("PERVERTEX_TEST_INCLUDE_TES") != nullptr;
 		const bool tesFirst = getenv("PERVERTEX_TEST_TES_FIRST") != nullptr;
@@ -134,6 +134,7 @@ int main(int argc, char** argv) {
 		const std::string topologyText = topologyName ? topologyName : "triangle-list";
 		const VkPrimitiveTopology topology = restart ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : topologyText == "point-list" ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST : topologyText == "line-list" ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : topologyText == "line-strip" ? VK_PRIMITIVE_TOPOLOGY_LINE_STRIP : topologyText == "triangle-strip" ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : topologyText == "triangle-fan" ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 		if (topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST && topologyText != "triangle-list") throw std::runtime_error("Unknown topology");
+		if (scenarioName == "single" && (form != "draw" || topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)) throw std::runtime_error("single requires a nonindexed triangle-list draw");
 		// Dynamic restart state: the pipeline may restart, so restart scratch is reserved either way.
 		const bool dynamicRestart = scenarioName.rfind("restart-dynamic", 0) == 0, restartOn = scenarioName != "restart-dynamic-off";
 		if (restart && !indexed) throw std::runtime_error("restart scenarios need an indexed form");
@@ -145,7 +146,8 @@ int main(int argc, char** argv) {
 			Draw empty = base;
 			empty.instances = 0;
 			Scenario s{{base, counted ? base : empty}, 1, false};
-			if (name == "zero") { s.draws = {counted ? base : empty, counted ? base : empty}; s.gpuCount = 0; }
+			if (name == "single") { s.draws = {Draw{6, 1, 4, 0, 2}, empty}; s.gpuCount = 1; }
+			else if (name == "zero") { s.draws = {counted ? base : empty, counted ? base : empty}; s.gpuCount = 0; }
 			else if (name == "two" || name == "overflow-second" || name == "restart-two") { s.draws = {base, base}; s.gpuCount = 7; }
 			else if (name == "restart-overflow") { s.expectLost = true; }
 			// Two heavy overlapping draws: draw 1 reuses the scratch that draw 0's replay reads, with different values.
@@ -586,7 +588,7 @@ int main(int argc, char** argv) {
 					else vkCmdDraw(cb, a.count, a.instances, a.first, a.firstInstance);
 				}
 			} else if (form == "draw") {
-				vkCmdDrawIndirect(cb, work.buffer, kArgsOffset, 2, kStride);
+				vkCmdDrawIndirect(cb, work.buffer, kArgsOffset, scenarioName == "single" ? 1 : 2, kStride);
 			} else if (form == "indexed") {
 				vkCmdDrawIndexedIndirect(cb, work.buffer, kArgsOffset, 2, kStride);
 			} else if (form == "draw-count") {
