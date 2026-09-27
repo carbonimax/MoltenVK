@@ -1,0 +1,18 @@
+#version 450
+// Copyright 2026 Jean-Philippe Meunier
+// SPDX-License-Identifier: Apache-2.0
+// The probe.metal mesh in GLSL: four vertices with distinct values, triangles (0,1,2) and (3,2,1).
+#extension GL_EXT_mesh_shader : require
+layout(local_size_x = 4) in;
+layout(triangles, max_vertices = 4, max_primitives = 2) out;
+layout(location = 0) out vec4 color[];
+const vec2 positions[4] = vec2[](vec2(-0.75, -0.75), vec2(0.75, -0.75), vec2(-0.75, 0.75), vec2(0.75, 0.75));
+const vec4 colors[4] = vec4[](vec4(0.8, 0.1, 0.2, 1.0), vec4(0.1, 0.7, 0.3, 1.0), vec4(0.2, 0.3, 0.9, 1.0), vec4(0.6, 0.5, 0.4, 1.0));
+const uvec3 triangles[2] = uvec3[](uvec3(0, 1, 2), uvec3(3, 2, 1));
+void main() {
+	uint i = gl_LocalInvocationIndex;
+	SetMeshOutputsEXT(4, 2);
+	gl_MeshVerticesEXT[i].gl_Position = vec4(positions[i], 0.0, 1.0);
+	color[i] = colors[i];
+	if (i < 2) gl_PrimitiveTriangleIndicesEXT[i] = triangles[i];
+}
