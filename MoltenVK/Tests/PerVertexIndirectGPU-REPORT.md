@@ -18,7 +18,7 @@ Les arguments, le compte et les indices sont écrits sur le GPU dans la même so
 - La matrice GPU passe 121/121, avec la validation Metal API et GPU.
 - Les quatre contrôles ordinaires r12 et les quatre contrôles PerVertex directs sont identiques octet par octet aux preuves antérieures.
 
-Ce n'est **pas** un support non borné. Chaque commande indirecte réserve, avant soumission, une capacité finie de records. Au-delà, la commande entière ne fait rien et le périphérique est déclaré perdu. Le §3 montre pourquoi aucune solution GPU seule à réservation finie ne peut faire mieux, et le §8 donne le plus petit changement vers un support non borné.
+Ce n'est **pas** un support non borné. Chaque commande indirecte réserve, avant soumission, une capacité finie de records. Au-delà, la commande entière ne fait rien et le périphérique est déclaré perdu. Le §3 explique la limite de ce chemin capture/replay à réservation finie ; le §8 esquisse une continuation possible, non implémentée.
 
 ## 2. Isolation, provenance, WIP
 
@@ -77,16 +77,16 @@ Au commit `d608d84c`, l'architecture dimensionnait tout sur le CPU :
 
 Lire les arguments sur le CPU casserait l'ordre Vulkan : les écritures GPU antérieures ne sont pas encore exécutées. Les gardes ne pouvaient donc pas simplement être retirées.
 
-### 3.3 Pourquoi une réservation finie ne couvre pas tout
+### 3.3 Limite de la réservation finie dans ce chemin capture/replay
 
-**Aucune exécution GPU seule sans shaders mesh** ne peut rendre tout dessin légal avec une mémoire réservée finie. L'argument :
+Le chemin portable étudié ici, avec un nombre d'encodeurs fixé par le CPU et des records de capture lus par le fragment, ne peut pas rendre tous les dessins légaux avec une réservation finie. L'argument porte sur cette architecture :
 
 1. Le fragment de replay d'une primitive lit ses trois records capturés en mémoire device.
 2. Sur Apple3 à Apple10, une barrière de rendu ne peut pas inclure `.fragment` ni `.tile` dans `after`. Source : Metal Feature Set Tables du 21 mai 2026, note 3, copiée dans `build/indirect-gpu/metal-feature-tables-note3.txt` (PDF source `metal-feature-set-tables-2026-05-21.pdf`, SHA-256 `9f31df15…`). À l'intérieur d'un encodeur de rendu, une zone lue par des fragments ne peut donc pas être réécrite par un dessin ultérieur.
 3. Le nombre d'encodeurs d'un `MTLCommandBuffer` est fixé par le CPU à l'encodage. Metal n'a pas de boucle d'encodeurs pilotée par le GPU.
-4. Le volume rendable est donc au plus (encodeurs fixés par le CPU) × (scratch réservé). Ce produit est fini, alors que le besoin légal atteint 2⁶⁴ records par dessin.
+4. Dans ce chemin, le volume rendable est au plus (encodeurs fixés par le CPU) × (scratch réservé). Ce produit est fini, alors que le besoin légal atteint 2⁶⁴ records par dessin.
 
-Un support non borné exige donc l'une de ces voies :
+Les voies envisagées pour lever cette limite sont :
 
 - une continuation, où le CPU observe des valeurs GPU au milieu de la soumission (§8) ;
 - un chemin mesh sans aller-retour mémoire, qui suppose Metal 3 et une transformation VS→mesh dans SPIRV-Cross.
@@ -240,7 +240,7 @@ L'alternative est un chemin mesh (Metal 3) sans mémoire intermédiaire, qui exi
 
 Proposition de texte :
 
-> **Dessins indirects, étape 4 — prototype borné validé sur M4.** Branche `claude/pervertex-indirect-gpu`, `5d6d8508`..`b5a1caec` (base `d608d84c`), bibliothèque de test `e404abe4`. Capacité R réservée avant soumission ; admission GPU tout-ou-rien de chaque commande (compte, arguments, plage d'indices) ; planification, tables, collecte d'indices et restart sur GPU ; capture et replay indirects exacts. Au-delà de R, la commande ne fait rien et le périphérique est perdu dans `finish()`, avant les fences. Matrice M4 121/121 sous validation Metal API/GPU : quatre formes, trois producteurs GPU, compte nul, répétitions, bornes, restart statique et dynamique, six topologies, stress. Test hôte des noyaux de production pour les deux modes de sommet provoquant. Contrôles r12 identiques. Démonstration : aucune réservation finie GPU seule ne couvre tous les arguments légaux (barrière fragment→vertex interdite sur Apple3-10). Le non borné exige une continuation (découpage de soumission, `enqueue`, encodage asynchrone) ou un chemin mesh. Restent : fusion avec le WIP TES (`buffers[7..11]`), budget R configurable et scratch partagé par command buffer, diviseur zéro, multiview, M1/M3, performances, revue Astra. Garde publique fermée.
+> **Dessins indirects, étape 4 — prototype borné validé sur M4.** Branche `claude/pervertex-indirect-gpu`, `5d6d8508`..`b5a1caec` (base `d608d84c`), bibliothèque de test `e404abe4`. Capacité R réservée avant soumission ; admission GPU tout-ou-rien de chaque commande (compte, arguments, plage d'indices) ; planification, tables, collecte d'indices et restart sur GPU ; capture et replay indirects exacts. Au-delà de R, la commande ne fait rien et le périphérique est perdu dans `finish()`, avant la fence de la soumission. Matrice M4 121/121 sous validation Metal API/GPU : quatre formes, trois producteurs GPU, compte nul, répétitions, bornes, restart statique et dynamique, six topologies, stress. Test hôte des noyaux de production pour les deux modes de sommet provoquant. Contrôles r12 identiques. Dans le chemin capture/replay étudié, un nombre d'encodeurs fixé par le CPU et une réservation finie ne couvrent pas tous les arguments légaux. Une continuation ou un autre chemin reste à étudier pour lever cette limite. Restent : fusion avec le WIP TES (`buffers[7..11]`), budget R configurable et scratch partagé par command buffer, diviseur zéro, multiview, M1/M3, performances, revue Astra. Garde publique fermée.
 
 ## 10. Reproduction
 
