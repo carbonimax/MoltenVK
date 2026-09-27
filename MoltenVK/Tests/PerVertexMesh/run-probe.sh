@@ -22,6 +22,8 @@ for shader in mesh.mesh interp.frag pervertex.frag; do
 	spirv-val --target-env vulkan1.3 "$output/$shader.spv"
 done
 "$spvc" "$output/mesh.mesh.spv" --msl --msl-version 30000 --output "$output/mesh.metal"
+# Before SPIRV-Cross 8cd36d69, a LocalSizeId mesh got a zero workgroup size and its output loops hung the GPU.
+if grep -q 'gl_WorkGroupSize \[\[maybe_unused\]\] = uint3(0, 0, 0)' "$output/mesh.metal"; then echo "STOP: SPIRV-Cross lacks the LocalSizeId mesh fix (8cd36d69); the translated mesh would hang the GPU"; exit 1; fi
 "$spvc" "$output/interp.frag.spv" --msl --msl-version 30000 --output "$output/interp.metal"
 "$spvc" "$output/pervertex.frag.spv" --msl --msl-version 40000 --msl-supports-per-vertex-fragment-input --output "$output/pervertex-native.metal"
 # Without the native capability or a captured producer layout, SPIRV-Cross has no PerVertexKHR path for this fragment.
