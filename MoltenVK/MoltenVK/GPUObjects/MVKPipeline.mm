@@ -1228,6 +1228,12 @@ static std::string mvkMeshShaderIncompatibility(const std::vector<uint32_t>& spi
 	SPIRV_CROSS_NAMESPACE::Compiler reflect(spirv);
 	reflect.set_entry_point(entryName, spv::ExecutionModelMeshEXT);
 	if (!reflect.get_execution_mode_bitset().get(spv::ExecutionModeOutputTrianglesEXT)) { return "emits points or lines."; }
+	// The mesh stage binds no implicit buffer and tracks no device-address residency yet.
+	for (auto capability : reflect.get_declared_capabilities()) {
+		if (capability == spv::CapabilityPhysicalStorageBufferAddresses) { return "uses physical storage buffer addresses."; }
+	}
+	reflect.update_active_builtins();
+	if (reflect.has_active_builtin(spv::BuiltInDrawIndex, spv::StorageClassInput)) { return "reads gl_DrawID."; }
 	for (auto varID : reflect.get_active_interface_variables()) {
 		if (reflect.get_storage_class(varID) != spv::StorageClassOutput) { continue; }
 		bool perPrimitive = reflect.has_decoration(varID, spv::DecorationPerPrimitiveEXT);
@@ -1280,6 +1286,12 @@ bool MVKGraphicsPipeline::initMeshPipelineState(const VkGraphicsPipelineCreateIn
 	shaderConfig.options.entryPointName = pMeshSS->pName;
 	MVKMTLFunction mesh = getMTLFunction(shaderConfig, pMeshSS, pMeshFB, _meshModule, "Mesh");
 	if (!mesh.getMTLFunction()) { return false; }
+	const auto& meshResults = mesh.shaderConversionResults;
+	if (meshResults.needsSwizzleBuffer || meshResults.needsBufferSizeBuffer || meshResults.needsDynamicOffsetBuffer || meshResults.needsViewRangeBuffer ||
+		meshResults.needsDrawId || meshResults.needsDispatchBaseBuffer || meshResults.needsOutputBuffer || meshResults.needsPatchOutputBuffer ||
+		meshResults.usesPhysicalStorageBufferAddressesCapability) {
+		return unsupported("mesh shader needs an implicit buffer or device-address residency, which the mesh stage does not provide.");
+	}
 	SPIRVShaderOutputs meshOutputs;
 	if (!getShaderOutputs(_meshModule->getSPIRV(), spv::ExecutionModelMeshEXT, pMeshSS->pName, meshOutputs, errorLog)) {
 		setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to get mesh outputs: %s", errorLog.c_str()));
