@@ -33,14 +33,21 @@ static void checkLayout(const MSLCapturedVertexLayout& actual, const MSLCaptured
 
 int main() {
 	try {
+		for (bool layered : {false, true}) {
 		MSLCapturedVertexLayout layout;
-		layout.stride = 32;
+		layout.stride = 36;
+		layout.builtins.push_back({spv::BuiltInLayer, 0, 0, 32, SPIRType::UInt});
 		for (uint32_t c = 0; c < 3; c++) { layout.components.push_back({2, c, 4 * c, SPIRType::Float}); }
 		for (uint32_t c = 0; c < 4; c++) { layout.builtins.push_back({spv::BuiltInPosition, 0, c, 16 + 4 * c, SPIRType::Float}); }
 		SPIRVToMSLConversionConfiguration cfg;
 		cfg.options.entryPointName = "main";
 		cfg.options.entryPointStage = spv::ExecutionModelFragment;
 		cfg.options.mslOptions.set_msl_version(2, 4);
+		cfg.options.mslOptions.multiview = true;
+		cfg.options.mslOptions.multiview_layered_rendering = layered;
+		auto otherMode = cfg;
+		otherMode.options.mslOptions.multiview_layered_rendering = !layered;
+		check(!cfg.matches(otherMode) && !otherMode.matches(cfg), "cfg layered mode aliases cache identity");
 		cfg.setPerVertexInputBuffer(layout, {28, 29, 15});
 		cfg.exportCapturedVertexLayout = true;
 		SPIRVToMSLConversionResultInfo scr{};
@@ -64,7 +71,8 @@ int main() {
 		checkLayout(restoredScr.capturedVertexLayout, layout, "scr.capturedVertexLayout user/builtin fields lost");
 		check(restoredScr.entryPoint.mtlFunctionName == "cacheRoundTrip" && restoredScr.entryPoint.fpFastMathFlags == 17 && restoredScr.specializationMacros.at(7).name == "testMacro", "scr surrounding metadata lost");
 		check(bytes.peek() == std::char_traits<char>::eof(), "Archive not fully consumed");
-		std::cout << "PASS: actual MVKPipeline cfg/scr serializers preserve user fields, Position, binding, used flag and cache identity (" << bytes.str().size() << " bytes)\n";
+		std::cout << "PASS: actual MVKPipeline cfg/scr serializers preserve user fields, Position/Layer, multiview options, binding, used flag and cache identity (" << bytes.str().size() << " bytes)\n";
+		}
 		return 0;
 	} catch (const std::exception& error) {
 		std::cerr << "FAIL: " << error.what() << '\n';

@@ -17,8 +17,8 @@ source = Path(os.environ.get('MVK_SINGLE_VIEW_PIPELINE_SOURCE', root / 'MoltenVK
 # Mutate only the generated test copy; every control must fail the CPU suite.
 controls = {
     'slot': ('ids[MVKImplicitBuffer::ViewRange] = getImplicitBufferIndex(stage, 8)', 'ids[MVKImplicitBuffer::ViewRange] = extra'),
-    'layered': ('!_usesPerVertexInputBuffer && getPhysicalDevice()->canUseInstancingForMultiview()', 'getPhysicalDevice()->canUseInstancingForMultiview()'),
-    'replay': ('options.multiview = false;', 'options.multiview = true;'),
+    'layered': ('getPhysicalDevice()->canUseInstancingForMultiview() && (!_usesPerVertexInputBuffer || (pRendInfo->viewMask & (pRendInfo->viewMask - 1)))', 'getPhysicalDevice()->canUseInstancingForMultiview()'),
+    'replay': ('options.multiview = _perVertexReplayBinding.multiview_layer;', 'options.multiview = true;'),
     'capacity': ('if (viewMask && !mvkPerVertexBufferIndexAvailable', 'if (false && !mvkPerVertexBufferIndexAvailable'),
 }
 control = os.environ.get('MVK_SINGLE_VIEW_NEGATIVE_CONTROL')
@@ -35,7 +35,7 @@ slots = between('\t// Set implicit buffer indices', '\n\tconst VkPipelineRenderi
 start = source.index('    shaderConfig.options.mslOptions.multiview =')
 options = source[start:source.index('    shaderConfig.options.mslOptions.view_index_from_device_index', start)]
 replay = between('\t\toptions.capture_output_to_buffer = false;', '\t\t// PointSize is captured')
-(output / 'SingleViewPipeline.inc').write_text('bool Pipeline::admit(const VkGraphicsPipelineCreateInfo* pCreateInfo) {\nconst void* pVertexSS = this;\nauto unsupported = [&](const char* message) { error = message; return false; };\n' + admission + '\nreturn true;\n}\nvoid Pipeline::slots(const VkGraphicsPipelineCreateInfo* pCreateInfo) {\n' + slots + '\n}\nvoid Pipeline::configure(SPIRVToMSLConversionConfiguration& shaderConfig) {\nconst auto* pRendInfo = &rendering;\n' + options + '\n}\nvoid replayOptions(CompilerMSL::Options& options) {\n' + replay + '\n}\n')
+(output / 'SingleViewPipeline.inc').write_text('bool Pipeline::admit(const VkGraphicsPipelineCreateInfo* pCreateInfo) {\nconst void* pVertexSS = this;\nauto unsupported = [&](const char* message) { error = message; return false; };\n' + admission + '\nreturn true;\n}\nvoid Pipeline::slots(const VkGraphicsPipelineCreateInfo* pCreateInfo) {\n' + slots + '\n}\nvoid Pipeline::configure(SPIRVToMSLConversionConfiguration& shaderConfig) {\nconst auto* pRendInfo = &rendering;\n' + options + '\n}\nvoid replayOptions(CompilerMSL::Options& options, MSLCapturedOutputReplayBinding& _perVertexReplayBinding) {\n' + replay + '\n}\n')
 PY
 for stage in vert frag; do
     glslangValidator -V --target-env vulkan1.1 "$test_dir/pervertex-single-view.$stage" -o "$output/$stage.spv"

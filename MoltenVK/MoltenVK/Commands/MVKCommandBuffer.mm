@@ -224,6 +224,7 @@ void MVKCommandBuffer::flushImmediateCmdEncoder() {
         
         delete _immediateCmdEncodingContext;
         _immediateCmdEncodingContext = nullptr;
+        if (!_isReusable) { releaseRecordedCommands(); }
     }
 }
 
@@ -310,18 +311,13 @@ void MVKCommandBuffer::addCommand(MVKCommand* command) {
 
 	_commandCount++;
 
-    if(_immediateCmdEncoder) {
-        _immediateCmdEncoder->encodeCommands(command);
-        if( !_isReusable ) {
-            releaseCommands(command);
-            return;
-        }
-    }
-
+    // Multiview rewinds through _next while encoding the subpass terminator.
+    // Link first and retain even one-time commands until flush so replay can traverse them.
     if (_tail) { _tail->_next = command; }
     command->_next = nullptr;
     _tail = command;
     if ( !_head ) { _head = command; }
+    if (_immediateCmdEncoder) { _immediateCmdEncoder->encodeCommands(command); }
 }
 
 void MVKCommandBuffer::submit(MVKQueueCommandBufferSubmission* cmdBuffSubmit, MVKCommandEncodingContext* pEncodingContext, const MVKPerVertexScratchReservations& scratch) {

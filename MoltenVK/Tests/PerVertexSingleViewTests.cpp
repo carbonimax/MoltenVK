@@ -111,7 +111,8 @@ static void checkAdmission() {
 static void checkConversion(const std::string& directory) {
     auto vertex = readSPIRV(directory + "/vert.spv");
     SPIRVToMSLConverter converter;
-    for (uint32_t mask : {0u, 1u, 32u}) {
+    for (uint32_t mask : {0u, 1u, 32u, 3u, 0x13u, 0xc0000000u}) {
+        bool layered = (mask & (mask - 1)) != 0;
         Pipeline pipeline;
         pipeline.rendering.viewMask = mask;
         pipeline.slots(nullptr);
@@ -128,6 +129,12 @@ static void checkConversion(const std::string& directory) {
         options.view_mask_buffer_index = pipeline.slot(MVKImplicitBuffer::ViewRange);
         options.shader_index_buffer_index = pipeline.slot(MVKImplicitBuffer::Index);
         capture.exportCapturedVertexLayout = true;
+        auto changed = capture;
+        changed.options.mslOptions.multiview_layered_rendering = !options.multiview_layered_rendering;
+        check(!capture.options.matches(changed.options), "Layered capture cache identity aliases single-view");
+        changed = capture;
+        changed.options.mslOptions.multiview = !options.multiview;
+        check(!capture.options.matches(changed.options), "Multiview cache identity aliases ordinary capture");
         MSLCapturedVertexLayout layout;
         for (auto indexType : {CompilerMSL::Options::IndexType::None, CompilerMSL::Options::IndexType::UInt16, CompilerMSL::Options::IndexType::UInt32}) {
             options.vertex_for_tessellation = indexType != CompilerMSL::Options::IndexType::None;
@@ -137,14 +144,14 @@ static void checkConversion(const std::string& directory) {
             auto config = capture;
             check(converter.convert(config, result), result.resultLog.c_str());
             check(result.resultInfo.needsViewRangeBuffer == bool(mask), "Producer ViewRange binding missing or unnecessary");
-            check(result.msl.find("render_target_array_index") == std::string::npos, "Capture emits a layered output");
-            check(result.msl.find("spvViewMask[1]") == std::string::npos, "Capture divides/remaps application instances");
-            check(!mask || result.msl.find("gl_ViewIndex = spvViewMask[0]") != std::string::npos, "Capture ViewIndex is not the selected view");
+            check(std::any_of(result.resultInfo.capturedVertexLayout.builtins.begin(), result.resultInfo.capturedVertexLayout.builtins.end(), [](const auto& b) { return b.builtin == spv::BuiltInLayer; }) == layered, "Capture Layer ABI mismatch");
+            check((result.msl.find("spvViewMask[1]") != std::string::npos) == layered, "Capture instance/view mode mismatch");
+            check(!mask || layered || result.msl.find("gl_ViewIndex = spvViewMask[0]") != std::string::npos, "Capture ViewIndex is not the selected view");
             if (indexType == CompilerMSL::Options::IndexType::None) {
                 check(result.msl.find("(gl_InstanceIndex - gl_BaseInstance) * spvIndirectParams[0] + gl_VertexIndex - gl_BaseVertex") != std::string::npos, "Direct capture lost base-instance/base-vertex normalization");
             } else {
                 check(result.msl.find("gl_GlobalInvocationID.y * spvStageInputSize.x + gl_GlobalInvocationID.x") != std::string::npos, "Indexed capture lost dense occurrence addressing");
-                check(result.msl.find("gl_GlobalInvocationID.y + spvDispatchBase.y") != std::string::npos && result.msl.find("spvIndices[gl_GlobalInvocationID.x] + spvDispatchBase.x") != std::string::npos, "Indexed capture lost application instance/vertex indices");
+                check(result.msl.find(layered ? "gl_GlobalInvocationID.y / spvViewMask[1] + spvDispatchBase.y" : "gl_GlobalInvocationID.y + spvDispatchBase.y") != std::string::npos && result.msl.find("spvIndices[gl_GlobalInvocationID.x] + spvDispatchBase.x") != std::string::npos, "Indexed capture lost application instance/vertex indices");
             }
             check(result.resultInfo.capturedVertexLayout.stride > 0, "Missing capture ABI");
             if (indexType == CompilerMSL::Options::IndexType::None) { layout = result.resultInfo.capturedVertexLayout; }
@@ -166,17 +173,19 @@ static void checkConversion(const std::string& directory) {
             check(converter.convert(fragment, result), result.resultLog.c_str());
             check(result.resultInfo.needsViewRangeBuffer == bool(mask), "Fragment ViewRange missing");
             check(result.resultInfo.needsPerVertexInputBuffer == captured, "Fragment captured-input mode lost");
-            check(!mask || result.msl.find("gl_ViewIndex = spvViewMask[0]") != std::string::npos, "Fragment ViewIndex is not selected view");
-            check(result.msl.find("render_target_array_index") == std::string::npos, "Fragment requires missing replay layer");
+            check(!mask || layered || result.msl.find("gl_ViewIndex = spvViewMask[0]") != std::string::npos, "Fragment ViewIndex is not selected view");
+            check((result.msl.find("render_target_array_index") != std::string::npos) == layered, "Fragment/replay Layer mismatch");
             writeMSL(directory + "/fragment-" + std::to_string(mask) + "-" + std::to_string(captured) + ".metal", result.msl);
         }
         CompilerMSL replay(vertex);
         auto replayConfig = capture.options.mslOptions;
         replayConfig.vertex_for_tessellation = false;
-        replayOptions(replayConfig);
+        MSLCapturedOutputReplayBinding replayBinding = {0, 1, 2, 2};
+        replayOptions(replayConfig, replayBinding);
+        check(replayBinding.multiview_layer == layered, "Replay opt-in mismatch");
         replay.set_msl_options(replayConfig);
-        auto replayMSL = replay.compile_captured_output_replay(layout, {0, 1, 2, 2}, {3, 3, 4}, {1});
-        check(replayMSL.find("spvViewMask") == std::string::npos && replayMSL.find("render_target_array_index") == std::string::npos, "Replay reevaluates multiview");
+        auto replayMSL = replay.compile_captured_output_replay(layout, replayBinding, {3, 3, 4}, {1});
+        check(replayMSL.find("spvViewMask") == std::string::npos && (replayMSL.find("render_target_array_index") != std::string::npos) == layered, "Replay reevaluates multiview");
         writeMSL(directory + "/replay-" + std::to_string(mask) + ".metal", replayMSL);
     }
     std::cout << "PASS: 9 direct/indexed captures, 6 PerVertex/barycentric fragments, 3 replay shaders; ViewIndex constant and capture ABI identical\n";

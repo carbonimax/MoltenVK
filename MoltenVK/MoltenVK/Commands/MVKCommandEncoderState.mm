@@ -1643,7 +1643,11 @@ void MVKMetalComputeCommandEncoderState::prepareRenderDispatch(
 
 	id<MTLComputePipelineState> mtlPipeline = nil;
 	if (stage == kMVKShaderStageVertex) {
-		if (!mvkEncoder._isIndexedDraw) {
+		if (pipeline->usesPerVertexInputBuffer()) {
+			auto* subpass = mvkEncoder.getSubpass();
+			uint32_t viewCount = subpass->isMultiview() ? subpass->getViewCountInMetalPass(mvkEncoder.getMultiviewPassIndex()) : 1;
+			mtlPipeline = pipeline->getPerVertexIndexedCapturePipelineState(vk.isPrimitiveRestartEnabled() || vk._indexBuffer.vkIndexType == VK_INDEX_TYPE_UINT32, viewCount);
+		} else if (!mvkEncoder._isIndexedDraw) {
 			mtlPipeline = pipeline->getTessVertexStageState();
 		} else if (vk._indexBuffer.mtlIndexType == MTLIndexTypeUInt16) {
 			mtlPipeline = pipeline->getTessVertexStageIndex16State();
@@ -1856,15 +1860,23 @@ void MVKCommandEncoderState::bindIndexBuffer(const MVKIndexMTLBufferBinding& buf
 void MVKCommandEncoderState::offsetZeroDivisorVertexBuffers(MVKCommandEncoder& mvkEncoder, MVKGraphicsStage stage, MVKGraphicsPipeline* pipeline, uint32_t firstInstance) {
 	for (const auto& binding : pipeline->getZeroDivisorVertexBindings()) {
 		uint32_t mtlBuffIdx = pipeline->getMetalBufferIndexForVertexAttributeBinding(binding.first);
-		auto& buffer = _vkGraphics._vertexBuffers[binding.first];
+		uint32_t sourceBinding = binding.first;
+		VkDeviceSize offset = 0;
+		for (const auto& translated : pipeline->getTranslatedVertexBindings()) {
+			if (translated.translationBinding != binding.first) { continue; }
+			sourceBinding = translated.binding;
+			offset += translated.translationOffset;
+			break;
+		}
+		const auto& buffer = _vkGraphics._vertexBuffers[sourceBinding];
+		VkDeviceSize stride = pipeline->getDynamicStateFlags().has(MVKRenderStateFlag::VertexStride) ? buffer.stride : binding.second;
+		offset += buffer.offset + VkDeviceSize(firstInstance) * stride;
 		switch (stage) {
 			case kMVKGraphicsStageVertex:
-				[mvkEncoder.getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl) setBufferOffset: buffer.offset + firstInstance * binding.second
-				                                                                                  atIndex: mtlBuffIdx];
+				[mvkEncoder.getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl) setBufferOffset: offset atIndex: mtlBuffIdx];
 				break;
 			case kMVKGraphicsStageRasterization:
-				[mvkEncoder._mtlRenderEncoder setVertexBufferOffset:buffer.offset + firstInstance * binding.second
-				                                            atIndex:mtlBuffIdx];
+				[mvkEncoder._mtlRenderEncoder setVertexBufferOffset:offset atIndex:mtlBuffIdx];
 				break;
 			default:
 				assert(false); // If we hit this, something went wrong.

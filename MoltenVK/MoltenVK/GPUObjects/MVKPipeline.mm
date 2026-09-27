@@ -1110,7 +1110,7 @@ void MVKGraphicsPipeline::initMTLRenderPipelineState(const VkGraphicsPipelineCre
 		MTLRenderPipelineDescriptor* plDesc = newMTLRenderPipelineDescriptor(pCreateInfo, reflectData, pVertexSS, pVertexFB, pFragmentSS, pFragmentFB);	// temp retain
 		if (plDesc) {
 			auto viewMask = getRenderingCreateInfo(pCreateInfo)->viewMask;
-			if (mvkIsMultiview(viewMask)) {
+			if (mvkIsMultiview(viewMask) && !_usesPerVertexInputBuffer) {
 				// We need to adjust the step rate for per-instance attributes to account for the
 				// extra instances needed to render all views. But, there's a problem: vertex input
 				// descriptions are static pipeline state. If we need multiple passes, and some have
@@ -1228,7 +1228,7 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 	return true;
 }
 
-bool MVKGraphicsPipeline::addPerVertexIndexedCapturePipelines(MTLVertexDescriptor* vertexDesc, const SPIRVToMSLConversionConfiguration& shaderConfig, const VkPipelineShaderStageCreateInfo* pVertexSS) {
+bool MVKGraphicsPipeline::addPerVertexIndexedCapturePipelines(MTLVertexDescriptor* vertexDesc, const SPIRVToMSLConversionConfiguration& shaderConfig, const VkPipelineShaderStageCreateInfo* pVertexSS, uint32_t viewCount) {
 	auto captureConfig = shaderConfig;
 	const auto& implicit = getImplicitBuffers(kMVKShaderStageVertex).ids;
 	captureConfig.options.mslOptions.vertex_for_tessellation = true;
@@ -1271,7 +1271,8 @@ bool MVKGraphicsPipeline::addPerVertexIndexedCapturePipelines(MTLVertexDescripto
 		}
 		populateResourceUsage(_stageResources[kMVKShaderStageVertex], captureConfig, results, spv::ExecutionModelVertex);
 		plDesc.stageInputDescriptor.indexType = i ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
-		success = !!getOrCompilePipeline(plDesc, i ? _mtlTessVertexStageIndex32State : _mtlTessVertexStageIndex16State, "Indexed PerVertexKHR capture");
+		auto& states = _perVertexCapturePipelineStates[viewCount];
+		success = !!getOrCompilePipeline(plDesc, i ? states.index32 : states.index16, "Indexed PerVertexKHR capture");
 	}
 	[plDesc release];
 	_stageResources[kMVKShaderStageVertex].implicitBuffers.needed.add(MVKImplicitBuffer::Index);
@@ -1325,9 +1326,10 @@ bool MVKGraphicsPipeline::addPerVertexReplayShaderToPipeline(MTLRenderPipelineDe
 		auto options = shaderConfig.options.mslOptions;
 		options.capture_output_to_buffer = false;
 		options.disable_rasterization = false;
-		// Single-view capture already evaluated ViewIndex; the render pass selects its attachment slice.
-		options.multiview = false;
-		options.multiview_layered_rendering = false;
+		// Layered replay imports the captured synthetic Layer; single-view uses its attachment slice.
+		_perVertexReplayBinding.multiview_layer = options.multiview && options.multiview_layered_rendering;
+		options.multiview = _perVertexReplayBinding.multiview_layer;
+		options.multiview_layered_rendering = _perVertexReplayBinding.multiview_layer;
 		// PointSize is captured from the producer; the pinned replay API cannot synthesize it.
 		options.enable_point_size_default = false;
 		options.emulate_reversed_depth_viewport = getPhysicalDevice()->shouldEmulateReversedDepthViewport();
@@ -1364,7 +1366,26 @@ bool MVKGraphicsPipeline::addPerVertexReplayShaderToPipeline(MTLRenderPipelineDe
 	plDesc.alphaToOneEnabled = NO;
 	// Capture point/line and strip/fan vertices individually.
 	if (pCreateInfo->pInputAssemblyState->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) { plDesc.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint; }
-	bool captured = !!getOrCompilePipeline(plDesc, _mtlPerVertexCapturePipelineState);
+	bool captured = true;
+	uint32_t viewMask = getRenderingCreateInfo(pCreateInfo)->viewMask;
+	uint32_t passCount = viewMask ? getDevice()->getMultiviewMetalPassCount(viewMask) : 1;
+	uint32_t oldViewCount = 1;
+	for (uint32_t pass = 0; pass < passCount && captured; ++pass) {
+		uint32_t viewCount = viewMask ? getDevice()->getViewCountInMetalPass(viewMask, pass) : 1;
+		if (_perVertexCapturePipelineStates.count(viewCount)) { continue; }
+		adjustVertexInputForMultiview(plDesc.vertexDescriptor, pCreateInfo->pVertexInputState, viewCount, oldViewCount);
+		oldViewCount = viewCount;
+		for (uint32_t binding = 0; binding < 31; ++binding) {
+			if (plDesc.vertexDescriptor.layouts[binding].stepRate > UINT32_MAX) {
+				setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR view-expanded vertex divisor exceeds uint32."));
+				captured = false;
+				break;
+			}
+		}
+		if (!captured) { break; }
+		captured = addPerVertexIndexedCapturePipelines(plDesc.vertexDescriptor, shaderConfig, pVertexSS, viewCount);
+		if (captured) { captured = !!getOrCompilePipeline(plDesc, _perVertexCapturePipelineStates[viewCount].direct); }
+	}
 	plDesc.inputPrimitiveTopology = getPrimitiveTopologyClass();
 	plDesc.vertexFunction = function;
 	[function release];
@@ -1401,7 +1422,7 @@ MTLRenderPipelineDescriptor* MVKGraphicsPipeline::newMTLRenderPipelineDescriptor
 	// This needs to happen before compiling the fragment shader, or we'll lose information on vertex attributes.
 	if (!addVertexInputToPipeline(plDesc.vertexDescriptor, pCreateInfo->pVertexInputState, shaderConfig)) { [plDesc release]; return nil; }
 
-	if (_usesPerVertexInputBuffer && (!addPerVertexIndexedCapturePipelines(plDesc.vertexDescriptor, shaderConfig, pVertexSS) || !addPerVertexReplayShaderToPipeline(plDesc, pCreateInfo, shaderConfig, pVertexSS, pFragmentSS, vtxOutputs))) {
+	if (_usesPerVertexInputBuffer && !addPerVertexReplayShaderToPipeline(plDesc, pCreateInfo, shaderConfig, pVertexSS, pFragmentSS, vtxOutputs)) {
 		[plDesc release];
 		return nil;
 	}
@@ -2383,8 +2404,8 @@ void MVKGraphicsPipeline::initShaderConversionConfig(SPIRVToMSLConversionConfigu
     shaderConfig.options.shouldFixupClipSpace = isDepthClipNegativeOneToOne(pCreateInfo);
     shaderConfig.options.mslOptions.tess_domain_origin_lower_left = pTessDomainOriginState && pTessDomainOriginState->domainOrigin == VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
     shaderConfig.options.mslOptions.multiview = mvkIsMultiview(pRendInfo->viewMask);
-    // Portable replay admits one view only: keep InstanceIndex intact and read ViewIndex from ViewRange.
-    shaderConfig.options.mslOptions.multiview_layered_rendering = !_usesPerVertexInputBuffer && getPhysicalDevice()->canUseInstancingForMultiview();
+    // Keep the admitted single-view ABI; the closed multibit path uses captured-layer replay.
+    shaderConfig.options.mslOptions.multiview_layered_rendering = getPhysicalDevice()->canUseInstancingForMultiview() && (!_usesPerVertexInputBuffer || (pRendInfo->viewMask & (pRendInfo->viewMask - 1)));
     shaderConfig.options.mslOptions.view_index_from_device_index = mvkAreAllFlagsEnabled(_flags, VK_PIPELINE_CREATE_2_VIEW_INDEX_FROM_DEVICE_INDEX_BIT);
 	shaderConfig.options.mslOptions.replace_recursive_inputs = mvkOSVersionIsAtLeast(14.0, 17.0, 1.0);
 #if MVK_MACOS
@@ -2599,7 +2620,11 @@ MVKGraphicsPipeline::~MVKGraphicsPipeline() {
 		[_mtlTessVertexStageIndex16State release];
 		[_mtlTessVertexStageIndex32State release];
 		[_mtlTessControlStageState release];
-		[_mtlPerVertexCapturePipelineState release];
+		for (auto& entry : _perVertexCapturePipelineStates) {
+			[entry.second.direct release];
+			[entry.second.index16 release];
+			[entry.second.index32 release];
+		}
 		[_mtlPipelineState release];
 		if (_ownsVertexModule) delete _vertexModule;
 		if (_ownsTessCtlModule) delete _tessCtlModule;
