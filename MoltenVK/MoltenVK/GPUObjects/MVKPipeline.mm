@@ -1217,9 +1217,9 @@ void MVKGraphicsPipeline::initMTLRenderPipelineState(const VkGraphicsPipelineCre
 }
 
 // Whether the stage's entry point statically uses any descriptor-set resource or push constants.
-static bool mvkUsesResources(const std::vector<uint32_t>& spirv, spv::ExecutionModel model) {
+static bool mvkUsesResources(const std::vector<uint32_t>& spirv, spv::ExecutionModel model, const char* entryName = "main") {
 	SPIRV_CROSS_NAMESPACE::Compiler reflect(spirv);
-	reflect.set_entry_point("main", model);
+	reflect.set_entry_point(entryName, model);
 	auto resources = reflect.get_shader_resources(reflect.get_active_interface_variables());
 	return !resources.uniform_buffers.empty() || !resources.storage_buffers.empty() || !resources.storage_images.empty() ||
 		!resources.sampled_images.empty() || !resources.separate_images.empty() || !resources.separate_samplers.empty() ||
@@ -1247,7 +1247,7 @@ static std::string mvkMeshShaderIncompatibility(const std::vector<uint32_t>& spi
 }
 
 // First mesh path: a mesh and a fragment shader drawn with vkCmdDrawMeshTasksEXT, without task shader, mesh-stage
-// resources, per-primitive outputs, PerVertexKHR fragment inputs, pipeline cache, dynamic state or views.
+// resources or specialization, per-primitive outputs, PerVertexKHR fragment inputs, pipeline cache, dynamic state or views.
 // Anything else is refused at creation. The extension is exposed only to the test device adapter.
 bool MVKGraphicsPipeline::initMeshPipelineState(const VkGraphicsPipelineCreateInfo* pCreateInfo,
 												const VkPipelineShaderStageCreateInfo* pTaskSS,
@@ -1265,7 +1265,9 @@ bool MVKGraphicsPipeline::initMeshPipelineState(const VkGraphicsPipelineCreateIn
 	if (getPipelineCache() || !_dynamicStateFlags.empty() || getRenderingCreateInfo(pCreateInfo)->viewMask || !_isRasterizing || isDepthClipNegativeOneToOne(pCreateInfo)) {
 		return unsupported("uses a pipeline cache, dynamic state, views, rasterizer discard or a [-1, 1] depth range.");
 	}
-	if (mvkUsesResources(_meshModule->getSPIRV(), spv::ExecutionModelMeshEXT)) { return unsupported("uses mesh-stage descriptors or push constants."); }
+	if (mvkUsesResources(_meshModule->getSPIRV(), spv::ExecutionModelMeshEXT, pMeshSS->pName)) { return unsupported("uses mesh-stage descriptors or push constants."); }
+	// The draw dispatches the workgroup size of the unspecialized module.
+	if (pMeshSS->pSpecializationInfo) { return unsupported("specializes its mesh shader."); }
 	std::string reason = mvkMeshShaderIncompatibility(_meshModule->getSPIRV(), pMeshSS->pName, _meshThreadgroupSize);
 	if (!reason.empty()) { return unsupported("mesh shader " + reason); }
 	bool usesPerVertex = false;
