@@ -1,0 +1,73 @@
+#version 450
+// Copyright 2026 Jean-Philippe Meunier
+// SPDX-License-Identifier: Apache-2.0
+// The probe.metal mesh in GLSL: four vertices with distinct values, triangles (0,1,2) and (3,2,1).
+// GRID: each workgroup draws the square in its own half of the target. DESCRIPTOR and PER_PRIMITIVE add what the
+// first MoltenVK mesh path refuses: a uniform buffer and a per-primitive output. DRAW_ID and BUFFER_ADDRESS read
+// gl_DrawID (an implicit buffer the mesh stage does not bind) and a device address (no residency tracking for the
+// mesh stage): they must be refused at pipeline creation and are never submitted. PERMUTED rotates the index order
+// of both triangles without changing them. BLOCK_OUTPUT and MATRIX_OUTPUT write the value as a block member and as a
+// matrix, to pair with the PerVertexKHR forms the mesh path refuses.
+#extension GL_EXT_mesh_shader : require
+#ifdef DRAW_ID
+#extension GL_ARB_shader_draw_parameters : require
+#endif
+#ifdef BUFFER_ADDRESS
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(buffer_reference, std430) readonly buffer Colors { vec4 values[4]; };
+#endif
+layout(local_size_x = 4) in;
+layout(triangles, max_vertices = 4, max_primitives = 2) out;
+#if defined(MATRIX_OUTPUT)
+layout(location = 0) out mat2 color[];
+#elif defined(BLOCK_OUTPUT)
+layout(location = 0) out Corner { vec4 color; } corner[];
+#else
+layout(location = 0) out vec4 color[];
+#endif
+#ifdef DESCRIPTOR
+layout(set = 0, binding = 0) uniform Scale { vec4 scale; } ubo;
+#endif
+#ifdef PER_PRIMITIVE
+layout(location = 1) perprimitiveEXT out vec4 primitiveColor[];
+#endif
+const vec2 positions[4] = vec2[](vec2(-0.75, -0.75), vec2(0.75, -0.75), vec2(-0.75, 0.75), vec2(0.75, 0.75));
+const vec4 colors[4] = vec4[](vec4(0.8, 0.1, 0.2, 1.0), vec4(0.1, 0.7, 0.3, 1.0), vec4(0.2, 0.3, 0.9, 1.0), vec4(0.6, 0.5, 0.4, 1.0));
+#ifdef PERMUTED
+const uvec3 triangles[2] = uvec3[](uvec3(1, 2, 0), uvec3(2, 1, 3));
+#else
+const uvec3 triangles[2] = uvec3[](uvec3(0, 1, 2), uvec3(3, 2, 1));
+#endif
+void main() {
+	uint i = gl_LocalInvocationIndex;
+	SetMeshOutputsEXT(4, 2);
+	vec2 position = positions[i];
+#ifdef GRID
+	position.x = position.x * 0.5 + (gl_WorkGroupID.x == 0u ? -0.5 : 0.5);
+#endif
+	gl_MeshVerticesEXT[i].gl_Position = vec4(position, 0.0, 1.0);
+	vec4 value = colors[i];
+#ifdef DESCRIPTOR
+	value *= ubo.scale;
+#endif
+#ifdef DRAW_ID
+	value.x += float(gl_DrawIDARB);
+#endif
+#ifdef BUFFER_ADDRESS
+	Colors colors = Colors(uint64_t(0x1000));
+	value += colors.values[i];
+#endif
+#if defined(MATRIX_OUTPUT)
+	color[i] = mat2(value.xy, value.zw);
+#elif defined(BLOCK_OUTPUT)
+	corner[i].color = value;
+#else
+	color[i] = value;
+#endif
+	if (i < 2) gl_PrimitiveTriangleIndicesEXT[i] = triangles[i];
+#ifdef PER_PRIMITIVE
+	if (i < 2) primitiveColor[i] = vec4(1.0);
+#endif
+}
