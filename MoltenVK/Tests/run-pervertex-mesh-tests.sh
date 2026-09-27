@@ -22,6 +22,7 @@ compile mesh.mesh descriptor.mesh.spv -DDESCRIPTOR
 compile mesh.mesh per-primitive.mesh.spv -DPER_PRIMITIVE
 compile task.task task.task.spv
 compile interp.frag interp.frag.spv
+compile pervertex.frag pervertex.frag.spv
 for name in dev shipping; do
 	tree=$output/$name/src
 	rm -rf "$tree" && mkdir -p "$tree/External"
@@ -47,7 +48,7 @@ run() { # library scenario
 	grep -E '^  |^MESH_DRAW|^VK_EXT|^DEVICE' "$log" | sed 's/^/    /' | head -6
 	if [[ $verdict != PASS ]]; then echo "STOP: inspect $log before any further GPU work"; exit 1; fi
 }
-for scenario in draw grid twice reject-task reject-descriptor reject-per-primitive reject-indirect no-adapter; do run dev "$scenario"; done
+for scenario in draw grid twice reject-task reject-descriptor reject-per-primitive reject-pervertex reject-indirect no-adapter; do run dev "$scenario"; done
 run shipping public-device-gate
 rm -f "$output"/runs/*.rgba
 ( cd "$output" && shasum -a 256 shaders/* */PROVENANCE.txt runs/* dev/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib shipping/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib > EVIDENCE.sha256 )
