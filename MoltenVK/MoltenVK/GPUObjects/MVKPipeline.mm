@@ -1879,14 +1879,18 @@ bool MVKGraphicsPipeline::addTessCtlShaderToPipeline(MTLComputePipelineDescripto
 	setDepthClipConfig(shaderConfig, implicit, false);
 	addPrevStageOutputToShaderConversionConfig(shaderConfig, vtxOutputs);
 	addNextStageInputToShaderConversionConfig(shaderConfig, teInputs);
+	// The GPU topology generator reads the levels exactly as written; Metal's half factors would round
+	// nextafter(1, +inf) down to level 1. Admission guarantees a descriptor-free TCS. Later stages keep
+	// the pipeline's own options.
+	bool argumentBuffers = shaderConfig.options.mslOptions.argument_buffers;
 	if (usesPerVertexTessEval()) {
-		// The GPU topology generator reads the levels exactly as written; Metal's half factors would round
-		// nextafter(1, +inf) down to level 1. Admission guarantees a descriptor-free TCS.
 		shaderConfig.options.mslOptions.tessellation_factors_float32 = true;
 		shaderConfig.options.mslOptions.argument_buffers = false;
 	}
 
 	MVKMTLFunction func = getMTLFunction(shaderConfig, pTessCtlSS, pTessCtlFB, _tessCtlModule, "Tessellation control");
+	shaderConfig.options.mslOptions.tessellation_factors_float32 = false;
+	shaderConfig.options.mslOptions.argument_buffers = argumentBuffers;
 	id<MTLFunction> mtlFunc = func.getMTLFunction();
 	if ( !mtlFunc ) { return false; }
 	plDesc.computeFunction = mtlFunc;
