@@ -791,11 +791,12 @@ MVK_PUBLIC_VULKAN_SYMBOL VkResult vkGetEventStatus(
     VkEvent                                     event) {
 	
 	MVKTraceVulkanCallStart();
-	VkResult rslt = MVKDevice::getMVKDevice(device)->getConfigurationResult();
-	if (rslt == VK_SUCCESS) {
-		MVKEvent* mvkEvent = (MVKEvent*)event;
-		rslt = mvkEvent->isSet() ? VK_EVENT_SET : VK_EVENT_RESET;
-	}
+	// Like vkGetSemaphoreCounterValue: the release of Metal waits during a device loss may set the event.
+	MVKDevice* mvkDev = MVKDevice::getMVKDevice(device);
+	bool isSet = ((MVKEvent*)event)->isSet();
+	std::atomic_thread_fence(std::memory_order_seq_cst);
+	VkResult rslt = mvkDev->isLosing() ? mvkDev->getHostWaitResult(true, UINT64_MAX) : mvkDev->getConfigurationResult();
+	if (rslt == VK_SUCCESS) { rslt = isSet ? VK_EVENT_SET : VK_EVENT_RESET; }
 	MVKTraceVulkanCallEnd();
 	return rslt;
 }

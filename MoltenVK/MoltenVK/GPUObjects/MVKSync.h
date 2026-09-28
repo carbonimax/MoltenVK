@@ -113,10 +113,27 @@ private:
 
 
 #pragma mark -
+#pragma mark MVKLossReleasable
+
+/** A semaphore or event whose encoded Metal waits a device loss must release, so that the work waiting on them ends. */
+class MVKLossReleasable {
+
+public:
+
+	/**
+	 * After device loss, releases every Metal wait encoded on this object, by signalling on the specified
+	 * Metal command buffer, or on the host if it is nil and the underlying event allows it.
+	 * Returns false if a wait could not be released.
+	 */
+	virtual bool releaseWaitsAfterLoss(id<MTLCommandBuffer> mtlCmdBuff) = 0;
+};
+
+
+#pragma mark -
 #pragma mark MVKSemaphore
 
 /** Abstract class that represents a Vulkan semaphore. */
-class MVKSemaphore : public MVKVulkanAPIDeviceObject {
+class MVKSemaphore : public MVKVulkanAPIDeviceObject, public MVKLossReleasable {
 
 public:
 
@@ -200,12 +217,7 @@ public:
 	/** Encodes a wait for a value returned by reserveWait(). */
 	virtual void encodeReservedWait(id<MTLCommandBuffer> mtlCmdBuff, uint64_t reservation) {}
 
-	/**
-	 * After device loss, releases every Metal wait encoded on this semaphore, by signalling on the specified
-	 * Metal command buffer, or on the host if it is nil and the underlying event allows it.
-	 * Returns false if a wait could not be released.
-	 */
-	virtual bool releaseWaitsAfterLoss(id<MTLCommandBuffer> mtlCmdBuff) { return true; }
+	bool releaseWaitsAfterLoss(id<MTLCommandBuffer> mtlCmdBuff) override { return true; }
 
 	/**
 	 * Returns the MTLSharedEvent underlying this Vulkan semaphore,
@@ -522,13 +534,14 @@ protected:
 #pragma mark MVKEventNative
 
 /** An MVKEvent that uses native MTLSharedEvent to provide VkEvent functionality. */
-class MVKEventNative : public MVKEvent {
+class MVKEventNative : public MVKEvent, public MVKLossReleasable {
 
 public:
 	bool isSet() override;
 	void signal(bool status) override;
 	void encodeSignal(id<MTLCommandBuffer> mtlCmdBuff, bool status) override;
 	void encodeWait(id<MTLCommandBuffer> mtlCmdBuff) override;
+	bool releaseWaitsAfterLoss(id<MTLCommandBuffer> mtlCmdBuff) override;
 	id<MTLSharedEvent> getMTLSharedEvent() override { return _mtlEvent; };
 
 	MVKEventNative(MVKDevice* device,
@@ -540,6 +553,8 @@ public:
 
 protected:
 	id<MTLSharedEvent> _mtlEvent;
+	std::atomic<uint64_t> _maxEncodedWaitValue{0};
+	std::atomic<bool> _isLossReleased{false};
 };
 
 

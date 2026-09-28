@@ -135,7 +135,7 @@ void MVKSemaphoreMTLEvent::encodeReservedWait(id<MTLCommandBuffer> mtlCmdBuff, u
 	if ( !mtlCmdBuff ) { return; }
 	uint64_t maxValue = _maxEncodedWaitValue.load();
 	while (maxValue < reservation && !_maxEncodedWaitValue.compare_exchange_weak(maxValue, reservation)) {}
-	if ( !_isLossReleased.exchange(true) ) { _device->addLossReleasedSemaphore(this); }
+	if ( !_isLossReleased.exchange(true) ) { _device->addLossReleasable(this); }
 	[mtlCmdBuff encodeWaitForEvent: _mtlEvent value: reservation];
 }
 
@@ -188,7 +188,7 @@ MVKSemaphoreMTLEvent::MVKSemaphoreMTLEvent(MVKDevice* device,
 }
 
 MVKSemaphoreMTLEvent::~MVKSemaphoreMTLEvent() {
-	if (_isLossReleased) { _device->removeLossReleasedSemaphore(this); }
+	if (_isLossReleased) { _device->removeLossReleasable(this); }
     [_mtlEvent release];
 }
 
@@ -238,7 +238,7 @@ void MVKTimelineSemaphoreMTLEvent::encodeWait(id<MTLCommandBuffer> mtlCmdBuff, u
 	if ( !mtlCmdBuff ) { return; }
 	uint64_t maxValue = _maxEncodedWaitValue.load();
 	while (maxValue < value && !_maxEncodedWaitValue.compare_exchange_weak(maxValue, value)) {}
-	if ( !_isLossReleased.exchange(true) ) { _device->addLossReleasedSemaphore(this); }
+	if ( !_isLossReleased.exchange(true) ) { _device->addLossReleasable(this); }
 	[mtlCmdBuff encodeWaitForEvent: _mtlEvent value: value];
 }
 
@@ -305,7 +305,7 @@ MVKTimelineSemaphoreMTLEvent::MVKTimelineSemaphoreMTLEvent(MVKDevice* device,
 }
 
 MVKTimelineSemaphoreMTLEvent::~MVKTimelineSemaphoreMTLEvent() {
-	if (_isLossReleased) { _device->removeLossReleasedSemaphore(this); }
+	if (_isLossReleased) { _device->removeLossReleasable(this); }
     [_mtlEvent release];
 }
 
@@ -392,8 +392,25 @@ void MVKEventNative::encodeSignal(id<MTLCommandBuffer> mtlCmdBuff, bool status) 
 
 void MVKEventNative::encodeWait(id<MTLCommandBuffer> mtlCmdBuff) {
 	if ( !isSet() ) {
-		[mtlCmdBuff encodeWaitForEvent: _mtlEvent value: _mtlEvent.signaledValue + 1];
+		uint64_t value = _mtlEvent.signaledValue + 1;
+		uint64_t maxValue = _maxEncodedWaitValue.load();
+		while (maxValue < value && !_maxEncodedWaitValue.compare_exchange_weak(maxValue, value)) {}
+		if ( !_isLossReleased.exchange(true) ) { _device->addLossReleasable(this); }
+		[mtlCmdBuff encodeWaitForEvent: _mtlEvent value: value];
 	}
+}
+
+// Like MVKSemaphoreMTLEvent: sets the event to the highest wait encoded so far, never beyond it, since an external
+// Metal client of an imported or exported event may wait for a later value.
+bool MVKEventNative::releaseWaitsAfterLoss(id<MTLCommandBuffer> mtlCmdBuff) {
+	uint64_t value = _maxEncodedWaitValue.load();
+	if ( !value ) { return true; }
+	if (mtlCmdBuff) {
+		[mtlCmdBuff encodeSignalEvent: _mtlEvent value: value];
+	} else if (_mtlEvent.signaledValue < value) {
+		_mtlEvent.signaledValue = value;
+	}
+	return true;
 }
 
 MVKEventNative::MVKEventNative(MVKDevice* device,
@@ -409,6 +426,7 @@ MVKEventNative::MVKEventNative(MVKDevice* device,
 }
 
 MVKEventNative::~MVKEventNative() {
+	if (_isLossReleased) { _device->removeLossReleasable(this); }
 	[_mtlEvent release];
 }
 

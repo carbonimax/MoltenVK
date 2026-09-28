@@ -54,6 +54,7 @@ class MVKSwapchain;
 class MVKDeviceMemory;
 class MVKFence;
 class MVKSemaphore;
+class MVKLossReleasable;
 class MVKTimelineSemaphore;
 class MVKDeferredOperation;
 class MVKEvent;
@@ -732,11 +733,11 @@ public:
 	 */
 	void trackCommittedMTLCommandBuffer(id<MTLCommandBuffer> mtlCmdBuff);
 
-	/** Registers a semaphore whose encoded Metal waits must be released if this device is lost. */
-	void addLossReleasedSemaphore(MVKSemaphore* sem4);
+	/** Registers a semaphore or event whose encoded Metal waits must be released if this device is lost. */
+	void addLossReleasable(MVKLossReleasable* releasable);
 
-	/** Unregisters a semaphore registered with addLossReleasedSemaphore(). */
-	void removeLossReleasedSemaphore(MVKSemaphore* sem4);
+	/** Unregisters an object registered with addLossReleasable(). */
+	void removeLossReleasable(MVKLossReleasable* releasable);
 
 	/** Adds a CPU wait made while encoding a submission, cancelled as soon as this device starts to be lost. */
 	void addEncodingSemaphore(MVKSemaphoreImpl* sem4);
@@ -1156,7 +1157,7 @@ protected:
 	MVKSmallVector<MVKSemaphoreImpl*> _awaitingSemaphores;
 	MVKSmallVector<MVKSemaphoreImpl*> _encodingSemaphores;
 	MVKSmallVector<std::pair<MVKTimelineSemaphore*, uint64_t>> _awaitingTimelineSem4s;
-	std::unordered_set<MVKSemaphore*> _lossReleasedSemaphores;
+	std::unordered_set<MVKLossReleasable*> _lossReleasables;
 	std::mutex _lossReleaseLock;
 	std::mutex _lossLock;
 	std::condition_variable _lossCondition;
