@@ -313,7 +313,7 @@ int main(int argc, char** argv) {
 		}
 		if (!mvkEnableMeshTestDevice || !mvkEnableTESFixtureDevice) throw std::runtime_error("Test device adapters were not linked");
 		mvkEnableMeshTestDevice(physical);
-		mvkEnableTESFixtureDevice(physical);  // Exposes VK_KHR_fragment_shader_barycentric, closed on macOS.
+		mvkEnableTESFixtureDevice(physical);  // Exposes VK_KHR_fragment_shader_barycentric, closed publicly.
 		auto supported = meshFeatureSupported();
 		const bool exposed = hasExtension(physical, VK_EXT_MESH_SHADER_EXTENSION_NAME);
 		std::printf("VK_EXT_mesh_shader exposed=%d meshShader=%d taskShader=%d multiviewMeshShader=%d\n", exposed, supported.meshShader, supported.taskShader, supported.multiviewMeshShader);

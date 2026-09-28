@@ -6,8 +6,8 @@ struct TestPhysicalDevice : MVKPhysicalDevice {
     static void enable(MVKPhysicalDevice* device) {
         // Use the same initialization convention as MVKPhysicalDevice::initExtensions.
         auto& extensions = const_cast<MVKExtensionList&>(device->* &TestPhysicalDevice::_supportedExtensions);
-        // The merged test library may already expose this feature for indirect fixtures.
-        extensions.vk_KHR_fragment_shader_barycentric.enabled = true;
+        // The public library closes this extension; the adapter opens it only where Metal has barycentric coordinates.
+        extensions.vk_KHR_fragment_shader_barycentric.enabled = device->getMetalFeatures()->shaderBarycentricCoordinates;
     }
     // Mesh shaders need a Metal 3 GPU.
     static void enableMesh(MVKPhysicalDevice* device) {
