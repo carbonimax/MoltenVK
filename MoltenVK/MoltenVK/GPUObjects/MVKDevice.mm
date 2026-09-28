@@ -4006,8 +4006,18 @@ static void mvkWaitForZero(const std::atomic<T>& count) {
 void MVKDevice::publishLoss() {
 	mvkWaitForZero(_activeEncodings);
 	releaseSemaphoreWaitsAfterLoss();
-	// Work released above, or committed before the loss, may still use application resources.
-	mvkWaitForZero(_pendingMTLCommandBufferHandlers);
+	// Work released above, or committed before the loss, may still use application resources. Work that waits for
+	// Metal work MoltenVK cannot release, such as the application's own on an exported command queue, holds the report
+	// back: MoltenVK cannot keep those resources alive once the loss is reported (see PerVertexLossTests.mm).
+	auto start = std::chrono::steady_clock::now();
+	bool isWarned = false;
+	while (_pendingMTLCommandBufferHandlers.load()) {
+		if ( !isWarned && std::chrono::steady_clock::now() - start > std::chrono::seconds(1) ) {
+			reportWarning(VK_ERROR_DEVICE_LOST, "The device loss is not reported yet: Metal work that MoltenVK committed has not completed after one second. It may wait for Metal work that MoltenVK cannot release, such as work committed to an exported command queue.");
+			isWarned = true;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
 	{
 		lock_guard<mutex> lock(_sem4Lock);
 		setConfigurationResult(VK_ERROR_DEVICE_LOST);
