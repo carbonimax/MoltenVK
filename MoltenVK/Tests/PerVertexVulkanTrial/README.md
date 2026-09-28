@@ -103,7 +103,8 @@ Le lancement à distance exige l'image disque développeur de cette version, dé
 | GPU | Mode | Barrière (toutes variantes) | Frontière de passe | Sans ordre (témoin) |
 | --- | --- | --- | --- | --- |
 | iPhone 15 Pro, iPhone 18 Pro, iPad Pro M4 (iOS et iPadOS 27) | validation des shaders | 0/5 | 5/5 | 0/5 |
-| les mêmes | sans validation, ou validation de l'API seule | 5/5 | 5/5 | 0/5 |
+| les mêmes | sans validation | 5/5 | 5/5 | 0/5 |
+| iPad Pro M4 | validation de l'API seule | 5/5 | 5/5 | 0/5 |
 | Mac M4 Pro (macOS 27.2) | avec ou sans validation | 5/5 | 5/5 | 0/5 |
 
 - Les variantes de barrière : portée `Buffers`, barrière sur la ressource, `before` réduit au vertex, capture indirecte, capture qui rastérise, enregistrements `Shared`. Toutes se comportent comme le témoin sous la validation des shaders d'iOS.
