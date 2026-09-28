@@ -33,9 +33,10 @@ Step 3 prints the same results as step 2: 6 of 6 barrier variants order the capt
 
 With shader validation, every barrier variant prints `BARRIER_REPRO FAIL ... vertex_visible=0 fragment_visible=0`, and
 the summary reads 0 of 6. The replay reads the zeros that a blit wrote before the render pass, so it draws nothing. The
-`split` variant, which ends the render encoder and starts a new one, still passes. The `none` control, which has no
-barrier, fails in both configurations; this shows that the capture is slow enough for an unordered replay to overtake
-it.
+`split` variant, which ends the render encoder and starts a new one, still passes.
+
+The `none` control has no barrier, and shows `vertex_visible=0` in both configurations. It prints PASS because it has no
+contract to check. It shows that the capture is slow enough for an unordered replay to overtake it.
 
 ## What each variant does (`BarrierRepro.mm`)
 
@@ -82,8 +83,11 @@ variable.
 ## Impact
 
 A renderer that orders draws inside a render pass with these barriers renders wrongly while a developer debugs with
-shader validation, with no diagnostic. The only workaround found is to end the render pass. In this reproducer, with
-RGBA8 and Depth32Float attachments of 2556×1179, a render pass split costs 27 to 62 µs per split without validation.
+shader validation, with no diagnostic. The only workaround found is to end the render pass.
+
+That workaround has a cost. Without validation, a render pass split cost 27 to 62 µs per split on the iPhones and the
+iPad listed above. The measurement used RGBA8 and Depth32Float attachments of 2556×1179. To run it, pass `cost` as the
+variant to `pervertexBarrierMain`. The app does not run it by default.
 
 ## Files
 
