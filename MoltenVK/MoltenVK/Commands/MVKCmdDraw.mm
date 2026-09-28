@@ -1134,8 +1134,10 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	// The plan layout, including where phase 0 freezes the arguments, follows the plan's record ceiling.
 	uint32_t planScanSteps = restart ? mvkPerVertexIndirectRestartScanSteps(scratch->indirectCapacity) : 0;
 	if (restart && plan.length < 1024 + (planScanSteps + 3) * 256) { reject(VK_ERROR_INITIALIZATION_FAILED, "restart planning scratch is too small."); return; }
-	uint32_t snapshotWords = drawCount == 1 ? 48 : 256 + (restart ? (planScanSteps + 3) * 64 : 0);
-	if (drawCount > 1 && plan.length < uint64_t(snapshotWords) * sizeof(uint32_t) + uint64_t(drawCount) * 5 * sizeof(uint32_t)) { reject(VK_ERROR_INITIALIZATION_FAILED, "argument snapshot scratch is too small."); return; }
+	// A single draw freezes its arguments in the plan, several draws in their own buffer (see the perVertexIndirect kernel).
+	uint32_t snapshotWords = drawCount == 1 ? 48 : 0;
+	id<MTLBuffer> snapshot = drawCount == 1 ? plan : scratch->buffers[13];
+	if (drawCount > 1 && (!snapshot || snapshot.length < uint64_t(drawCount) * (indexBinding ? 5 : 4) * sizeof(uint32_t))) { reject(VK_ERROR_INITIALIZATION_FAILED, "argument snapshot scratch is too small."); return; }
 	NSUInteger captureWidth = captureState ? std::max<NSUInteger>(std::min(captureState.threadExecutionWidth, captureState.maxTotalThreadsPerThreadgroup), 1) : 1;
 	bool corners = pipeline->usesPortableBarycentrics();
 	uint32_t params[19] = {drawCount, stride, indexSize, uint32_t(indexCapacity), uint32_t(indexCapacity >> 32), scratch->indirectCapacity, viewCount, uint32_t(topology),
@@ -1153,6 +1155,7 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	computeState.bindBuffer(planEncoder, indexBinding ? indexBinding->mtlBuffer : plan, indexBinding ? indexBinding->offset : 0, 3);
 	for (uint32_t unused = 4; unused < 8; ++unused) { computeState.bindBuffer(planEncoder, plan, 0, unused); }
 	computeState.bindBytes(planEncoder, params, sizeof(params), 8);
+	computeState.bindBuffer(planEncoder, snapshot, 0, 9);
 	[planEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(drawCount, width), 1, 1) threadsPerThreadgroup: MTLSizeMake(width, 1, 1)];
 	computeState._exists.descriptorSetData.reset();
 	if (!cmdEncoder->awaitEncodedWork()) {
@@ -1163,7 +1166,8 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	NSUInteger gatheredOffset = 0;
 	uint32_t scanSteps = 0;
 	// Sized with the captured record stride, not the stride of the indirect arguments.
-	if (!mvkSizePerVertexIndirectReplay(plan.contents, plan.length, NSUInteger(snapshotWords) * sizeof(uint32_t), drawCount, viewCount, pipeline->getPerVertexCapturedLayout().stride, topology, indexBinding != nullptr, restart, corners,
+	NSUInteger snapshotOffset = NSUInteger(snapshotWords) * sizeof(uint32_t);
+	if (!mvkSizePerVertexIndirectReplay(plan.contents, plan.length, static_cast<const uint8_t*>(snapshot.contents) + snapshotOffset, snapshot.length - snapshotOffset, drawCount, viewCount, pipeline->getPerVertexCapturedLayout().stride, topology, indexBinding != nullptr, restart, corners,
 										cmdEncoder->getMetalFeatures().maxMTLBufferSize, replayRequest, gatheredOffset, scanSteps)) {
 		uint32_t status = *(volatile const uint32_t*)plan.contents;
 		lose((status & 1) ? "a draw needs more records than uint32 record IDs can represent" : (status & 2) ? "a draw reads indices beyond the bound index buffer" : "its replay scratch would exceed Metal buffer limits");
@@ -1196,6 +1200,7 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 		computeState.bindBuffer(planEncoder, occurrences, 0, 5);
 		computeState.bindBuffer(planEncoder, primitiveIndices, 0, 6);
 		computeState.bindBuffer(planEncoder, cornerBuffer, 0, 7);
+		computeState.bindBuffer(planEncoder, snapshot, 0, 9);
 		auto dispatch = [&](uint32_t phase, NSUInteger groups) {
 			params[15] = phase;
 			computeState.bindBytes(planEncoder, params, sizeof(params), 8);

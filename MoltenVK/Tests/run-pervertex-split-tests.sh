@@ -9,13 +9,16 @@
 # - after: memoryless attachments are refused before submission; ordinary MSAA still renders.
 # The indirect-count variants lower the Metal buffer limit to 1 GiB (test builds only): a legal DrawIndirectCount with
 # a 1 GiB argument buffer is refused before the snapshot fix and renders Count 0 or 1 after it.
-# Usage: run-pervertex-split-tests.sh <libMoltenVK test build> <output directory> <reference|before|after>
+# Usage: run-pervertex-split-tests.sh <libMoltenVK test build> <output directory> <reference|before|after> [variants...]
 set -euo pipefail
 test_dir=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$test_dir/../.." && pwd)
 library=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 output=$(mkdir -p "$2" && cd "$2" && pwd)
 side=${3:?reference, before or after}
+shift 3
+variants=("$@")
+[[ ${#variants[@]} -gt 0 ]] || variants=(memoryless-depth memoryless-stencil msaa msaa-memoryless indirect-count-0 indirect-count-1)
 mkdir -p "$output/bin/lib" "$output/runs" "$output/shaders"
 exec > >(tee "$output/split.log") 2>&1
 ln -sf "$library" "$output/bin/lib/libMoltenVK.1.dylib"
@@ -28,7 +31,7 @@ xcrun clang++ -arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-fiel
 shasum -a 256 "$library" "$output/bin/pervertex-split" "$output"/shaders/*.spv "$test_dir/PerVertexAttachmentSplitTests.mm" > "$output/INPUTS.sha256"
 echo 'variant,expected,actual,verdict' > "$output/results.csv"
 failures=0
-for variant in memoryless-depth memoryless-stencil msaa msaa-memoryless indirect-count-0 indirect-count-1; do
+for variant in "${variants[@]}"; do
 	case $side:$variant in
 		reference:indirect-count-*) expected=3 ;;	# no Metal buffer limit hook in that build
 		before:indirect-count-*) expected=4 ;;	# the argument snapshot, sized by maxDrawCount, exceeds the limit

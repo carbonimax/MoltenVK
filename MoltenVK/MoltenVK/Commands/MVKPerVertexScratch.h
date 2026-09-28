@@ -20,31 +20,34 @@ struct MVKPerVertexScratchRequest {
 	// reserved only after the plan completes, from the counts it froze (mvkSizePerVertexIndirectReplay).
 	uint32_t indirectCapacity = 0;
 	NSUInteger planSize = 0;
+	// Several indirect draws freeze their Vulkan commands in a separate shared buffer: 16 bytes each, 20 when indexed.
+	NSUInteger snapshotSize = 0;
 	// TES invocation ABI, VS output, TCS vertex and patch output, float32 levels, topology plan.
 	NSUInteger tessSizes[6] = {};
 };
 
-// Read only after successful GPU phase-0 completion, with its original snapshot byte offset.
+// Read only after successful GPU phase-0 completion. The snapshot holds the Vulkan command each draw froze: four words,
+// five for indexed draws; a single draw freezes it in the plan, at word 48.
 // A nonzero GPU status is rejected, including the old capacity refusal; this does not change admission.
 // Metadata must describe that same Metal pass (1..32 views), pipeline and execution-time restart state.
 // Restart tables are bounds from frozen counts, not compacted counts: the plan has no marker census.
 // On success, captureSize == 0 means skip replay entirely (do not call reserveReplay). Otherwise the
 // request includes minimal table bindings even for zero primitives. Only replay fields are populated;
 // retain the original plan/offset. Outputs are unchanged on failure. The supplied extent must be readable.
-static inline bool mvkSizePerVertexIndirectReplay(const void* plan, NSUInteger planBytes, NSUInteger snapshotOffset, uint32_t maxDrawCount, uint32_t views, uint32_t stride, VkPrimitiveTopology topology, bool indexed, bool primitiveRestart, bool corners, uint64_t maxMTLBufferSize, MVKPerVertexScratchRequest& request, NSUInteger& gatheredOffset, uint32_t& scanSteps) {
+static inline bool mvkSizePerVertexIndirectReplay(const void* plan, NSUInteger planBytes, const void* snapshot, NSUInteger snapshotBytes, uint32_t maxDrawCount, uint32_t views, uint32_t stride, VkPrimitiveTopology topology, bool indexed, bool primitiveRestart, bool corners, uint64_t maxMTLBufferSize, MVKPerVertexScratchRequest& request, NSUInteger& gatheredOffset, uint32_t& scanSteps) {
 	uint32_t rasterVertices = mvkPerVertexReplayVertexCount(topology);
 	if (!plan || planBytes < 57 * sizeof(uint32_t) || !views || views > 32 || !rasterVertices) { return false; }
 	auto word = [&](NSUInteger offset) { uint32_t value; memcpy(&value, static_cast<const uint8_t*>(plan) + offset, sizeof(value)); return value; };
 	uint32_t draws = word(56 * sizeof(uint32_t));
-	if (word(0) || draws > maxDrawCount || snapshotOffset % sizeof(uint32_t) || snapshotOffset > planBytes) { return false; }
-	if ((maxDrawCount == 1 && snapshotOffset != 48 * sizeof(uint32_t)) || (maxDrawCount > 1 && snapshotOffset < 1024)) { return false; }
-	if (draws > (planBytes - snapshotOffset) / (5 * sizeof(uint32_t))) { return false; }
+	NSUInteger commandBytes = (indexed ? 5 : 4) * sizeof(uint32_t);
+	if (word(0) || draws > maxDrawCount || !snapshot || draws > snapshotBytes / commandBytes) { return false; }
+	auto frozen = [&](NSUInteger offset) { uint32_t value; memcpy(&value, static_cast<const uint8_t*>(snapshot) + offset, sizeof(value)); return value; };
 	if (maxDrawCount == 1 && draws && word(55 * sizeof(uint32_t)) != 1) { return false; }
 	uint64_t records = 0, primitives = 0;
 	uint32_t vertices = 0;
 	for (uint32_t draw = 0; draw < draws; ++draw) {
-		NSUInteger offset = snapshotOffset + NSUInteger(draw) * 5 * sizeof(uint32_t);
-		uint32_t n = word(offset), instances = word(offset + sizeof(uint32_t));
+		NSUInteger offset = NSUInteger(draw) * commandBytes;
+		uint32_t n = frozen(offset), instances = frozen(offset + sizeof(uint32_t));
 		if (!n || !instances) { continue; }
 		uint64_t expanded = uint64_t(instances) * views;
 		if (!stride || expanded > UINT32_MAX) { return false; }
@@ -81,7 +84,7 @@ static inline bool mvkSizePerVertexIndirectReplay(const void* plan, NSUInteger p
 
 // Individually owned allocations: the shared scratch pool cannot recover from a nil Metal buffer.
 struct MVKPerVertexScratch {
-	id<MTLBuffer> buffers[13] = {};
+	id<MTLBuffer> buffers[14] = {};
 	id<MTLComputePipelineState> indexPipeline = nil;
 	id<MTLComputePipelineState> widenUint8Pipeline = nil;
 	id<MTLComputePipelineState> indirectPipeline = nil;
@@ -115,6 +118,12 @@ struct MVKPerVertexScratch {
 			buffers[12] = buffer;
 			// The GPU ORs admission failures into the status word; each submission starts admitted.
 			memset(buffer.contents, 0, buffer.length);
+		}
+		if (request.snapshotSize) {
+			if (buffers[13]) { return false; }
+			id<MTLBuffer> snapshot = [device newBufferWithLength:request.snapshotSize options:MTLResourceStorageModeShared];
+			if (!snapshot || snapshot.length < request.snapshotSize || !snapshot.contents) { [snapshot release]; return false; }
+			buffers[13] = snapshot;
 		}
 		indirectCapacity = request.indirectCapacity;
 		return true;

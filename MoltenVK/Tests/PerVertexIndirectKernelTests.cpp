@@ -35,10 +35,13 @@ struct Kernel {
 	std::vector<uint> count = {0}, plan = std::vector<uint>(256 + 64 * 40), gathered, pairs, triplets, corners;
 	std::vector<uint8_t> source;
 	uint p[19] = {};
+	// Several draws freeze their commands in a buffer of their own; a single draw in the plan (p[kSnapshot] = 48).
+	std::vector<uint> commands = std::vector<uint>(64);
+	std::vector<uint>& snapshot() { return p[kDrawCount] > 1 ? commands : plan; }
 	void run(uint phase, uint64_t threads) {
 		p[kPhase] = phase;
 		for (uint64_t i = 0; i < threads; ++i) {
-			perVertexIndirect(args.data(), count.data(), plan.data(), source.data(), gathered.data(), pairs.data(), triplets.data(), corners.data(), p, uint(i));
+			perVertexIndirect(args.data(), count.data(), plan.data(), source.data(), gathered.data(), pairs.data(), triplets.data(), corners.data(), p, snapshot().data(), uint(i));
 		}
 	}
 	void setDraw(uint draw, std::initializer_list<uint> words) { std::copy(words.begin(), words.end(), reinterpret_cast<uint*>(args.data() + draw * p[kStride])); }
@@ -121,7 +124,7 @@ static void checkAdmission() {
 			Kernel k = kernel(3, false, false, c.views, indexBytes);
 			k.p[kCapacity] = c.capacity;
 			k.p[kDrawCount] = 2;
-			k.p[kSnapshot] = 256;
+			k.p[kSnapshot] = 0;	// Several draws: from the start of their own snapshot buffer.
 			k.p[kHasCount] = c.counted;
 			k.count[0] = c.count;
 			k.p[kIndexLo] = UINT32_MAX;
@@ -137,7 +140,7 @@ static void checkAdmission() {
 	// Count clamps to maxDrawCount; draws beyond Count are neither admitted nor planned.
 	Kernel k = kernel(3, false, false, 1, 0);
 	k.p[kDrawCount] = 2;
-	k.p[kSnapshot] = 256;
+	k.p[kSnapshot] = 0;	// Several draws: from the start of their own snapshot buffer.
 	k.p[kHasCount] = 1;
 	k.p[kCapacity] = 12;
 	k.count[0] = 1;
