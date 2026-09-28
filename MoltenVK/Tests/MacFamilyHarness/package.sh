@@ -104,7 +104,7 @@ fixture() { # output source [extra flags...]
 	otool -L "$bundle/bin/$1" | grep -q '@rpath/libMoltenVK.1.dylib'
 }
 fixture probe "$harness/probe.mm" -fobjc-arc -framework Foundation -framework Metal
-fixture pervertex-indirect-gpu "$tests/PerVertexIndirectGPUTests.cpp"
+fixture pervertex-indirect-gpu "$tests/PerVertexIndirectGPUTests.cpp" -lobjc
 fixture topology "$T/topology.cpp" -Wl,-U,_mvkEnableTESFixtureDevice
 fixture mesh-draw "$M/mesh-draw.cpp" -Wl,-U,_mvkEnableMeshTestDevice -Wl,-U,_mvkEnableTESFixtureDevice
 # The Metal mesh limits probe uses neither Vulkan nor MoltenVK.

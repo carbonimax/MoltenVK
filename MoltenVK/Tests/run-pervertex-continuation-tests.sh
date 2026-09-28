@@ -22,7 +22,7 @@ output=$(mkdir -p "$2" && cd "$2" && pwd)
 mode=$3
 repeats=${4:-0}
 suite=${5:-indirect}
-[[ $suite == indirect || $suite == tes ]] || { echo "suite must be indirect or tes"; exit 64; }
+[[ $suite == indirect || $suite == tes || $suite == loss ]] || { echo "suite must be indirect, tes or loss"; exit 64; }
 [[ $mode == before || $mode == after ]] || { echo "mode must be before or after"; exit 64; }
 mkdir -p "$output/shaders" "$output/runs" "$output/bin/lib"
 exec > >(tee "$output/oracles.log") 2>&1
@@ -46,7 +46,7 @@ tes ordered.tese tes-ordered.tese.spv
 tes ordered.frag tes-ordered.frag.spv
 tes wrong-patch.frag tes-wrong-patch.frag.spv
 flags=(-arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -I"$root/External/Vulkan-Headers/include")
-xcrun clang++ "${flags[@]}" "$test_dir/PerVertexIndirectGPUTests.cpp" "$library" -Wl,-rpath,@executable_path/lib -o "$output/bin/pervertex-indirect-gpu"
+xcrun clang++ "${flags[@]}" "$test_dir/PerVertexIndirectGPUTests.cpp" "$library" -lobjc -Wl,-rpath,@executable_path/lib -o "$output/bin/pervertex-indirect-gpu"
 xcrun clang++ "${flags[@]}" "$test_dir/PerVertexBinarySemaphoreOrderTests.mm" "$library" -Wl,-rpath,@executable_path/lib -framework Metal -framework Foundation -o "$output/bin/pervertex-binary-order"
 shasum -a 256 "$library" "$output"/shaders/*.spv "$output"/bin/pervertex-* "$test_dir/PerVertexIndirectGPUTests.cpp" "$test_dir/PerVertexBinarySemaphoreOrderTests.mm" > "$output/INPUTS.sha256"
 echo 'case,expected_exit,actual_exit,verdict' > "$output/results.csv"
@@ -81,6 +81,22 @@ run() {
 sync=(MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=1 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0)
 async=(MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0)
 same=(PERVERTEX_TEST_DEPENDENT_SAME_QUEUE=1)
+# Loss suite: a real device loss (a huge indirect draw) whose Metal wait release must neither let a dependent submission
+# run after its fence reported the loss, nor release an external Metal client of the next binary semaphore generation.
+# Same-queue synchronous submission reserves the dependent wait at vkQueueSubmit and never encodes it.
+if [[ $suite == loss ]]; then
+	longdep=(PERVERTEX_TEST_DEPENDENT_FIRST=1 PERVERTEX_TEST_LONG_DEPENDENT=1)
+	external=(PERVERTEX_TEST_EXTERNAL_WAITER=1)
+	for ((i = 0; i <= repeats; ++i)); do
+		run loss-long-dependent-cross-async-r$i 1 0 1 "${async[@]}" "${common[@]}" "${longdep[@]}" -- pervertex-indirect-gpu "$output/shaders" indexed-count u32 huge compute long-dependent-async-r$i
+		run loss-long-dependent-cross-sync-r$i 1 0 1 "${sync[@]}" "${common[@]}" "${longdep[@]}" -- pervertex-indirect-gpu "$output/shaders" indexed-count u32 huge compute long-dependent-sync-r$i
+		run loss-external-waiter-same-sync-r$i 1 0 1 "${sync[@]}" "${common[@]}" "${same[@]}" "${external[@]}" -- pervertex-indirect-gpu "$output/shaders" indexed-count u32 huge compute external-same-sync-r$i
+		run loss-external-waiter-cross-async-r$i 1 0 1 "${async[@]}" "${common[@]}" "${external[@]}" PERVERTEX_TEST_DEPENDENT_FIRST=1 -- pervertex-indirect-gpu "$output/shaders" indexed-count u32 huge compute external-cross-async-r$i
+	done
+	shasum -a 256 "$output"/runs/* "$output/results.csv" > "$output/EVIDENCE.sha256"
+	echo "PERVERTEX_CONTINUATION $mode loss PASS: $(($(wc -l < "$output/results.csv") - 1)) cases"
+	exit 0
+fi
 # TES suite: a PerVertex TES draw and an indirect draw in one command buffer. Legal levels render in both orders;
 # level 4, with no proven topology, must lose the device before the indirect draw, and no dependent work may report
 # success. The parent runtime reads the TES status only when the submission completes, after its signals.
