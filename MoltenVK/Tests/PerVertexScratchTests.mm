@@ -60,7 +60,69 @@ static Completion makeCompletion(std::shared_ptr<MVKPerVertexScratch> scratch) {
 	return [^{ assert(scratch->buffers[0].length == 48); } copy];
 }
 
+// One CPU-only sizing test: independent maxima, frozen Count, restart layout and hostile bounds.
+static void testFrozenIndirectReplaySizing() {
+	uint32_t plan[276] = {};
+	plan[56] = 2;
+	plan[256] = 6; plan[257] = 1; plan[258] = 3; plan[259] = uint32_t(-4); plan[260] = 7;
+	plan[261] = 3; plan[262] = 4;
+	plan[266] = UINT32_MAX; plan[267] = UINT32_MAX; // Beyond frozen Count: must not participate.
+	MVKPerVertexScratchRequest request{};
+	NSUInteger gathered = 0;
+	uint32_t scans = 0;
+	auto size = [&](const void* data, NSUInteger bytes, NSUInteger offset, uint32_t count, uint32_t views, uint32_t stride, VkPrimitiveTopology topology, bool indexed, bool restart, uint64_t limit) {
+		return mvkSizePerVertexIndirectReplay(data, bytes, offset, count, views, stride, topology, indexed, restart, true, limit, request, gathered, scans);
+	};
+	auto run = [&] { return size(plan, sizeof(plan), 1024, 3, 2, 16, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true, true, 4096); };
+	assert(run());
+	assert(request.captureSize == 384 && request.occurrenceSize == 192 && request.primitiveSize == 96 && request.cornerSize == 96);
+	assert(request.indexSize == 240 && request.restart && gathered == 216 && scans == 3);
+	assert(!request.planSize && !request.indirectCapacity && !request.widenUint8 && !request.tessSizes[5]);
+	for (uint32_t status : {1u, 2u, 4u}) { plan[0] = status; assert(!run()); }
+	plan[0] = 0;
+	assert(!size(nullptr, sizeof(plan), 1024, 3, 2, 16, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true, true, 4096));
+	assert(!size(plan, 56 * 4, 1024, 3, 2, 16, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true, true, 4096));
+	assert(!size(plan, 1063, 1024, 3, 2, 16, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true, true, 4096));
+	for (NSUInteger offset : {NSUInteger(0), NSUInteger(1025), NSUIntegerMax}) { assert(!size(plan, sizeof(plan), offset, 3, 2, 16, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true, true, 4096)); }
+	for (uint32_t views : {0u, 33u, UINT32_MAX}) { assert(!size(plan, sizeof(plan), 1024, 3, views, 16, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true, true, 4096)); }
+	assert(!size(plan, sizeof(plan), 1024, 3, 2, 0, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true, true, 4096));
+	assert(!size(plan, sizeof(plan), 1024, 3, 2, 16, VK_PRIMITIVE_TOPOLOGY_PATCH_LIST, true, true, 4096));
+	assert(!size(plan, sizeof(plan), 1024, 3, 2, 16, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true, true, 383));
+	plan[56] = 4; assert(!run());
+	plan[56] = UINT32_MAX; assert(!size(plan, sizeof(plan), 1024, UINT32_MAX, 2, 16, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true, true, UINT64_MAX));
+	plan[56] = 2;
+	plan[257] = UINT32_MAX; assert(!run()); // Expanded instances overflow uint32.
+	plan[257] = 1; plan[256] = UINT32_MAX; assert(!run()); // Dense records overflow uint32.
+	assert(!size(plan, sizeof(plan), 1024, 3, 1, 1, VK_PRIMITIVE_TOPOLOGY_POINT_LIST, false, false, UINT64_MAX)); // Triplet word indices overflow.
+	plan[256] = UINT32_MAX / 6 + 3;
+	assert(!size(plan, sizeof(plan), 1024, 3, 1, 1, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, false, false, UINT64_MAX)); // Pair word indices overflow.
+	assert(request.captureSize == 384 && request.indexSize == 240 && gathered == 216 && scans == 3); // Failure never publishes partial output.
+	plan[256] = 6;
+	assert(size(plan, sizeof(plan), 1024, 3, 2, 16, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true, true, 384)); // Exact Metal limit, no power-of-two rounding.
+	assert(size(plan, sizeof(plan), 1024, 3, 2, 16, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true, false, 384));
+	assert(request.indexSize == 24 && !request.restart && !gathered && !scans);
+	assert(size(plan, sizeof(plan), 1024, 3, 2, 16, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, false, true, 384));
+	assert(!request.indexSize && !request.restart); // Vulkan ignores restart for nonindexed draws.
+	plan[56] = 0;
+	assert(size(plan, sizeof(plan), 1024, 3, 2, 0, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true, true, 0));
+	assert(!request.captureSize && !request.occurrenceSize && !request.restart && !gathered && !scans);
+	plan[56] = 2; plan[256] = 0; plan[257] = UINT32_MAX; plan[261] = UINT32_MAX; plan[262] = 0;
+	assert(run() && !request.captureSize); // Inactive slots bypass count multiplication.
+	plan[56] = 1; plan[48] = 1; plan[49] = 1;
+	assert(!size(plan, 57 * 4, 48 * 4, 1, 2, 16, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true, true, 272)); // Missing single-draw snapshot.
+	plan[55] = 1;
+	assert(size(plan, 57 * 4, 48 * 4, 1, 2, 16, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true, true, 272));
+	assert(request.captureSize == 32 && request.occurrenceSize == 24 && request.primitiveSize == 12 && request.cornerSize == 12);
+	assert(request.indexSize == 40 && gathered == 36 && scans == 0); // Active capture, zero primitives.
+	assert(!size(plan, sizeof(plan), 1024, 1, 2, 16, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true, true, 4096));
+	assert(!size(plan, 57 * 4, 48 * 4, 1, 2, 16, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, true, true, 271)); // Restart arguments also obey Metal limits.
+	plan[48] = 100; plan[49] = 1;
+	assert(!size(plan, 57 * 4, 48 * 4, 1, 1, 1, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, true, true, 3999)); // Index scratch, not capture, exceeds limit.
+	std::puts("PASS: frozen indirect replay sizing, two-view restart maxima, malformed snapshots, overflow and Metal limits (CPU only)");
+}
+
 int main() {
+	testFrozenIndirectReplaySizing();
 	@autoreleasepool {
 		auto* device = [ScratchTestDevice new];
 		// Three batches, two executions each, including repeated secondary draws
