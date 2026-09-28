@@ -3814,9 +3814,21 @@ void MVKPhysicalDevice::logGPUInfo() {
 	[nsUUID release];																		// temp release
 }
 
+id<MTLCommandQueue> MVKPhysicalDevice::getLossRescueMTLCommandQueue() {
+	lock_guard<mutex> lock(_lossRescueLock);
+	if ( !_lossRescueMTLQueue ) {
+		@autoreleasepool {
+			_lossRescueMTLQueue = [_mtlDevice newCommandQueue];		// retained
+			setMetalObjectLabel(_lossRescueMTLQueue, @"MoltenVK device loss semaphore release");
+		}
+	}
+	return _lossRescueMTLQueue;
+}
+
 MVKPhysicalDevice::~MVKPhysicalDevice() {
 	mvkDestroyContainerContents(_queueFamilies);
 	[_timestampMTLCounterSet release];
+	[_lossRescueMTLQueue release];
 
 	uint64_t memUsed = getCurrentAllocatedSize();	// Retrieve before releasing MTLDevice
 	[_mtlDevice release];
@@ -3946,24 +3958,124 @@ VkResult MVKDevice::waitIdle() {
 	return rslt;
 }
 
+// Called from Metal completion handlers as well as from queue workers, so it must never block. Reporting the loss to
+// host waits is deferred to publishLoss(): a host wait that returns VK_ERROR_DEVICE_LOST ends the pending state of the
+// command buffers it covers (Vulkan "Lost Device"), and a submission still encoding may be reading them.
 VkResult MVKDevice::markLost(bool alsoMarkPhysicalDevice) {
+	if (alsoMarkPhysicalDevice) { _markPhysicalDeviceLost.store(true, std::memory_order_release); }
+	if (_losing.exchange(true, std::memory_order_acq_rel)) {
+		if (alsoMarkPhysicalDevice && getConfigurationResult() != VK_SUCCESS) { _physicalDevice->setConfigurationResult(VK_ERROR_DEVICE_LOST); }
+		return VK_ERROR_DEVICE_LOST;
+	}
+
+	// Queue workers blocked on emulated semaphores must stop encoding before the loss can be published.
+	{
+		lock_guard<mutex> lock(_sem4Lock);
+		for (auto* sem4 : _encodingSemaphores) { sem4->cancel(); }
+		_encodingSemaphores.clear();
+	}
+	// Release Metal waits now: a submission still encoding may be blocked until one of them completes.
+	releaseSemaphoreWaitsAfterLoss();
+
+	lock_guard<mutex> lock(_lossLock);
+	_lossPublisher = dispatch_queue_create("MoltenVK device loss", DISPATCH_QUEUE_SERIAL);	// retained
+	dispatch_async(_lossPublisher, ^{ publishLoss(); });
+	return VK_ERROR_DEVICE_LOST;
+}
+
+// Reports the loss to host waits once no queue submission is encoding, after a final release of the Metal waits
+// those submissions encoded. Later submissions are refused or dropped without encoding, since isLosing() is set.
+void MVKDevice::publishLoss() {
+	{
+		unique_lock<mutex> lock(_lossLock);
+		_lossCondition.wait(lock, [this]{ return !_activeEncodings; });
+	}
+	releaseSemaphoreWaitsAfterLoss();
+	{
+		lock_guard<mutex> lock(_sem4Lock);
+		setConfigurationResult(VK_ERROR_DEVICE_LOST);
+		if (_markPhysicalDeviceLost.load(std::memory_order_acquire)) { _physicalDevice->setConfigurationResult(VK_ERROR_DEVICE_LOST); }
+		for (auto* sem4 : _awaitingSemaphores) {
+			sem4->cancel();
+		}
+		for (auto& sem4AndValue : _awaitingTimelineSem4s) {
+			VkSemaphoreSignalInfo signalInfo;
+			signalInfo.value = sem4AndValue.second;
+			sem4AndValue.first->signal(&signalInfo);
+		}
+		_awaitingSemaphores.clear();
+		_awaitingTimelineSem4s.clear();
+	}
+	{
+		lock_guard<mutex> lock(_lossLock);
+		_isLossPublished = true;
+	}
+	_lossCondition.notify_all();
+}
+
+// Signals every semaphore that has encoded Metal waits to a value satisfying all of them, on a Metal queue that
+// never holds application work. Metal event values only increase, so signals already executed are unaffected.
+void MVKDevice::releaseSemaphoreWaitsAfterLoss() {
+	lock_guard<mutex> lock(_lossReleaseLock);
+	if (_lossReleasedSemaphores.empty()) { return; }
+	@autoreleasepool {
+		id<MTLCommandQueue> mtlQueue = _physicalDevice->getLossRescueMTLCommandQueue();
+		id<MTLCommandBuffer> mtlCmdBuff = [mtlQueue commandBuffer];		// retains the events it signals
+		bool released = true;
+		for (auto* sem4 : _lossReleasedSemaphores) { released &= sem4->releaseWaitsAfterLoss(mtlCmdBuff); }
+		[mtlCmdBuff commit];
+		if ( !released ) { reportWarning(VK_ERROR_DEVICE_LOST, "Could not release every Metal semaphore wait after device loss. Metal work waiting on them may not complete."); }
+	}
+}
+
+VkResult MVKDevice::getHostWaitResult(bool isFinished, uint64_t timeout) {
+	VkResult rslt = getConfigurationResult();
+	if (rslt != VK_SUCCESS) { return rslt; }
+	if (isLosing()) {
+		unique_lock<mutex> lock(_lossLock);
+		if (timeout == UINT64_MAX) {
+			_lossCondition.wait(lock, [this]{ return _isLossPublished; });
+		} else if ( !_lossCondition.wait_for(lock, chrono::nanoseconds(min(timeout, kMVKUndefinedLargeUInt64)), [this]{ return _isLossPublished; }) ) {
+			return VK_TIMEOUT;
+		}
+		return VK_ERROR_DEVICE_LOST;
+	}
+	return isFinished ? VK_SUCCESS : VK_TIMEOUT;
+}
+
+void MVKDevice::beginEncoding() {
+	lock_guard<mutex> lock(_lossLock);
+	_activeEncodings++;
+}
+
+void MVKDevice::endEncoding() {
+	bool isIdle;
+	{
+		lock_guard<mutex> lock(_lossLock);
+		isIdle = !--_activeEncodings;
+	}
+	if (isIdle) { _lossCondition.notify_all(); }
+}
+
+void MVKDevice::addLossReleasedSemaphore(MVKSemaphore* sem4) {
+	lock_guard<mutex> lock(_lossReleaseLock);
+	_lossReleasedSemaphores.insert(sem4);
+}
+
+void MVKDevice::removeLossReleasedSemaphore(MVKSemaphore* sem4) {
+	lock_guard<mutex> lock(_lossReleaseLock);
+	_lossReleasedSemaphores.erase(sem4);
+}
+
+void MVKDevice::addEncodingSemaphore(MVKSemaphoreImpl* sem4) {
 	lock_guard<mutex> lock(_sem4Lock);
+	if (isLosing()) { sem4->cancel(); }
+	else { _encodingSemaphores.push_back(sem4); }
+}
 
-	setConfigurationResult(VK_ERROR_DEVICE_LOST);
-	if (alsoMarkPhysicalDevice) { _physicalDevice->setConfigurationResult(VK_ERROR_DEVICE_LOST); }
-
-	for (auto* sem4 : _awaitingSemaphores) {
-		sem4->cancel();
-	}
-	for (auto& sem4AndValue : _awaitingTimelineSem4s) {
-		VkSemaphoreSignalInfo signalInfo;
-		signalInfo.value = sem4AndValue.second;
-		sem4AndValue.first->signal(&signalInfo);
-	}
-	_awaitingSemaphores.clear();
-	_awaitingTimelineSem4s.clear();
-
-	return getConfigurationResult();
+void MVKDevice::removeEncodingSemaphore(MVKSemaphoreImpl* sem4) {
+	lock_guard<mutex> lock(_sem4Lock);
+	mvkRemoveFirstOccurance(_encodingSemaphores, sem4);
 }
 
 void MVKDevice::getDescriptorSetLayoutSupport(const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
@@ -5639,6 +5751,12 @@ MVKDevice::~MVKDevice() {
 
 	for (auto& queues : _queuesByQueueFamilyIndex) {
 		mvkDestroyContainerContents(queues);
+	}
+
+	// Wait for a pending loss report, which uses this device.
+	if (_lossPublisher) {
+		dispatch_sync(_lossPublisher, ^{});
+		dispatch_release(_lossPublisher);
 	}
 
 	if (_commandResourceFactory) { _commandResourceFactory->destroy(); }

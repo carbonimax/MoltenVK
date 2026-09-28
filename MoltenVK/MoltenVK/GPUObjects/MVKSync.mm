@@ -18,6 +18,7 @@
 
 #include "MVKSync.h"
 #include "MVKFoundation.h"
+#include <chrono>
 
 using namespace std;
 
@@ -123,7 +124,31 @@ MVKSemaphoreSingleQueue::~MVKSemaphoreSingleQueue() = default;
 #pragma mark MVKSemaphoreMTLEvent
 
 void MVKSemaphoreMTLEvent::encodeWait(id<MTLCommandBuffer> mtlCmdBuff, uint64_t) {
-	if (mtlCmdBuff) { [mtlCmdBuff encodeWaitForEvent: _mtlEvent value: _mtlEventValue++]; }
+	if (mtlCmdBuff) { encodeReservedWait(mtlCmdBuff, _mtlEventValue++); }
+}
+
+uint64_t MVKSemaphoreMTLEvent::reserveWait() {
+	return _mtlEventValue++;
+}
+
+void MVKSemaphoreMTLEvent::encodeReservedWait(id<MTLCommandBuffer> mtlCmdBuff, uint64_t reservation) {
+	if ( !mtlCmdBuff ) { return; }
+	if ( !_isLossReleased.exchange(true) ) { _device->addLossReleasedSemaphore(this); }
+	[mtlCmdBuff encodeWaitForEvent: _mtlEvent value: reservation];
+}
+
+// Every wait was encoded or reserved for a value below the current one, and Metal event values never decrease.
+bool MVKSemaphoreMTLEvent::releaseWaitsAfterLoss(id<MTLCommandBuffer> mtlCmdBuff) {
+	uint64_t value = _mtlEventValue.load();
+	if (mtlCmdBuff) {
+		[mtlCmdBuff encodeSignalEvent: _mtlEvent value: value];
+		return true;
+	}
+	if ([_mtlEvent conformsToProtocol: @protocol(MTLSharedEvent)]) {
+		((id<MTLSharedEvent>)_mtlEvent).signaledValue = value;
+		return true;
+	}
+	return false;
 }
 
 void MVKSemaphoreMTLEvent::encodeSignal(id<MTLCommandBuffer> mtlCmdBuff, uint64_t) {
@@ -157,6 +182,7 @@ MVKSemaphoreMTLEvent::MVKSemaphoreMTLEvent(MVKDevice* device,
 }
 
 MVKSemaphoreMTLEvent::~MVKSemaphoreMTLEvent() {
+	if (_isLossReleased) { _device->removeLossReleasedSemaphore(this); }
     [_mtlEvent release];
 }
 
@@ -165,10 +191,11 @@ MVKSemaphoreMTLEvent::~MVKSemaphoreMTLEvent() {
 #pragma mark MVKSemaphoreEmulated
 
 void MVKSemaphoreEmulated::encodeWait(id<MTLCommandBuffer> mtlCmdBuff, uint64_t) {
+	// Only queue submissions wait here, while encoding: a device loss cancels this wait at once.
 	if ( !mtlCmdBuff ) {
-		_device->addSemaphore(&_blocker);
+		_device->addEncodingSemaphore(&_blocker);
 		_blocker.wait(UINT64_MAX, true);
-		_device->removeSemaphore(&_blocker);
+		_device->removeEncodingSemaphore(&_blocker);
 	}
 }
 
@@ -202,7 +229,23 @@ MVKSemaphoreEmulated::MVKSemaphoreEmulated(MVKDevice* device,
 
 // Nil mtlCmdBuff will do nothing.
 void MVKTimelineSemaphoreMTLEvent::encodeWait(id<MTLCommandBuffer> mtlCmdBuff, uint64_t value) {
+	if ( !mtlCmdBuff ) { return; }
+	uint64_t maxValue = _maxEncodedWaitValue.load();
+	while (maxValue < value && !_maxEncodedWaitValue.compare_exchange_weak(maxValue, value)) {}
+	if ( !_isLossReleased.exchange(true) ) { _device->addLossReleasedSemaphore(this); }
 	[mtlCmdBuff encodeWaitForEvent: _mtlEvent value: value];
+}
+
+// Metal event values never decrease, so a value already reached is unaffected.
+bool MVKTimelineSemaphoreMTLEvent::releaseWaitsAfterLoss(id<MTLCommandBuffer> mtlCmdBuff) {
+	uint64_t value = _maxEncodedWaitValue.load();
+	if ( !value ) { return true; }
+	if (mtlCmdBuff) {
+		[mtlCmdBuff encodeSignalEvent: _mtlEvent value: value];
+	} else if (_mtlEvent.signaledValue < value) {
+		_mtlEvent.signaledValue = value;
+	}
+	return true;
 }
 
 // Nil mtlCmdBuff will do nothing.
@@ -256,6 +299,7 @@ MVKTimelineSemaphoreMTLEvent::MVKTimelineSemaphoreMTLEvent(MVKDevice* device,
 }
 
 MVKTimelineSemaphoreMTLEvent::~MVKTimelineSemaphoreMTLEvent() {
+	if (_isLossReleased) { _device->removeLossReleasedSemaphore(this); }
     [_mtlEvent release];
 }
 
@@ -366,6 +410,13 @@ MVKEventNative::~MVKEventNative() {
 #pragma mark -
 #pragma mark Support functions
 
+// Returns what remains of a host wait timeout in nanoseconds, UINT64_MAX meaning infinite.
+static uint64_t mvkRemainingTimeout(chrono::steady_clock::time_point startTime, uint64_t timeout) {
+	if (timeout == UINT64_MAX) { return UINT64_MAX; }
+	uint64_t elapsed = chrono::duration_cast<chrono::nanoseconds>(chrono::steady_clock::now() - startTime).count();
+	return elapsed < timeout ? timeout - elapsed : 0;
+}
+
 VkResult mvkResetFences(uint32_t fenceCount, const VkFence* pFences) {
 	for (uint32_t i = 0; i < fenceCount; i++) {
 		((MVKFence*)pFences[i])->reset();
@@ -384,7 +435,7 @@ VkResult mvkWaitForFences(MVKDevice* device,
 		return device->getConfigurationResult();
 	}
 
-	VkResult rslt = VK_SUCCESS;
+	auto startTime = chrono::steady_clock::now();
 	MVKFenceSitter fenceSitter(waitAll);
 
 	for (uint32_t i = 0; i < fenceCount; i++) {
@@ -392,11 +443,7 @@ VkResult mvkWaitForFences(MVKDevice* device,
 	}
 
 	bool finished = fenceSitter.wait(timeout);
-	if (device->getConfigurationResult() != VK_SUCCESS) {
-		rslt = device->getConfigurationResult();
-	} else if ( !finished ) {
-		rslt = VK_TIMEOUT;
-	}
+	VkResult rslt = device->getHostWaitResult(finished, mvkRemainingTimeout(startTime, timeout));
 
 	for (uint32_t i = 0; i < fenceCount; i++) {
 		((MVKFence*)pFences[i])->removeSitter(&fenceSitter);
@@ -414,7 +461,7 @@ VkResult mvkWaitSemaphores(MVKDevice* device,
 		return device->getConfigurationResult();
 	}
 
-	VkResult rslt = VK_SUCCESS;
+	auto startTime = chrono::steady_clock::now();
 	bool waitAny = mvkIsAnyFlagEnabled(pWaitInfo->flags, VK_SEMAPHORE_WAIT_ANY_BIT);
 	bool alreadySignaled = false;
 	MVKFenceSitter fenceSitter(!waitAny);
@@ -428,11 +475,7 @@ VkResult mvkWaitSemaphores(MVKDevice* device,
 	}
 
 	bool finished = alreadySignaled || fenceSitter.wait(timeout);
-	if (device->getConfigurationResult() != VK_SUCCESS) {
-		rslt = device->getConfigurationResult();
-	} else if ( !finished ) {
-		rslt = VK_TIMEOUT;
-	}
+	VkResult rslt = device->getHostWaitResult(finished, mvkRemainingTimeout(startTime, timeout));
 
 	for (uint32_t i = 0; i < pWaitInfo->semaphoreCount; i++) {
 		((MVKTimelineSemaphore*)pWaitInfo->pSemaphores[i])->unregisterWait(&fenceSitter);

@@ -149,6 +149,7 @@ protected:
 	MVKQueueFamily* _queueFamily;
 	std::string _name;
 	dispatch_queue_t _execQueue;
+	dispatch_queue_t _workerQueue = nullptr;
 	dispatch_group_t _completionGroup;
 	dispatch_queue_t _retirementQueue;
 	std::atomic<uint32_t> _pendingRetirements{0};
@@ -177,6 +178,9 @@ protected:
 typedef struct MVKSemaphoreSubmitInfo {
 private:
 	MVKSemaphore* _semaphore;
+	uint64_t _reservation = 0;
+	bool _isReserved = false;
+	bool isReservable();
 public:
 	uint64_t value;
 	VkPipelineStageFlags2 stageMask;
@@ -184,6 +188,8 @@ public:
 
 	void encodeWait(id<MTLCommandBuffer> mtlCmdBuff);
 	void encodeSignal(id<MTLCommandBuffer> mtlCmdBuff);
+	void reserveWait();
+	void reserveSignal();
 	MVKSemaphoreSubmitInfo(const VkSemaphoreSubmitInfo& semaphoreSubmitInfo);
 	MVKSemaphoreSubmitInfo(const VkSemaphore semaphore, VkPipelineStageFlags stageMask);
 	MVKSemaphoreSubmitInfo(const MVKSemaphoreSubmitInfo& other);
@@ -206,6 +212,15 @@ public:
 	 * Upon completion of this function, no further calls should be made to this instance.
 	 */
 	virtual VkResult execute() = 0;
+
+	/**
+	 * Returns whether executing this submission waits for its own Metal work to complete. Such a submission,
+	 * and every later one to its queue, is executed in order on a worker instead of the submitting thread.
+	 */
+	virtual bool needsWorker() { return false; }
+
+	/** Reserves, in submission order, the semaphore values that a deferred execution encodes. */
+	virtual void reserveSemaphores() {}
 
 	MVKQueueSubmission(MVKQueue* queue,
 					   uint32_t waitSemaphoreInfoCount,
@@ -251,7 +266,16 @@ class MVKQueueCommandBufferSubmission : public MVKQueueSubmission {
 
 public:
 	VkResult execute() override;
+	bool needsWorker() override { return _needsContinuation; }
+	void reserveSemaphores() override;
 	virtual VkResult reservePerVertexScratch(std::unordered_set<MVKCommandBuffer*>& prefilledExecutions) { return getConfigurationResult(); }
+
+	/**
+	 * Commits the Metal command buffer encoded so far, waits until it and its completion handlers finish, then makes
+	 * a new Metal command buffer active for the rest of this submission, and returns it. Returns nil if the committed
+	 * work failed, the device is being lost, or no Metal command buffer is available.
+	 */
+	id<MTLCommandBuffer> continueOnNewMTLCommandBuffer();
 
 	MVKQueueCommandBufferSubmission(MVKQueue* queue, 
 									const VkSubmitInfo2* pSubmit,
@@ -273,12 +297,13 @@ protected:
 	VkResult commitActiveMTLCommandBuffer(bool signalCompletion = false);
 	void finish() override;
 	virtual void submitCommandBuffers() {}
-	virtual void reportPerVertexIndirectFailures() {}
 	virtual void reportPerVertexTessFailures() {}
 
 	// Set by scratch preflight or by following an outstanding retirement on this queue.
 	// Once selected, all remaining commits of this submission use ordered retirement.
 	bool _needsOrderedRetirement = false;
+	// Set by scratch preflight: encoding waits on the GPU for a PerVertexKHR indirect plan.
+	bool _needsContinuation = false;
 	MVKCommandEncodingContext _encodingContext;
 	MVKSmallVector<MVKSemaphoreSubmitInfo> _signalSemaphores;
 	MVKFence* _fence = nullptr;
@@ -297,7 +322,6 @@ class MVKQueueFullCommandBufferSubmission : public MVKQueueCommandBufferSubmissi
 
 public:
 	VkResult reservePerVertexScratch(std::unordered_set<MVKCommandBuffer*>& prefilledExecutions) override;
-	void reportPerVertexIndirectFailures() override;
 	void reportPerVertexTessFailures() override;
 	MVKQueueFullCommandBufferSubmission(MVKQueue* queue, 
 										const VkSubmitInfo2* pSubmit,

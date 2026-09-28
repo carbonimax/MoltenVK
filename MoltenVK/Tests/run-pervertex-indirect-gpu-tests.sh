@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Short GPU matrix for portable PerVertexKHR indirect draws, with Metal API and GPU validation.
 # Usage: run-pervertex-indirect-gpu-tests.sh <after libMoltenVK> <before libMoltenVK> <output directory>
+# "before" is the parent runtime with a private record capacity (MVK_PERVERTEX_INDIRECT_RECORD_CAPACITY); "after" is
+# the continuation, which sizes the replay from the GPU plan and ignores that variable.
 # Every case stops the matrix on an unexpected result, so no further GPU work follows a failure.
 set -euo pipefail
 test_dir=$(cd "$(dirname "$0")" && pwd)
@@ -42,9 +44,10 @@ run() {
 	grep -q 'Metal GPU Validation Enabled' "$log" || verdict=FAIL
 	# A GPU fault also loses the device: only the admission message may explain an expected loss.
 	if grep -qiE 'Shader Validation|GPU Address Sanitizer|validation error|Execution of the command buffer was aborted|execution failed' "$log"; then verdict=FAIL; fi
-	case $* in
+	case $variant:$* in
 		*index-oob*) grep -q 'reads indices beyond the bound index buffer' "$log" || verdict=FAIL ;;
-		*overflow*|*huge*) grep -q 'exceeds the reserved capture capacity' "$log" || verdict=FAIL ;;
+		after:*huge*) grep -q 'needs more records than uint32 record IDs can represent' "$log" || verdict=FAIL ;;
+		before:*overflow*) grep -q 'exceeds the reserved capture capacity' "$log" || verdict=FAIL ;;
 		*) if grep -q 'indirect command was not executed' "$log"; then verdict=FAIL; fi ;;
 	esac
 	case $expected in
@@ -73,8 +76,9 @@ for form in draw draw-count indexed indexed-count; do
 	run "two-$form" after 0 $big 0 $form u16 two copy
 	run "repeat-$form" after 0 $big 0 $form u32 repeat copy
 done
-# 3. Capacity: exactly 12 records per draw fits; 11 refuses the whole command, including when only
-#    the second draw exceeds it; UINT32_MAX instances and out-of-range indices are refused without hang.
+# 3. Former capacity bounds: 12 records per draw fitted the parent's capacity 12; at 11 the parent refused these legal
+#    commands (section 7), the continuation renders them, including when only the second draw exceeds it.
+#    UINT32_MAX instances (no uint32 record ID) and out-of-range indices still lose the device, without hang.
 for form in draw draw-count indexed indexed-count; do
 	run "capacity12-decisive-$form" after 0 12 0 $form u32 decisive compute
 	run "capacity12-two-$form" after 0 12 0 $form u32 two compute
@@ -85,7 +89,7 @@ done
 run "index-oob-indexed" after 0 $big 0 indexed u32 index-oob compute
 run "index-oob-indexed-count" after 0 $big 0 indexed-count u32 index-oob compute
 # 4. Primitive restart on a triangle strip: static restart for every index width, two draws, dynamic
-#    restart on and off, and the restart capacity bound (8 indices x 2 instances = 16 records).
+#    restart on and off, and the former restart capacity bound (8 indices x 2 instances = 16 records).
 for form in indexed indexed-count; do
 	for index in u8 u16 u32; do run "restart-$form-$index" after 0 $big 0 $form $index restart copy; done
 	run "restart-two-$form" after 0 $big 0 $form u16 restart-two compute
@@ -102,15 +106,17 @@ for topology in point-list line-list line-strip triangle-strip triangle-fan; do
 	TOPOLOGY=$topology run "topology-$topology-two-indexed-count" after 0 $big 0 indexed-count u32 two copy
 done
 for form in draw draw-count indexed indexed-count; do run "stress-$form" after 0 $big 0 $form u32 stress compute; done
-# 6. Deferred and immediate Metal command buffer prefill.
+# 6. Deferred and immediate Metal command buffer prefill: both encode indirect PerVertexKHR draws at submission.
 for prefill in 1 2; do
 	for form in draw draw-count indexed indexed-count; do PREFILL=$prefill run "prefill$prefill-decisive-$form" after 0 $big 0 $form u32 decisive compute; done
 	PREFILL=$prefill run "prefill$prefill-restart-indexed-count" after 0 $big 0 indexed-count u16 restart compute
 done
-# 7. Negative controls: permuted corners must mismatch; the previous library must refuse at recording.
+# 7. Negative controls: permuted corners must mismatch; the parent runtime loses these legal commands at capacity 11.
 for form in draw draw-count indexed indexed-count; do
 	run "swap-negative-$form" after 2 $big 1 $form u32 decisive compute
-	run "before-$form" before 1 $big 0 $form u32 decisive compute
+	run "before-capacity11-overflow-$form" before 2 11 0 $form u32 overflow compute
+	run "before-capacity11-overflow-second-$form" before 2 11 0 $form u32 overflow-second compute
 done
+for form in indexed indexed-count; do run "before-capacity15-restart-overflow-$form" before 2 15 0 $form u32 restart-overflow compute; done
 shasum -a 256 "$output"/runs/* "$output/results.csv" > "$output/EVIDENCE.sha256"
 echo "PERVERTEX_INDIRECT_MATRIX PASS: $cases cases"
