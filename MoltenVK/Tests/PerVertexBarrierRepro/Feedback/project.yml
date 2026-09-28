@@ -1,0 +1,55 @@
+# Copyright 2026 Jean-Philippe Meunier
+# SPDX-License-Identifier: Apache-2.0
+# XcodeGen spec of the standalone iOS reproducer attached to the Feedback report. package-feedback.sh copies it next to
+# BarrierRepro.mm and generates the Xcode project that the report ships. The two schemes differ only by
+# MTL_SHADER_VALIDATION=1.
+name: BarrierRepro
+options:
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  BarrierRepro:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+    dependencies:
+      - sdk: Metal.framework
+      - sdk: UIKit.framework
+      - sdk: Foundation.framework
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: BarrierRepro
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIRequiredDeviceCapabilities: [arm64, metal]
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default
+                UISceneDelegateClassName: SceneDelegate
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.BarrierRepro
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        CLANG_ENABLE_OBJC_ARC: YES
+        CODE_SIGN_STYLE: Automatic
+schemes:
+  BarrierRepro:
+    build:
+      targets:
+        BarrierRepro: all
+    run:
+      config: Release
+  BarrierRepro-ShaderValidation:
+    build:
+      targets:
+        BarrierRepro: all
+    run:
+      config: Release
+      environmentVariables:
+        MTL_SHADER_VALIDATION: "1"
