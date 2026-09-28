@@ -66,7 +66,21 @@ Il accepte `plain` à la place de `validated`.
 
 ## Ce qui a été vérifié
 
-- Construction non signée, pour l'appareil et pour le simulateur.
-- Construction signée pour l'équipe personnelle : le profil couvre l'iPhone 18 Pro, l'iPhone 15 Pro, l'iPad Pro M4 et l'iPad Pro 9,7″.
-- Sur le simulateur iOS 27.0 : l'app exécute les 16 cas et écrit son rapport. La garde publique passe, et les 15 autres cas sont ignorés faute de capacités.
-- **Aucun essai sur appareil à ce stade.**
+**Constructions.** Non signée pour l'appareil et le simulateur ; signée pour l'équipe personnelle. Le profil couvre l'iPhone 18 Pro, l'iPhone 15 Pro, l'iPad Pro M4 et l'iPad Pro 9,7″.
+
+**Simulateur iOS 27.0.** Plomberie seulement : les cas s'exécutent et le rapport s'écrit.
+
+**Appareils, le 28 septembre 2026, avec l'app construite depuis `a564af04`.** Chaque passage tourne sans débogueur ; la validation Metal est annoncée dans les passages « avec validation ».
+
+| Appareil | Chemin PerVertexKHR | Synchrone, avec validation | Asynchrone, avec validation | Synchrone, sans validation |
+| --- | --- | --- | --- | --- |
+| iPhone 18 Pro (`iPhone19,2`, iOS 27.2, Apple10) | natif `vertex_value`, et portable pour `portable-*`, `continuation-*`, `tes-*` | 19/19 | 19/19 | 19/19 |
+| iPhone 15 Pro (`iPhone16,1`, iOS 27.0, Apple9) | portable | 19/19 | 19/19 | 19/19 |
+
+**Défauts trouvés par ces essais, et corrigés.**
+- **Collision SPIRV-Cross.** Un fragment qui lit PerVertexKHR et `BaryCoordKHR` ne compilait pas : fausse collision de location privée. Corrigé par SPIRV-Cross `6af5a67f`, épinglé en `41a6c184`.
+- **Replay non indexé vide.** Les dessins portables non indexés ne rendaient rien sur les deux iPhone, tout en rapportant un succès : la barrière dans la passe ne rendait pas la capture visible au replay. Corrigé en `a564af04` par une frontière de passe de rendu.
+
+**Non vérifié.**
+- L'iPad Pro M4 et l'iPad Pro 9,7″. Ce dernier n'a pas de barycentriques Metal : ses cas seraient ignorés.
+- Tout iPhone autre que ces deux-là.
