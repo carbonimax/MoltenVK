@@ -7,6 +7,8 @@
 # - reference: capture and replay in one render pass with a memory barrier (before a564af04): every variant renders;
 # - before: a render pass boundary (a564af04) loses imported memoryless attachments (wrong image or Metal assertion);
 # - after: memoryless attachments are refused before submission; ordinary MSAA still renders.
+# The indirect-count variants lower the Metal buffer limit to 1 GiB (test builds only): a legal DrawIndirectCount with
+# a 1 GiB argument buffer is refused before the snapshot fix and renders Count 0 or 1 after it.
 # Usage: run-pervertex-split-tests.sh <libMoltenVK test build> <output directory> <reference|before|after>
 set -euo pipefail
 test_dir=$(cd "$(dirname "$0")" && pwd)
@@ -26,8 +28,11 @@ xcrun clang++ -arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-fiel
 shasum -a 256 "$library" "$output/bin/pervertex-split" "$output"/shaders/*.spv "$test_dir/PerVertexAttachmentSplitTests.mm" > "$output/INPUTS.sha256"
 echo 'variant,expected,actual,verdict' > "$output/results.csv"
 failures=0
-for variant in memoryless-depth memoryless-stencil msaa msaa-memoryless; do
+for variant in memoryless-depth memoryless-stencil msaa msaa-memoryless indirect-count-0 indirect-count-1; do
 	case $side:$variant in
+		reference:indirect-count-*) expected=3 ;;	# no Metal buffer limit hook in that build
+		before:indirect-count-*) expected=4 ;;	# the argument snapshot, sized by maxDrawCount, exceeds the limit
+		after:indirect-count-*) expected=0 ;;
 		reference:*|*:msaa) expected=0 ;;
 		before:msaa-memoryless) expected='0|1|134|139' ;;	# observed to render on an M4, which Metal does not guarantee
 		before:*) expected='1|134|139' ;;
