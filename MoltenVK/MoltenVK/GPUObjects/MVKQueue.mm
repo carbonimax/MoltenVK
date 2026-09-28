@@ -261,6 +261,20 @@ static const char* mvkStringFromMTLCommandEncoderErrorState(MTLCommandEncoderErr
 	return "unknown";
 }
 
+bool MVKQueue::isDeviceLoss(id<MTLCommandBuffer> mtlCmdBuff) {
+	if (mtlCmdBuff.status != MTLCommandBufferStatusError) { return false; }
+	switch (mtlCmdBuff.error.code) {
+		case MTLCommandBufferErrorBlacklisted:
+		case MTLCommandBufferErrorNotPermitted:
+#if MVK_MACOS && !MVK_MACCAT
+		case MTLCommandBufferErrorDeviceRemoved:
+#endif
+			return true;
+		default:
+			return !getMVKConfig().resumeLostDevice;
+	}
+}
+
 void MVKQueue::handleMTLCommandBufferError(id<MTLCommandBuffer> mtlCmdBuff) {
 	if (mtlCmdBuff.status != MTLCommandBufferStatusError) { return; }
 
@@ -269,7 +283,7 @@ void MVKQueue::handleMTLCommandBufferError(id<MTLCommandBuffer> mtlCmdBuff) {
 	// If the error is local to this command buffer, optionally mark the device (but not the
 	// physical device) as lost, depending on the value of MVKConfiguration::resumeLostDevice.
 	VkResult vkErr = VK_ERROR_UNKNOWN;
-	bool markDeviceLoss = !getMVKConfig().resumeLostDevice;
+	bool markDeviceLoss = isDeviceLoss(mtlCmdBuff);
 	bool markPhysicalDeviceLoss = false;
 	switch (mtlCmdBuff.error.code) {
 		case MTLCommandBufferErrorBlacklisted:
@@ -278,7 +292,6 @@ void MVKQueue::handleMTLCommandBufferError(id<MTLCommandBuffer> mtlCmdBuff) {
 		case MTLCommandBufferErrorDeviceRemoved:
 #endif
 			vkErr = VK_ERROR_DEVICE_LOST;
-			markDeviceLoss = true;
 			markPhysicalDeviceLoss = true;
 			break;
 		case MTLCommandBufferErrorTimeout:
@@ -658,23 +671,32 @@ VkResult MVKQueueCommandBufferSubmission::commitActiveMTLCommandBuffer(bool sign
 	id<MTLCommandBuffer> mtlCmdBuff = signalCompletion ? getActiveMTLCommandBuffer() : _activeMTLCommandBuffer;
 	_activeMTLCommandBuffer = nil;
 
+	// Metal documents no order between the handlers of different command buffers: this submission reports its
+	// completion only once every one of its Metal command buffers has run its handlers, with a final status.
 	uint64_t startTime = getPerformanceTimestamp();
 	MVKDevice* device = getDevice();
-	device->addMTLCommandBufferHandler(mtlCmdBuff, ^(id<MTLCommandBuffer> mtlCB) {
-		addPerformanceInterval(getPerformanceStats().queue.mtlCommandBufferExecution, startTime);
-		if (signalCompletion) { this->finish(); }	// Must be the last thing the completetion callback does.
-	});
+	if (mtlCmdBuff) {
+		_pendingMTLCommandBuffers++;
+		device->addMTLCommandBufferHandler(mtlCmdBuff, ^(id<MTLCommandBuffer> mtlCB) {
+			if (_queue->isDeviceLoss(mtlCB)) { _isMTLCommandBufferLost = true; }
+			addPerformanceInterval(getPerformanceStats().queue.mtlCommandBufferExecution, startTime);
+			releaseMTLCommandBuffer();		// May destroy this instance.
+		});
+	}
 
 	// Retrieve the result before committing MTLCommandBuffer, because finish() will destroy this instance.
 	VkResult rslt = mtlCmdBuff ? getConfigurationResult() : VK_ERROR_DEVICE_LOST;
 	device->commitMTLCommandBuffer(mtlCmdBuff);
 	[mtlCmdBuff release];		// retained
 
-	// If we need to signal completion, but an error occurred and the MTLCommandBuffer
-	// was not created, call the finish() function directly.
-	if (signalCompletion && !mtlCmdBuff) { finish(); }
+	// The encoding holds its own count until the last Metal command buffer is committed, or none could be created.
+	if (signalCompletion) { releaseMTLCommandBuffer(); }		// May destroy this instance.
 
 	return rslt;
+}
+
+void MVKQueueCommandBufferSubmission::releaseMTLCommandBuffer() {
+	if (--_pendingMTLCommandBuffers == 0) { finish(); }
 }
 
 // Be sure to retain() any API objects referenced in this function, and release() them in the
@@ -688,7 +710,9 @@ void MVKQueueCommandBufferSubmission::finish() {
 	// immediately after a waitIdle() is cleared by fence below, taking the capture scope with it.
 	_queue->_submissionCaptureScope->endScope();
 
+	// A failed Metal command buffer of this submission loses the device, whatever order Metal ran the handlers in.
 	// During a device loss, nothing is reported complete: host waits report the loss once it is published.
+	if (_isMTLCommandBufferLost) { getDevice()->markLost(); }
 	if ( !getDevice()->isLosing() ) {
 		// If using inline semaphore signaling, do so now.
 		for (auto& ss : _signalSemaphores) { ss.completeSignal(); }

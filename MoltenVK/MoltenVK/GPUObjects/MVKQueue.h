@@ -146,6 +146,12 @@ protected:
 	NSString* getMTLCommandBufferLabel(MVKCommandUse cmdUse);
 	void handleMTLCommandBufferError(id<MTLCommandBuffer> mtlCmdBuff);
 
+	/**
+	 * Returns whether a Metal command buffer has failed in a way that loses the device: any failure, unless
+	 * MVKConfiguration::resumeLostDevice lets a failure local to that command buffer resume the device.
+	 */
+	bool isDeviceLoss(id<MTLCommandBuffer> mtlCmdBuff);
+
 	MVKQueueFamily* _queueFamily;
 	std::string _name;
 	dispatch_queue_t _execQueue;
@@ -292,6 +298,7 @@ protected:
 	id<MTLCommandBuffer> getActiveMTLCommandBuffer();
 	void setActiveMTLCommandBuffer(id<MTLCommandBuffer> mtlCmdBuff);
 	VkResult commitActiveMTLCommandBuffer(bool signalCompletion = false);
+	void releaseMTLCommandBuffer();
 	void finish() override;
 	virtual void submitCommandBuffers() {}
 
@@ -302,6 +309,8 @@ protected:
 	MVKFence* _fence = nullptr;
 	id<MTLCommandBuffer> _activeMTLCommandBuffer = nil;
 	MVKCommandUse _commandUse = kMVKCommandUseNone;
+	std::atomic<uint32_t> _pendingMTLCommandBuffers{1};	// Committed Metal command buffers not done, plus encoding.
+	std::atomic<bool> _isMTLCommandBufferLost{false};
 	bool _emulatedWaitDone = false;		//Used to track if we've already waited for emulated semaphores.
 };
 
