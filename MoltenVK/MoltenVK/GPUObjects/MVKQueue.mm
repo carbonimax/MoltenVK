@@ -822,8 +822,9 @@ VkResult MVKQueueFullCommandBufferSubmission<N>::reservePerVertexScratch(std::un
 		VkResult result = cbInfo.commandBuffer->reservePerVertexScratch(cbInfo.perVertexScratch, prefilledExecutions);
 		if (result != VK_SUCCESS) { return result; }
 		for (auto& scratch : cbInfo.perVertexScratch) {
-			// TES inspects its GPU status in finish(); indirect draws wait for their GPU plan while encoding.
-			if (scratch->indirectCapacity || scratch->tessTopologyPipeline) { _needsOrderedRetirement = true; }
+			// TES inspects its GPU status in finish(). Indirect draws decide a loss while encoding, before any
+			// successor is committed, so their completion needs no ordering.
+			if (scratch->tessTopologyPipeline) { _needsOrderedRetirement = true; }
 			if (scratch->indirectCapacity) { _needsContinuation = true; }
 		}
 	}
