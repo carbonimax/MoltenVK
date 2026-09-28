@@ -133,19 +133,25 @@ uint64_t MVKSemaphoreMTLEvent::reserveWait() {
 
 void MVKSemaphoreMTLEvent::encodeReservedWait(id<MTLCommandBuffer> mtlCmdBuff, uint64_t reservation) {
 	if ( !mtlCmdBuff ) { return; }
+	uint64_t maxValue = _maxEncodedWaitValue.load();
+	while (maxValue < reservation && !_maxEncodedWaitValue.compare_exchange_weak(maxValue, reservation)) {}
 	if ( !_isLossReleased.exchange(true) ) { _device->addLossReleasedSemaphore(this); }
 	[mtlCmdBuff encodeWaitForEvent: _mtlEvent value: reservation];
 }
 
-// Every wait was encoded or reserved for a value below the current one, and Metal event values never decrease.
+// Releases the highest wait encoded so far, which covers every lower one since Metal event values never decrease.
+// Not the next value: that is the generation of the next Vulkan signal, which an external Metal client of an
+// imported or exported event may be waiting for. A wait reserved but not yet encoded is released by the next call.
 bool MVKSemaphoreMTLEvent::releaseWaitsAfterLoss(id<MTLCommandBuffer> mtlCmdBuff) {
-	uint64_t value = _mtlEventValue.load();
+	uint64_t value = _maxEncodedWaitValue.load();
+	if ( !value ) { return true; }
 	if (mtlCmdBuff) {
 		[mtlCmdBuff encodeSignalEvent: _mtlEvent value: value];
 		return true;
 	}
 	if ([_mtlEvent conformsToProtocol: @protocol(MTLSharedEvent)]) {
-		((id<MTLSharedEvent>)_mtlEvent).signaledValue = value;
+		auto* sharedEvent = (id<MTLSharedEvent>)_mtlEvent;
+		if (sharedEvent.signaledValue < value) { sharedEvent.signaledValue = value; }
 		return true;
 	}
 	return false;

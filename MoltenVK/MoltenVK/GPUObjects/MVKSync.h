@@ -277,6 +277,7 @@ public:
 protected:
 	id<MTLEvent> _mtlEvent;
 	std::atomic<uint64_t> _mtlEventValue;
+	std::atomic<uint64_t> _maxEncodedWaitValue{0};
 	std::atomic<bool> _isLossReleased{false};
 };
 
