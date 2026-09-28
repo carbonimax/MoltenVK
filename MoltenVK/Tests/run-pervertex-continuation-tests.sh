@@ -93,6 +93,16 @@ if [[ $suite == loss ]]; then
 		run loss-external-waiter-same-sync-r$i 1 0 1 "${sync[@]}" "${common[@]}" "${same[@]}" "${external[@]}" -- pervertex-indirect-gpu "$output/shaders" indexed-count u32 huge compute external-same-sync-r$i
 		run loss-external-waiter-cross-async-r$i 1 0 1 "${async[@]}" "${common[@]}" "${external[@]}" PERVERTEX_TEST_DEPENDENT_FIRST=1 -- pervertex-indirect-gpu "$output/shaders" indexed-count u32 huge compute external-cross-async-r$i
 	done
+	# An exit code alone could come from a setup error: each log must show the measured outcome.
+	for log in "$output"/runs/loss-*.log; do
+		case $mode:$(basename "$log") in
+			before:loss-long-*) pattern='still running when its fence reported the loss' ;;
+			before:loss-external-*) pattern='released an external Metal waiter' ;;
+			after:loss-long-*) pattern='^long dependent at loss report: start=a55a5aa5 end=a55a5aa5' ;;
+			after:loss-external-*) pattern='^external waiter at generation [0-9]*: marker=00000000' ;;
+		esac
+		grep -q "$pattern" "$log" || { echo "STOP: $log lacks: $pattern"; exit 1; }
+	done
 	shasum -a 256 "$output"/runs/* "$output/results.csv" > "$output/EVIDENCE.sha256"
 	echo "PERVERTEX_CONTINUATION $mode loss PASS: $(($(wc -l < "$output/results.csv") - 1)) cases"
 	exit 0
