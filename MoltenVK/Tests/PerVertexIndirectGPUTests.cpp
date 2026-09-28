@@ -117,6 +117,10 @@ int main(int argc, char** argv) {
 		const bool lateSignal = getenv("PERVERTEX_TEST_LATE_SIGNAL") != nullptr;
 		const bool dependentSubmission = getenv("PERVERTEX_TEST_DEPENDENT_SUBMISSION") != nullptr;
 		const bool dependentSameQueue = getenv("PERVERTEX_TEST_DEPENDENT_SAME_QUEUE") != nullptr;
+		// PERVERTEX_TEST_SECONDARY records the indirect render pass contents in a secondary command buffer.
+		const bool secondary = getenv("PERVERTEX_TEST_SECONDARY") != nullptr;
+		// PERVERTEX_TEST_DRAW_TWICE records the draw command twice in the same render pass, in both runs.
+		const bool drawTwice = getenv("PERVERTEX_TEST_DRAW_TWICE") != nullptr;
 		// Opt in to ordinary same-queue C behind deferred B, without a semaphore dependency.
 		const bool dependentNoWait = getenv("PERVERTEX_TEST_DEPENDENT_NO_WAIT") != nullptr;
 		const bool waitIdleProbe = getenv("PERVERTEX_TEST_WAIT_IDLE") != nullptr;
@@ -258,7 +262,7 @@ int main(int argc, char** argv) {
 		vkGetDeviceQueue(d.device, d.producerFamily, 0, &d.producerQueue);
 		VkPhysicalDeviceProperties properties{};
 		vkGetPhysicalDeviceProperties(d.physical, &properties);
-		std::printf("DEVICE=%s form=%s index=%s scenario=%s producer=%s topology=%s draw_family=%u producer_family=%u\n", properties.deviceName, form.c_str(), indexName.c_str(), scenarioName.c_str(), producer.c_str(), restart ? "triangle-strip" : topologyText.c_str(), d.family, d.producerFamily);
+		std::printf("DEVICE=%s form=%s index=%s scenario=%s producer=%s topology=%s draw_family=%u producer_family=%u secondary=%d draw_twice=%d\n", properties.deviceName, form.c_str(), indexName.c_str(), scenarioName.c_str(), producer.c_str(), restart ? "triangle-strip" : topologyText.c_str(), d.family, d.producerFamily, int(secondary), int(drawTwice));
 
 		// Colour attachment and readback.
 		VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -492,6 +496,13 @@ int main(int argc, char** argv) {
 		VkCommandBuffer commands[2]{};
 		check(vkAllocateCommandBuffers(d.device, &commandInfo, commands), "Allocate command buffers");
 		VkCommandBuffer referenceCommands = commands[0], indirectCommands = commands[1], producerCommands = VK_NULL_HANDLE, dependentCommands = VK_NULL_HANDLE;
+		VkCommandBuffer secondaryCommands = VK_NULL_HANDLE;
+		if (secondary) {
+			commandInfo.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+			commandInfo.commandBufferCount = 1;
+			check(vkAllocateCommandBuffers(d.device, &commandInfo, &secondaryCommands), "Allocate secondary command buffer");
+			commandInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		}
 		VkCommandPool producerPool = pool;
 		Buffer dependentMarker;
 		if (dependentSubmission) dependentMarker = makeBuffer(d, sizeof(uint32_t), VK_BUFFER_USAGE_TRANSFER_DST_BIT);
@@ -539,6 +550,7 @@ int main(int argc, char** argv) {
 				for (uint32_t k = 0; k < a.instances; ++k)
 					for (uint32_t j = 0; j < a.count; ++j)
 						if (!indexed || sources[j] != UINT32_MAX || !restartOn) records.push_back({indexed ? (sources[j] == UINT32_MAX ? marker + uint32_t(a.base) : sources[j]) : a.first + j, a.firstInstance + k, drawId | (a.firstInstance << 16), indexed ? uint32_t(a.base) : a.first});
+			if (drawTwice) { auto once = records; records.insert(records.end(), once.begin(), once.end()); }
 			std::sort(records.begin(), records.end());
 			return records;
 		};
@@ -577,7 +589,20 @@ int main(int argc, char** argv) {
 			pass.renderArea = {{0, 0}, {kSide, kSide}};
 			pass.clearValueCount = 1;
 			pass.pClearValues = &clear;
-			vkCmdBeginRenderPass(cb, &pass, VK_SUBPASS_CONTENTS_INLINE);
+			bool inSecondary = secondary && !referenceRun;
+			vkCmdBeginRenderPass(cb, &pass, inSecondary ? VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS : VK_SUBPASS_CONTENTS_INLINE);
+			VkCommandBuffer primary = cb;
+			if (inSecondary) {
+				check(vkResetCommandBuffer(secondaryCommands, 0), "Reset secondary command buffer");
+				VkCommandBufferInheritanceInfo inheritance{VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO};
+				inheritance.renderPass = renderPass;
+				inheritance.framebuffer = framebuffer;
+				VkCommandBufferBeginInfo inside{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+				inside.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
+				inside.pInheritanceInfo = &inheritance;
+				check(vkBeginCommandBuffer(secondaryCommands, &inside), "Begin secondary command buffer");
+				cb = secondaryCommands;
+			}
 			// An earlier write in the same render pass must survive the planning passes.
 			VkClearAttachment prior{VK_IMAGE_ASPECT_COLOR_BIT, 0, {}};
 			prior.clearValue.color.float32[0] = 1.0f;
@@ -590,22 +615,29 @@ int main(int argc, char** argv) {
 			vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsLayout, 0, 1, &sets[0], 0, nullptr);
 			if (indexed) vkCmdBindIndexBuffer(cb, work.buffer, kIndexOffset, indexType);
 			if (dynamicRestart) vkCmdSetPrimitiveRestartEnableEXT(cb, restartOn);
-			if (referenceRun) {
-				for (auto& [drawId, a] : executed(s)) {
-					vkCmdPushConstants(cb, graphicsLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 4, &drawId);
-					if (indexed) vkCmdDrawIndexed(cb, a.count, a.instances, a.first, a.base, a.firstInstance);
-					else vkCmdDraw(cb, a.count, a.instances, a.first, a.firstInstance);
+			for (int repeat = 0; repeat < (drawTwice ? 2 : 1); ++repeat) {
+				if (referenceRun) {
+					for (auto& [drawId, a] : executed(s)) {
+						vkCmdPushConstants(cb, graphicsLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 4, &drawId);
+						if (indexed) vkCmdDrawIndexed(cb, a.count, a.instances, a.first, a.base, a.firstInstance);
+						else vkCmdDraw(cb, a.count, a.instances, a.first, a.firstInstance);
+					}
+				} else if (form == "draw") {
+					vkCmdDrawIndirect(cb, work.buffer, kArgsOffset, scenarioName == "single" ? 1 : 2, kStride);
+				} else if (form == "indexed") {
+					vkCmdDrawIndexedIndirect(cb, work.buffer, kArgsOffset, scenarioName == "single" ? 1 : 2, kStride);
+				} else if (form == "draw-count") {
+					vkCmdDrawIndirectCountKHR(cb, work.buffer, kArgsOffset, work.buffer, kCountOffset, scenarioName == "single" ? 1 : 2, kStride);
+				} else {
+					vkCmdDrawIndexedIndirectCountKHR(cb, work.buffer, kArgsOffset, work.buffer, kCountOffset, scenarioName == "single" ? 1 : 2, kStride);
 				}
-			} else if (form == "draw") {
-				vkCmdDrawIndirect(cb, work.buffer, kArgsOffset, scenarioName == "single" ? 1 : 2, kStride);
-			} else if (form == "indexed") {
-				vkCmdDrawIndexedIndirect(cb, work.buffer, kArgsOffset, scenarioName == "single" ? 1 : 2, kStride);
-			} else if (form == "draw-count") {
-				vkCmdDrawIndirectCountKHR(cb, work.buffer, kArgsOffset, work.buffer, kCountOffset, scenarioName == "single" ? 1 : 2, kStride);
-			} else {
-				vkCmdDrawIndexedIndirectCountKHR(cb, work.buffer, kArgsOffset, work.buffer, kCountOffset, scenarioName == "single" ? 1 : 2, kStride);
 			}
 			if (withTES && !tesFirst) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, tessPipeline); vkCmdDraw(cb, 6, 1, 0, 0); }
+			if (inSecondary) {
+				check(vkEndCommandBuffer(secondaryCommands), "End secondary command buffer");
+				cb = primary;
+				vkCmdExecuteCommands(cb, 1, &secondaryCommands);
+			}
 			vkCmdEndRenderPass(cb);
 			VkImageMemoryBarrier toTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
 			toTransfer.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -788,7 +820,7 @@ int main(int argc, char** argv) {
 		// original vertex colours in order, blended at alpha 0.5 over the zero clear.
 		auto sampleOracle = [&](const Scenario& s, const std::vector<uint8_t>& image, uint32_t& samples) {
 			auto draws = executed(s);
-			if (draws.size() != 1 || restart || topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) { return true; }
+			if (draws.size() != 1 || restart || drawTwice || topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) { return true; }
 			auto& [drawId, a] = draws[0];
 			const float corners[14][2] = {{4, 4}, {4, 4}, {4, 4}, {4, 4}, {-0.8f, -0.8f}, {0.8f, -0.8f}, {0.8f, 0.8f}, {0.8f, 0.8f}, {-0.8f, 0.8f}, {-0.8f, -0.8f}, {-0.8f, -0.8f}, {0.8f, -0.8f}, {0.8f, 0.8f}, {-0.8f, 0.8f}};
 			bool ok = true;
