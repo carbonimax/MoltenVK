@@ -4016,16 +4016,16 @@ void MVKDevice::publishLoss() {
 	_lossCondition.notify_all();
 }
 
-// Signals every semaphore that has encoded Metal waits to a value satisfying all of them, on a Metal queue that
+// Signals every semaphore or event that has encoded Metal waits to a value satisfying all of them, on a Metal queue that
 // never holds application work. Metal event values only increase, so signals already executed are unaffected.
 void MVKDevice::releaseSemaphoreWaitsAfterLoss() {
 	lock_guard<mutex> lock(_lossReleaseLock);
-	if (_lossReleasedSemaphores.empty()) { return; }
+	if (_lossReleasables.empty()) { return; }
 	@autoreleasepool {
 		id<MTLCommandQueue> mtlQueue = _physicalDevice->getLossRescueMTLCommandQueue();
 		id<MTLCommandBuffer> mtlCmdBuff = [mtlQueue commandBuffer];		// retains the events it signals
 		bool released = true;
-		for (auto* sem4 : _lossReleasedSemaphores) { released &= sem4->releaseWaitsAfterLoss(mtlCmdBuff); }
+		for (auto* releasable : _lossReleasables) { released &= releasable->releaseWaitsAfterLoss(mtlCmdBuff); }
 		[mtlCmdBuff commit];
 		if ( !released ) { reportWarning(VK_ERROR_DEVICE_LOST, "Could not release every Metal semaphore wait after device loss. Metal work waiting on them may not complete."); }
 	}
@@ -4072,14 +4072,14 @@ void MVKDevice::trackCommittedMTLCommandBuffer(id<MTLCommandBuffer> mtlCmdBuff) 
 	}];
 }
 
-void MVKDevice::addLossReleasedSemaphore(MVKSemaphore* sem4) {
+void MVKDevice::addLossReleasable(MVKLossReleasable* releasable) {
 	lock_guard<mutex> lock(_lossReleaseLock);
-	_lossReleasedSemaphores.insert(sem4);
+	_lossReleasables.insert(releasable);
 }
 
-void MVKDevice::removeLossReleasedSemaphore(MVKSemaphore* sem4) {
+void MVKDevice::removeLossReleasable(MVKLossReleasable* releasable) {
 	lock_guard<mutex> lock(_lossReleaseLock);
-	_lossReleasedSemaphores.erase(sem4);
+	_lossReleasables.erase(releasable);
 }
 
 void MVKDevice::addEncodingSemaphore(MVKSemaphoreImpl* sem4) {
