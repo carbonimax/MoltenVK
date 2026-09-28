@@ -30,6 +30,12 @@
 //   - teardown-nil: Metal returns no command buffer while C is submitted, which must lose the device;
 //   - teardown-nil-transient: Metal returns no command buffer once, then does again: C's commands, encoded without a
 //     Metal command buffer, never run, so the loss must be reported all the same (marker_C shows whether C ran).
+// external-queue-wait: the application commits, on the Metal command queue exported from queue B, a command buffer X
+//   that waits a MTLSharedEvent unknown to MoltenVK, then submits C to queue B, behind X. After the loss, the host
+//   waits 2 s for C's fence, then signals the event as the application eventually would, and checks when C ran.
+//   Exit 0 when the loss is reported within 2 s and C never runs after that report; 1 otherwise, with
+//   "LOSS_NOT_REPORTED" when the wait timed out, or "RAN_AFTER_REPORT" when C ran after the loss was reported.
+//   No safe runtime meets both today (see the report): this mode reproduces that blocker.
 // Exit 2 for a setup failure, 3 when the device lacks a capability.
 #import <Metal/Metal.h>
 #include <objc/runtime.h>
@@ -581,13 +587,77 @@ int teardown(Context& c, const std::string& variant) {
 	return pass ? 0 : 1;
 }
 
+int externalQueueWait(Context& c) {
+	VkExportMetalCommandQueueInfoEXT queueInfo{VK_STRUCTURE_TYPE_EXPORT_METAL_COMMAND_QUEUE_INFO_EXT};
+	queueInfo.queue = c.qb;
+	VkExportMetalObjectsInfoEXT exportInfo{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT};
+	exportInfo.pNext = &queueInfo;
+	vkExportMetalObjectsEXT(c.device, &exportInfo);
+	if (!queueInfo.mtlCommandQueue) { std::fprintf(stderr, "No exported MTLCommandQueue\n"); return 3; }
+	id<MTLSharedEvent> unknown = [c.mtlDevice newSharedEvent];
+	id<MTLBuffer> externalMarker = [c.mtlDevice newBufferWithLength: 64 options: MTLResourceStorageModeShared];
+	std::memset(externalMarker.contents, 0, 64);
+	id<MTLCommandBuffer> external = [queueInfo.mtlCommandQueue commandBuffer];
+	[external encodeWaitForEvent: unknown value: 1];
+	id<MTLBlitCommandEncoder> blit = [external blitCommandEncoder];
+	[blit fillBuffer: externalMarker range: NSMakeRange(0, 4) value: 0xA5];
+	[blit endEncoding];
+	[external commit];
+	Buffer marker = c.buffer(64, true);
+	VkCommandPool pool = commandPool(c);
+	VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+	allocation.commandPool = pool;
+	allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	allocation.commandBufferCount = 1;
+	VkCommandBuffer commands;
+	check(vkAllocateCommandBuffers(c.device, &allocation, &commands), "vkAllocateCommandBuffers");
+	VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+	check(vkBeginCommandBuffer(commands, &begin), "vkBeginCommandBuffer");
+	vkCmdFillBuffer(commands, marker.buffer, 0, 4, kMarker);
+	check(vkEndCommandBuffer(commands), "vkEndCommandBuffer");
+	VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+	VkFence fence;
+	check(vkCreateFence(c.device, &fenceInfo, nullptr, &fence), "vkCreateFence");
+	VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+	submit.commandBufferCount = 1;
+	submit.pCommandBuffers = &commands;
+	check(vkQueueSubmit(c.qb, 1, &submit, fence), "vkQueueSubmit C");
+	sleepMs(200);
+	uint32_t markerBeforeLoss = marker.mapped[0];
+	VkResult fenceBeforeLoss = vkGetFenceStatus(c.device, fence);
+	c.markLost(c.device);
+	auto start = std::chrono::steady_clock::now();
+	VkResult report = vkWaitForFences(c.device, 1, &fence, VK_TRUE, 2000000000ull);
+	double reportMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+	uint32_t markerAtReport = marker.mapped[0];
+	// The application releases its own work, as it eventually would.
+	unknown.signaledValue = 1;
+	[external waitUntilCompleted];
+	VkResult late = vkWaitForFences(c.device, 1, &fence, VK_TRUE, 5000000000ull);
+	sleepMs(100);
+	uint32_t markerLater = marker.mapped[0];
+	bool reported = report == VK_ERROR_DEVICE_LOST;
+	bool ranAfterReport = reported && markerAtReport != kMarker && markerLater == kMarker;
+	std::printf("C_before_loss: fence=%d marker=%08x; wait_after_loss=%d in %.0f ms marker_C=%08x; after external signal: wait=%d marker_C=%08x\n",
+				int(fenceBeforeLoss), markerBeforeLoss, int(report), reportMs, markerAtReport, int(late), markerLater);
+	std::printf("EXTERNAL_QUEUE_WAIT %s\n", !reported ? "LOSS_NOT_REPORTED: the loss waits for C, which waits for the application's Metal work"
+				: ranAfterReport ? "RAN_AFTER_REPORT: C ran after the loss was reported, on resources the application could destroy"
+				: "PASS: the loss was reported and C did not run after it");
+	vkDestroyFence(c.device, fence, nullptr);
+	vkDestroyCommandPool(c.device, pool, nullptr);
+	c.destroy(marker);
+	[externalMarker release];
+	[unknown release];
+	return reported && !ranAfterReport && fenceBeforeLoss == VK_NOT_READY ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
 	std::string mode = argc == 2 ? argv[1] : "";
 	bool isTeardown = mode == "teardown" || mode == "teardown-multi" || mode == "teardown-nil" || mode == "teardown-nil-transient";
-	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss" && mode != "event-wait" && !isTeardown) {
-		std::fprintf(stderr, "usage: %s counter-race|binary-generation|destroy-after-loss|event-wait|teardown|teardown-multi|teardown-nil|teardown-nil-transient\n", argv[0]);
+	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss" && mode != "event-wait" && mode != "external-queue-wait" && !isTeardown) {
+		std::fprintf(stderr, "usage: %s counter-race|binary-generation|destroy-after-loss|event-wait|external-queue-wait|teardown|teardown-multi|teardown-nil|teardown-nil-transient\n", argv[0]);
 		return 64;
 	}
 	@autoreleasepool {
@@ -598,7 +668,7 @@ int main(int argc, char** argv) {
 			return rc;
 		}
 		int rc = mode == "counter-race" ? counterRace(c) : mode == "binary-generation" ? binaryGeneration(c)
-			: mode == "event-wait" ? eventWait(c) : destroyAfterLoss(c);
+			: mode == "event-wait" ? eventWait(c) : mode == "external-queue-wait" ? externalQueueWait(c) : destroyAfterLoss(c);
 		std::fflush(stdout);
 		// The device is lost: destroying it is still valid, idle waits would only report the loss.
 		vkDestroyDevice(c.device, nullptr);
