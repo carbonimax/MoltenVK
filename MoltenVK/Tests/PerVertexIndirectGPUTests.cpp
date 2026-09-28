@@ -118,8 +118,10 @@ int main(int argc, char** argv) {
 		const bool dependentSubmission = getenv("PERVERTEX_TEST_DEPENDENT_SUBMISSION") != nullptr;
 		const bool dependentSameQueue = getenv("PERVERTEX_TEST_DEPENDENT_SAME_QUEUE") != nullptr;
 		const bool waitIdleProbe = getenv("PERVERTEX_TEST_WAIT_IDLE") != nullptr;
+		const bool dependentFirst = getenv("PERVERTEX_TEST_DEPENDENT_FIRST") != nullptr;
 		if (dependentSubmission && (!splitProducer || !lateSignal)) throw std::runtime_error("dependent submission requires split producer and late signal");
 		if (dependentSameQueue && !dependentSubmission) throw std::runtime_error("same-queue dependent submission requires dependent submission");
+		if (dependentFirst && !dependentSubmission) throw std::runtime_error("dependent-first wait requires dependent submission");
 		const bool indexed = form == "indexed" || form == "indexed-count";
 		const bool counted = form == "draw-count" || form == "indexed-count";
 		if (!indexed && form != "draw" && !counted) throw std::runtime_error("Unknown form");
@@ -720,11 +722,20 @@ int main(int argc, char** argv) {
 				signal.value = 1;
 				check(vkSignalSemaphore(d.device, &signal), "Host signal timeline");
 			}
-			r.wait = r.submit == VK_SUCCESS ? vkWaitForFences(d.device, 1, &fence, VK_TRUE, 20000000000ull) : r.submit;
-			if (dependentSubmission && split) {
+			auto waitDependent = [&] {
 				r.dependentWait = r.dependentSubmit == VK_SUCCESS ? vkWaitForFences(d.device, 1, &dependentFence, VK_TRUE, 5000000000ull) : r.dependentSubmit;
 				memcpy(&r.dependentMarkerValue, dependentMarker.data, sizeof(uint32_t));
 				std::printf("dependent wait=%d fence status=%d marker=%08x\n", r.dependentWait, vkGetFenceStatus(d.device, dependentFence), r.dependentMarkerValue);
+			};
+			if (dependentFirst && dependentSubmission && split) {
+				waitDependent();
+				VkResult priorFence = vkGetFenceStatus(d.device, fence);
+				std::printf("draw fence when dependent returned=%d\n", priorFence);
+				if (r.dependentWait == VK_SUCCESS && priorFence != VK_SUCCESS) throw std::runtime_error("Dependent fence succeeded before prior draw fence");
+			}
+			r.wait = r.submit == VK_SUCCESS ? vkWaitForFences(d.device, 1, &fence, VK_TRUE, 20000000000ull) : r.submit;
+			if (dependentSubmission && split) {
+				if (!dependentFirst) waitDependent();
 				if (r.wait == VK_SUCCESS && (r.dependentWait != VK_SUCCESS || r.dependentMarkerValue != 0xA55A5AA5)) throw std::runtime_error("Dependent submission did not complete after the indirect draw");
 			}
 			if (waitIdleProbe && split) {
