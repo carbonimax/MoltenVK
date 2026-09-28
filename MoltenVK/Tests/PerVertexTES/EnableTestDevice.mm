@@ -21,3 +21,7 @@ extern "C" void mvkEnableTESFixtureDevice(VkPhysicalDevice device) {
 extern "C" void mvkEnableMeshTestDevice(VkPhysicalDevice device) {
     TestPhysicalDevice::enableMesh(MVKPhysicalDevice::getMVKPhysicalDevice(device));
 }
+// Loses the device as an encoder does, so that device loss tests choose the moment of the loss.
+extern "C" void mvkTestMarkDeviceLost(VkDevice device) {
+    MVKDevice::getMVKDevice(device)->markLost();
+}
