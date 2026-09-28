@@ -137,7 +137,7 @@ int main(int argc, char** argv) {
 		const std::string topologyText = topologyName ? topologyName : "triangle-list";
 		const VkPrimitiveTopology topology = restart ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : topologyText == "point-list" ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST : topologyText == "line-list" ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : topologyText == "line-strip" ? VK_PRIMITIVE_TOPOLOGY_LINE_STRIP : topologyText == "triangle-strip" ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : topologyText == "triangle-fan" ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 		if (topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST && topologyText != "triangle-list") throw std::runtime_error("Unknown topology");
-		if (scenarioName == "single" && ((form != "draw" && form != "indexed") || topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)) throw std::runtime_error("single requires a triangle-list draw without Count");
+		if (scenarioName == "single" && topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) throw std::runtime_error("single requires a triangle-list draw");
 		// Dynamic restart state: the pipeline may restart, so restart scratch is reserved either way.
 		const bool dynamicRestart = scenarioName.rfind("restart-dynamic", 0) == 0, restartOn = scenarioName != "restart-dynamic-off";
 		if (restart && !indexed) throw std::runtime_error("restart scenarios need an indexed form");
@@ -594,11 +594,11 @@ int main(int argc, char** argv) {
 			} else if (form == "draw") {
 				vkCmdDrawIndirect(cb, work.buffer, kArgsOffset, scenarioName == "single" ? 1 : 2, kStride);
 			} else if (form == "indexed") {
-				vkCmdDrawIndexedIndirect(cb, work.buffer, kArgsOffset, 2, kStride);
+				vkCmdDrawIndexedIndirect(cb, work.buffer, kArgsOffset, scenarioName == "single" ? 1 : 2, kStride);
 			} else if (form == "draw-count") {
-				vkCmdDrawIndirectCountKHR(cb, work.buffer, kArgsOffset, work.buffer, kCountOffset, 2, kStride);
+				vkCmdDrawIndirectCountKHR(cb, work.buffer, kArgsOffset, work.buffer, kCountOffset, scenarioName == "single" ? 1 : 2, kStride);
 			} else {
-				vkCmdDrawIndexedIndirectCountKHR(cb, work.buffer, kArgsOffset, work.buffer, kCountOffset, 2, kStride);
+				vkCmdDrawIndexedIndirectCountKHR(cb, work.buffer, kArgsOffset, work.buffer, kCountOffset, scenarioName == "single" ? 1 : 2, kStride);
 			}
 			if (withTES && !tesFirst) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, tessPipeline); vkCmdDraw(cb, 6, 1, 0, 0); }
 			vkCmdEndRenderPass(cb);
