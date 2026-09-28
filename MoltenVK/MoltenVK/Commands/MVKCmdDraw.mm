@@ -216,8 +216,9 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 			if (!widenState || !widenState.maxTotalThreadsPerThreadgroup || !widenState.threadExecutionWidth) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "raw uint8 index conversion is unavailable."); return; }
 		}
 		if (!captureState || !captureState.maxTotalThreadsPerThreadgroup || !captureState.threadExecutionWidth) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "indexed compute capture pipeline is unavailable."); return; }
-		if (const char* error = cmdEncoder->getIndexedPerVertexAttachmentError()) { reject(VK_ERROR_FEATURE_NOT_PRESENT, error); return; }
 	}
+	// Both captures end the render encoder: compute for indexed draws, a render pass boundary for nonindexed ones.
+	if (const char* error = cmdEncoder->getIndexedPerVertexAttachmentError()) { reject(VK_ERROR_FEATURE_NOT_PRESENT, error); return; }
 	const auto& layout = pipeline->getPerVertexCapturedLayout();
 	auto topology = pipeline->getVkPrimitiveTopology();
 	bool provokingLast = cmdEncoder->getVkGraphics().getProvokingVertexMode();

@@ -485,15 +485,15 @@ VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t in
 	bool dynamicRestart = indexed && _recordedPerVertexPipeline->getDynamicStateFlags().has(MVKRenderStateFlag::PrimitiveRestartEnable);
 	bool restart = mvkPerVertexRequiresRestartAssembly(indexed, dynamicRestart || _recordedPerVertexPipeline->getStaticStateData().enable.has(MVKRenderStateEnableFlag::PrimitiveRestart));
 	if (restart && !mvkCanAssemblePerVertexRestart(vertexCount, instanceCount, getMetalFeatures().indirectDrawing)) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR restart requires indirect drawing and uint32 dense capture record IDs."); }
-	if (indexed) {
-		if (!mvkPerVertexIndexSize(_recordedIndexType)) {
-			return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed capture requires uint8, uint16 or uint32 indices.");
-		}
-		// A secondary may omit its framebuffer or inherit an imageless one. Revalidate in every primary.
-		if (_doesContinueRenderPass) { _needsInheritedPerVertexAttachments = true; }
-		VkResult result = validateIndexedPerVertexAttachments();
-		if (result != VK_SUCCESS) { return result; }
+	if (indexed && !mvkPerVertexIndexSize(_recordedIndexType)) {
+		return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indexed capture requires uint8, uint16 or uint32 indices.");
 	}
+	// Indexed capture runs in compute, and a render pass boundary separates a nonindexed capture from its replay:
+	// either ends and restarts the render encoder. A secondary may omit its framebuffer or inherit an imageless one.
+	// Revalidate in every primary.
+	if (_doesContinueRenderPass) { _needsInheritedPerVertexAttachments = true; }
+	VkResult result = validateIndexedPerVertexAttachments();
+	if (result != VK_SUCCESS) { return result; }
 	auto topology = _recordedPerVertexPipeline->getVkPrimitiveTopology();
 	uint64_t indexScratchBytes = restart ? mvkPerVertexRestartIndexScratchSize(vertexCount) : indexed && _recordedIndexType == VK_INDEX_TYPE_UINT8 ? uint64_t(vertexCount) * sizeof(uint16_t) : 0;
 	if (indexScratchBytes > getMetalFeatures().maxMTLBufferSize) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR index scratch buffer exceeds Metal limits."); }
