@@ -35,6 +35,8 @@ compile vulkan1.1 "$tests/pervertex-indirect.vert" "$shaders/indirect/indirect.v
 compile vulkan1.1 "$tests/pervertex-indirect.vert" "$shaders/indirect/reference.vert.spv" -DREFERENCE
 compile vulkan1.1 "$tests/pervertex-indirect.frag" "$shaders/indirect/pervertex.frag.spv"
 compile vulkan1.1 "$tests/pervertex-indirect.frag" "$shaders/indirect/pervertex-swap.frag.spv" -DSWAP
+compile vulkan1.1 "$tests/pervertex-indirect.frag" "$shaders/indirect/pervertex-portable.frag.spv" -DPORTABLE
+compile vulkan1.1 "$tests/pervertex-indirect.frag" "$shaders/indirect/pervertex-portable-swap.frag.spv" -DPORTABLE -DSWAP
 compile vulkan1.1 "$tests/pervertex-indirect-args.comp" "$shaders/indirect/args.comp.spv"
 T=$tests/PerVertexTES
 compile vulkan1.1 "$T/triangle.vert" "$shaders/indirect/tes-triangle.vert.spv"

@@ -30,8 +30,12 @@ struct TrialCase {
 	const char* pattern;                // must appear in the case log
 };
 
+// Continuation cases read BaryCoordKHR as well (PERVERTEX_TEST_PORTABLE), so that every GPU takes the portable capture
+// and replay, whose continuation and losses they check; native vertex_value draws legal commands instead.
 const std::vector<std::string> kContinuation = {"PERVERTEX_TEST_SPLIT_PRODUCER=1", "PERVERTEX_TEST_LATE_SIGNAL=1",
-	"PERVERTEX_TEST_DEPENDENT_SUBMISSION=1", "PERVERTEX_TEST_WAIT_IDLE=1"};
+	"PERVERTEX_TEST_DEPENDENT_SUBMISSION=1", "PERVERTEX_TEST_WAIT_IDLE=1", "PERVERTEX_TEST_PORTABLE=1"};
+// Plain PerVertexKHR, native on Apple10 with MSL 4.0: Vulkan allows repeated vertex shader invocations there.
+const std::vector<std::string> kMaybeNative = {"PERVERTEX_TEST_ALLOW_REPEATED_INVOCATIONS=1"};
 
 std::vector<std::string> with(std::vector<std::string> base, std::initializer_list<const char*> extra) {
 	base.insert(base.end(), extra.begin(), extra.end());
@@ -42,14 +46,18 @@ std::vector<TrialCase> cases() {
 	return {
 		// The public library closes VK_KHR_fragment_shader_barycentric and VK_EXT_mesh_shader on every platform.
 		{"public-gate-closed", true, {"no-adapter"}, {}, 0, "^MESH_DRAW PASS"},
-		// PerVertexKHR through Vulkan. On Apple10 with MSL 4.0 these triangle pipelines use native vertex_value;
-		// elsewhere the portable capture and replay. The single draws are checked against an independent CPU oracle.
-		{"pervertex-single-draw", false, {"draw", "u32", "single", "compute", "@PREFIX@"}, {}, 0, "^PERVERTEX_INDIRECT PASS"},
-		{"pervertex-single-indexed", false, {"indexed", "u32", "single", "compute", "@PREFIX@"}, {}, 0, "^PERVERTEX_INDIRECT PASS"},
-		{"pervertex-decisive-draw-count", false, {"draw-count", "u32", "decisive", "compute", "@PREFIX@"}, {}, 0, "^PERVERTEX_INDIRECT PASS"},
-		{"pervertex-restart-strip", false, {"indexed-count", "u16", "restart", "compute", "@PREFIX@"}, {}, 0, "^PERVERTEX_INDIRECT PASS"},
+		// Plain PerVertexKHR through Vulkan: on Apple10 with MSL 4.0 these triangle pipelines use native vertex_value,
+		// elsewhere the portable capture and replay. Single draws are checked against an independent CPU oracle.
+		{"pervertex-single-draw", false, {"draw", "u32", "single", "compute", "@PREFIX@"}, kMaybeNative, 0, "^PERVERTEX_INDIRECT PASS"},
+		{"pervertex-single-indexed", false, {"indexed", "u32", "single", "compute", "@PREFIX@"}, kMaybeNative, 0, "^PERVERTEX_INDIRECT PASS"},
+		{"pervertex-decisive-draw-count", false, {"draw-count", "u32", "decisive", "compute", "@PREFIX@"}, kMaybeNative, 0, "^PERVERTEX_INDIRECT PASS"},
+		{"pervertex-restart-strip", false, {"indexed-count", "u16", "restart", "compute", "@PREFIX@"}, kMaybeNative, 0, "^PERVERTEX_INDIRECT PASS"},
 		// Negative control: permuted corners must no longer match (exit 2 with differing pixels).
-		{"pervertex-swap-negative", false, {"draw", "u32", "single", "compute", "@PREFIX@"}, {"PERVERTEX_TEST_SWAP_FRAGMENT=1"}, 2, "pixel_mismatches=[1-9]"},
+		{"pervertex-swap-negative", false, {"draw", "u32", "single", "compute", "@PREFIX@"}, with(kMaybeNative, {"PERVERTEX_TEST_SWAP_FRAGMENT=1"}), 2, "pixel_mismatches=[1-9]"},
+		// The same with BaryCoordKHR also read: the portable capture and replay on every GPU, exact invocations.
+		{"portable-single-draw", false, {"draw", "u32", "single", "compute", "@PREFIX@"}, {"PERVERTEX_TEST_PORTABLE=1"}, 0, "^PERVERTEX_INDIRECT PASS"},
+		{"portable-restart-strip", false, {"indexed-count", "u16", "restart", "compute", "@PREFIX@"}, {"PERVERTEX_TEST_PORTABLE=1"}, 0, "^PERVERTEX_INDIRECT PASS"},
+		{"portable-swap-negative", false, {"draw", "u32", "single", "compute", "@PREFIX@"}, {"PERVERTEX_TEST_PORTABLE=1", "PERVERTEX_TEST_SWAP_FRAGMENT=1"}, 2, "pixel_mismatches=[1-9]"},
 		// Continuation: arguments produced on another queue after a late host signal, a dependent submission C and
 		// vkQueueWaitIdle. Legal draws render; lost draws lose the device and C never reports success.
 		{"continuation-legal-same-queue", false, {"draw", "u32", "single", "compute", "@PREFIX@"}, with(kContinuation, {"PERVERTEX_TEST_DEPENDENT_SAME_QUEUE=1"}), 0, "^PERVERTEX_INDIRECT PASS"},
@@ -203,8 +211,12 @@ NSDictionary* deviceInfo() {
 		progress([NSString stringWithFormat:@"%@ %@ (exit %d)", verdict, name, rc]);
 	}
 
+	// Metal announces its validation once per process, in the first case that creates a device.
+	bool validation = false;
+	for (NSDictionary* result in results) { validation |= [result[@"validation_announced"] boolValue]; }
 	NSDictionary* report = @{
-		@"format": @"PerVertexVulkanTrial 1",
+		@"format": @"PerVertexVulkanTrial 2",
+		@"metal_validation_announced": @(validation),
 		@"started_utc": started,
 		@"device": deviceInfo(),
 		@"interrupted_previous_runs": interrupted,
