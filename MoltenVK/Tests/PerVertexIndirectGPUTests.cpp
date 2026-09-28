@@ -117,6 +117,7 @@ int main(int argc, char** argv) {
 		const bool lateSignal = getenv("PERVERTEX_TEST_LATE_SIGNAL") != nullptr;
 		const bool dependentSubmission = getenv("PERVERTEX_TEST_DEPENDENT_SUBMISSION") != nullptr;
 		const bool dependentSameQueue = getenv("PERVERTEX_TEST_DEPENDENT_SAME_QUEUE") != nullptr;
+		const bool waitIdleProbe = getenv("PERVERTEX_TEST_WAIT_IDLE") != nullptr;
 		if (dependentSubmission && (!splitProducer || !lateSignal)) throw std::runtime_error("dependent submission requires split producer and late signal");
 		if (dependentSameQueue && !dependentSubmission) throw std::runtime_error("same-queue dependent submission requires dependent submission");
 		const bool indexed = form == "indexed" || form == "indexed-count";
@@ -725,6 +726,13 @@ int main(int argc, char** argv) {
 				memcpy(&r.dependentMarkerValue, dependentMarker.data, sizeof(uint32_t));
 				std::printf("dependent wait=%d fence status=%d marker=%08x\n", r.dependentWait, vkGetFenceStatus(d.device, dependentFence), r.dependentMarkerValue);
 				if (r.wait == VK_SUCCESS && (r.dependentWait != VK_SUCCESS || r.dependentMarkerValue != 0xA55A5AA5)) throw std::runtime_error("Dependent submission did not complete after the indirect draw");
+			}
+			if (waitIdleProbe && split) {
+				VkResult expectedIdle = r.wait == VK_SUCCESS ? VK_SUCCESS : VK_ERROR_DEVICE_LOST;
+				VkResult drawIdle = vkQueueWaitIdle(d.queue);
+				VkResult producerIdle = vkQueueWaitIdle(d.producerQueue);
+				std::printf("queue idle after indirect draw: draw=%d producer=%d expected=%d\n", drawIdle, producerIdle, expectedIdle);
+				if (drawIdle != expectedIdle || producerIdle != expectedIdle) throw std::runtime_error("Queue retirement did not match the indirect outcome");
 			}
 			r.image.assign(readback.data, readback.data + readback.size);
 			memcpy(&r.invocations, effects.data, 4);
