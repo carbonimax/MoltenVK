@@ -1186,7 +1186,9 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	id<MTLBuffer> gathered = scratch->buffers[5] ?: plan;
 	const auto& replay = pipeline->getPerVertexReplayBinding();
 	const auto& fragment = pipeline->getPerVertexInputBinding();
-	for (uint32_t draw = 0; draw < drawCount; ++draw) {
+	// Only the draws the GPU froze (Count, clamped to maxDrawCount): mvkSizePerVertexIndirectReplay checked the word.
+	uint32_t frozenDraws = std::min(((const uint32_t*)plan.contents)[56], drawCount);
+	for (uint32_t draw = 0; draw < frozenDraws; ++draw) {
 		params[11] = draw;
 		// Plan this draw, build its replay tables and gather its indices from the frozen arguments.
 		cmdEncoder->encodeStoreActions(true);
