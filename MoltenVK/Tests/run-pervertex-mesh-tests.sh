@@ -120,7 +120,7 @@ run() { # library scenario
 	if [[ $verdict != PASS ]]; then echo "STOP: inspect $log before any further GPU work"; exit 1; fi
 }
 for scenario in draw grid twice pervertex pervertex-swapped pervertex-permuted pervertex-block-output barycentric barycentric-permuted pervertex-consistency \
-	$(for form in $forms grid; do echo "form-$form"; done) resource-bda resource-bda-other reject-task reject-descriptor reject-per-primitive reject-pervertex-block reject-pervertex-matrix reject-specialization reject-indirect \
+	$(for form in $forms grid; do echo "form-$form"; done) resource-bda resource-bda-other reject-task reject-descriptor reject-per-primitive reject-pervertex-block reject-pervertex-matrix reject-specialization reject-indirect reject-grid-limit \
 	reject-draw-id reject-draw-id-uint reject-buffer-address no-adapter; do run dev "$scenario"; done
 run shipping public-device-gate
 rm -f "$output"/runs/*.rgba
