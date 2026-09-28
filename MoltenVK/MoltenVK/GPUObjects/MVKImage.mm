@@ -448,7 +448,10 @@ void MVKImagePlane::pullFromDeviceOnCompletion(MVKCommandEncoder* cmdEncoder,
 											   const MVKMappedMemoryRange& mappedRange) {
 
 	cmdEncoder->getDevice()->addMTLCommandBufferHandler(cmdEncoder->_mtlCmdBuffer, ^(id<MTLCommandBuffer> mcb) {
-		getMTLTextureContent(subresource, mappedRange.offset, mappedRange.size);
+		// An abandoned command buffer never wrote the subresource.
+		if (mcb.status != MTLCommandBufferStatusNotEnqueued) {
+			getMTLTextureContent(subresource, mappedRange.offset, mappedRange.size);
+		}
 	});
 }
 

@@ -396,14 +396,11 @@ uint32_t MVKCommandBuffer::getViewMask() const {
 
 void MVKCommandBuffer::clearPrefilledMTLCommandBuffer() {
 
-	// Metal command buffers do not return to their pool on release, nor do they support the
-	// concept of a reset. In order to become available again in their pool, they must pass
-	// through the commit step. This is unfortunate because if the app adds commands to this
-	// command buffer and then chooses to reset it instead of submit it, we risk committing
-	// a prefilled Metal command buffer that the app did not intend to submit, potentially
-	// causing unexpected side effects. But unfortunately there is nothing else we can do.
+	// A prefilled Metal command buffer that was never submitted is released without being committed: Metal then
+	// discards the commands the application abandoned, and frees its place in its queue, which an enqueued command
+	// buffer would keep. Its handlers run now, as cleanup, while the pools they return buffers to still exist.
 	if (_prefilledMTLCmdBuffer && _prefilledMTLCmdBuffer.status == MTLCommandBufferStatusNotEnqueued) {
-		getDevice()->commitMTLCommandBuffer(_prefilledMTLCmdBuffer);
+		getDevice()->abandonMTLCommandBuffer(_prefilledMTLCmdBuffer);
 	}
 
 	[_prefilledMTLCmdBuffer release];
@@ -1711,8 +1708,11 @@ void MVKCommandEncoder::finishQueries() {
         return;
     }
     getDevice()->addMTLCommandBufferHandler(_mtlCmdBuffer, ^(id<MTLCommandBuffer> mtlCmdBuff) {
-        for (auto& qryPair : *pAQs) {
-            qryPair.first->finishQueries(qryPair.second.contents());
+        // An abandoned command buffer never ran its queries.
+        if (mtlCmdBuff.status != MTLCommandBufferStatusNotEnqueued) {
+            for (auto& qryPair : *pAQs) {
+                qryPair.first->finishQueries(qryPair.second.contents());
+            }
         }
         delete pAQs;
     });
