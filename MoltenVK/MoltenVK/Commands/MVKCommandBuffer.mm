@@ -814,7 +814,10 @@ MVKPerVertexScratch* MVKCommandEncoder::nextPerVertexScratch() {
 	size_t first = _pEncodingContext->nextPerVertexScratch;
 	uint32_t passCount = std::max(getSubpass()->getMultiviewMetalPassCount(), 1u);
 	if (!reservations || first > reservations->size() || passCount > reservations->size() - first || _multiviewPassIndex >= passCount) {
+		// The draw cannot be encoded: lose the device rather than complete the submission without it.
 		_cmdBuffer->setConfigurationResult(_cmdBuffer->reportError(VK_ERROR_INITIALIZATION_FAILED, "Portable PerVertexKHR draw has no scratch reservation."));
+		getDevice()->markLost();
+		stopEncoding();
 		return nullptr;
 	}
 	_lastPerVertexScratch = (*reservations)[first + _multiviewPassIndex];
