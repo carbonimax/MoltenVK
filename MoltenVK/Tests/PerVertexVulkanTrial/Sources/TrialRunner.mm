@@ -18,13 +18,16 @@
 
 extern "C" int pervertexIndirectMain(int argc, char** argv);
 extern "C" int pervertexMeshMain(int argc, char** argv);
+extern "C" int pervertexBarrierMain(int argc, char** argv);
 
 namespace {
 
+enum Fixture { kIndirect, kMesh, kBarrier };  // PerVertexKHR indirect, mesh-draw, Metal-only barrier reproducer
+
 struct TrialCase {
 	const char* name;
-	bool mesh;                          // mesh-draw fixture, otherwise the indirect PerVertexKHR fixture
-	std::vector<std::string> args;      // after the shader directory; @PREFIX@ is the case's output prefix
+	Fixture fixture;
+	std::vector<std::string> args;      // after the shader directory (none for kBarrier); @PREFIX@ is the case's output prefix
 	std::vector<std::string> env;       // NAME=VALUE, set for this case only
 	int expectedExit;
 	const char* pattern;                // must appear in the case log
@@ -45,34 +48,45 @@ std::vector<std::string> with(std::vector<std::string> base, std::initializer_li
 std::vector<TrialCase> cases() {
 	return {
 		// The public library closes VK_KHR_fragment_shader_barycentric and VK_EXT_mesh_shader on every platform.
-		{"public-gate-closed", true, {"no-adapter"}, {}, 0, "^MESH_DRAW PASS"},
+		{"public-gate-closed", kMesh, {"no-adapter"}, {}, 0, "^MESH_DRAW PASS"},
 		// Plain PerVertexKHR through Vulkan: on Apple10 with MSL 4.0 these triangle pipelines use native vertex_value,
 		// elsewhere the portable capture and replay. Single draws are checked against an independent CPU oracle.
-		{"pervertex-single-draw", false, {"draw", "u32", "single", "compute", "@PREFIX@"}, kMaybeNative, 0, "^PERVERTEX_INDIRECT PASS"},
-		{"pervertex-single-indexed", false, {"indexed", "u32", "single", "compute", "@PREFIX@"}, kMaybeNative, 0, "^PERVERTEX_INDIRECT PASS"},
-		{"pervertex-decisive-draw-count", false, {"draw-count", "u32", "decisive", "compute", "@PREFIX@"}, kMaybeNative, 0, "^PERVERTEX_INDIRECT PASS"},
-		{"pervertex-restart-strip", false, {"indexed-count", "u16", "restart", "compute", "@PREFIX@"}, kMaybeNative, 0, "^PERVERTEX_INDIRECT PASS"},
+		{"pervertex-single-draw", kIndirect, {"draw", "u32", "single", "compute", "@PREFIX@"}, kMaybeNative, 0, "^PERVERTEX_INDIRECT PASS"},
+		{"pervertex-single-indexed", kIndirect, {"indexed", "u32", "single", "compute", "@PREFIX@"}, kMaybeNative, 0, "^PERVERTEX_INDIRECT PASS"},
+		{"pervertex-decisive-draw-count", kIndirect, {"draw-count", "u32", "decisive", "compute", "@PREFIX@"}, kMaybeNative, 0, "^PERVERTEX_INDIRECT PASS"},
+		{"pervertex-restart-strip", kIndirect, {"indexed-count", "u16", "restart", "compute", "@PREFIX@"}, kMaybeNative, 0, "^PERVERTEX_INDIRECT PASS"},
 		// Negative control: permuted corners must no longer match (exit 2 with differing pixels).
-		{"pervertex-swap-negative", false, {"draw", "u32", "single", "compute", "@PREFIX@"}, with(kMaybeNative, {"PERVERTEX_TEST_SWAP_FRAGMENT=1"}), 2, "pixel_mismatches=[1-9]"},
+		{"pervertex-swap-negative", kIndirect, {"draw", "u32", "single", "compute", "@PREFIX@"}, with(kMaybeNative, {"PERVERTEX_TEST_SWAP_FRAGMENT=1"}), 2, "pixel_mismatches=[1-9]"},
 		// The same with BaryCoordKHR also read: the portable capture and replay on every GPU, exact invocations.
-		{"portable-single-draw", false, {"draw", "u32", "single", "compute", "@PREFIX@"}, {"PERVERTEX_TEST_PORTABLE=1"}, 0, "^PERVERTEX_INDIRECT PASS"},
-		{"portable-restart-strip", false, {"indexed-count", "u16", "restart", "compute", "@PREFIX@"}, {"PERVERTEX_TEST_PORTABLE=1"}, 0, "^PERVERTEX_INDIRECT PASS"},
-		{"portable-swap-negative", false, {"draw", "u32", "single", "compute", "@PREFIX@"}, {"PERVERTEX_TEST_PORTABLE=1", "PERVERTEX_TEST_SWAP_FRAGMENT=1"}, 2, "pixel_mismatches=[1-9]"},
+		{"portable-single-draw", kIndirect, {"draw", "u32", "single", "compute", "@PREFIX@"}, {"PERVERTEX_TEST_PORTABLE=1"}, 0, "^PERVERTEX_INDIRECT PASS"},
+		{"portable-restart-strip", kIndirect, {"indexed-count", "u16", "restart", "compute", "@PREFIX@"}, {"PERVERTEX_TEST_PORTABLE=1"}, 0, "^PERVERTEX_INDIRECT PASS"},
+		{"portable-swap-negative", kIndirect, {"draw", "u32", "single", "compute", "@PREFIX@"}, {"PERVERTEX_TEST_PORTABLE=1", "PERVERTEX_TEST_SWAP_FRAGMENT=1"}, 2, "pixel_mismatches=[1-9]"},
 		// Continuation: arguments produced on another queue after a late host signal, a dependent submission C and
 		// vkQueueWaitIdle. Legal draws render; lost draws lose the device and C never reports success.
-		{"continuation-legal-same-queue", false, {"draw", "u32", "single", "compute", "@PREFIX@"}, with(kContinuation, {"PERVERTEX_TEST_DEPENDENT_SAME_QUEUE=1"}), 0, "^PERVERTEX_INDIRECT PASS"},
-		{"continuation-restart-cross-queue", false, {"indexed-count", "u16", "restart-two", "compute", "@PREFIX@"}, with(kContinuation, {"PERVERTEX_TEST_DEPENDENT_FIRST=1"}), 0, "^PERVERTEX_INDIRECT PASS"},
-		{"continuation-huge-loss", false, {"indexed-count", "u32", "huge", "compute", "@PREFIX@"}, with(kContinuation, {"PERVERTEX_TEST_DEPENDENT_FIRST=1"}), 0, "^PERVERTEX_INDIRECT PASS"},
-		{"continuation-index-oob-loss", false, {"indexed", "u32", "index-oob", "compute", "@PREFIX@"}, with(kContinuation, {"PERVERTEX_TEST_DEPENDENT_SAME_QUEUE=1"}), 0, "^PERVERTEX_INDIRECT PASS"},
+		{"continuation-legal-same-queue", kIndirect, {"draw", "u32", "single", "compute", "@PREFIX@"}, with(kContinuation, {"PERVERTEX_TEST_DEPENDENT_SAME_QUEUE=1"}), 0, "^PERVERTEX_INDIRECT PASS"},
+		{"continuation-restart-cross-queue", kIndirect, {"indexed-count", "u16", "restart-two", "compute", "@PREFIX@"}, with(kContinuation, {"PERVERTEX_TEST_DEPENDENT_FIRST=1"}), 0, "^PERVERTEX_INDIRECT PASS"},
+		{"continuation-huge-loss", kIndirect, {"indexed-count", "u32", "huge", "compute", "@PREFIX@"}, with(kContinuation, {"PERVERTEX_TEST_DEPENDENT_FIRST=1"}), 0, "^PERVERTEX_INDIRECT PASS"},
+		{"continuation-index-oob-loss", kIndirect, {"indexed", "u32", "index-oob", "compute", "@PREFIX@"}, with(kContinuation, {"PERVERTEX_TEST_DEPENDENT_SAME_QUEUE=1"}), 0, "^PERVERTEX_INDIRECT PASS"},
 		// PerVertex TES (test-only admission) with an indirect draw in one command buffer; level 4 must lose the device.
-		{"tes-after-indirect", false, {"draw", "u32", "single", "compute", "@PREFIX@"}, with(kContinuation, {"PERVERTEX_TEST_DEPENDENT_SAME_QUEUE=1", "PERVERTEX_TEST_INCLUDE_TES=1"}), 0, "^PERVERTEX_INDIRECT PASS"},
-		{"tes-level4-loss", false, {"draw", "u32", "single", "compute", "@PREFIX@"}, with(kContinuation, {"PERVERTEX_TEST_DEPENDENT_SAME_QUEUE=1", "PERVERTEX_TEST_INCLUDE_TES=1", "PERVERTEX_TEST_TES_FIRST=1", "PERVERTEX_TEST_TES_LEVEL4=1"}), 0, "^PERVERTEX_INDIRECT PASS"},
+		{"tes-after-indirect", kIndirect, {"draw", "u32", "single", "compute", "@PREFIX@"}, with(kContinuation, {"PERVERTEX_TEST_DEPENDENT_SAME_QUEUE=1", "PERVERTEX_TEST_INCLUDE_TES=1"}), 0, "^PERVERTEX_INDIRECT PASS"},
+		{"tes-level4-loss", kIndirect, {"draw", "u32", "single", "compute", "@PREFIX@"}, with(kContinuation, {"PERVERTEX_TEST_DEPENDENT_SAME_QUEUE=1", "PERVERTEX_TEST_INCLUDE_TES=1", "PERVERTEX_TEST_TES_FIRST=1", "PERVERTEX_TEST_TES_LEVEL4=1"}), 0, "^PERVERTEX_INDIRECT PASS"},
 		// Mesh through the test adapter (Metal 3 GPUs).
-		{"mesh-draw", true, {"draw"}, {}, 0, "^MESH_DRAW PASS"},
-		{"mesh-pervertex", true, {"pervertex"}, {}, 0, "^MESH_DRAW PASS"},
-		{"mesh-form-mixed", true, {"form-mixed"}, {}, 0, "^MESH_DRAW PASS"},
-		{"mesh-grid-limit", true, {"reject-grid-limit"}, {}, 0, "^MESH_DRAW PASS"},
+		{"mesh-draw", kMesh, {"draw"}, {}, 0, "^MESH_DRAW PASS"},
+		{"mesh-pervertex", kMesh, {"pervertex"}, {}, 0, "^MESH_DRAW PASS"},
+		{"mesh-form-mixed", kMesh, {"form-mixed"}, {}, 0, "^MESH_DRAW PASS"},
+		{"mesh-grid-limit", kMesh, {"reject-grid-limit"}, {}, 0, "^MESH_DRAW PASS"},
 	};
+}
+
+// TRIAL_SUITE=metal-barrier: the Metal-only reproducer of the in-pass capture/replay barrier (PerVertexBarrierRepro).
+// A barrier variant fails when the replay did not see the capture's records, which the Metal contract promises.
+std::vector<TrialCase> barrierCases() {
+	std::vector<TrialCase> list;
+	for (const char* variant : {"barrier", "barrier-indirect", "split", "none", "barrier-raster", "barrier-shared", "barrier-resources", "barrier-v2v"}) {
+		list.push_back({variant, kBarrier, {variant}, {}, 0, "^BARRIER_REPRO PASS"});
+	}
+	list.push_back({"cost", kBarrier, {"cost"}, {}, 0, "^BARRIER_COST PASS"});
+	return list;
 }
 
 NSString* json(id object) {
@@ -160,10 +174,13 @@ NSDictionary* deviceInfo() {
 	NSString* shaders = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"Shaders"];
 	NSMutableArray* results = [NSMutableArray array];
 	int pass = 0, fail = 0, skipped = 0;
-	for (const TrialCase& trial : cases()) {
+	const char* suite = getenv("TRIAL_SUITE");
+	bool barrier = suite && !strcmp(suite, "metal-barrier");
+	for (const TrialCase& trial : barrier ? barrierCases() : cases()) {
 		NSString* name = @(trial.name);
 		NSString* log = [run stringByAppendingPathComponent:[name stringByAppendingPathExtension:@"log"]];
-		std::vector<std::string> args = {trial.mesh ? "mesh-draw" : "pervertex-indirect-gpu", std::string(shaders.UTF8String) + (trial.mesh ? "/mesh" : "/indirect")};
+		std::vector<std::string> args = {trial.fixture == kMesh ? "mesh-draw" : trial.fixture == kBarrier ? "pervertex-barrier-repro" : "pervertex-indirect-gpu"};
+		if (trial.fixture != kBarrier) { args.push_back(std::string(shaders.UTF8String) + (trial.fixture == kMesh ? "/mesh" : "/indirect")); }
 		for (const auto& arg : trial.args) { args.push_back(arg == "@PREFIX@" ? std::string([run stringByAppendingPathComponent:name].UTF8String) : arg); }
 		std::vector<char*> argv;
 		for (auto& arg : args) { argv.push_back(arg.data()); }
@@ -178,7 +195,8 @@ NSDictionary* deviceInfo() {
 		dup2(output, STDOUT_FILENO);
 		dup2(output, STDERR_FILENO);
 		NSDate* begin = NSDate.date;
-		int rc = trial.mesh ? pervertexMeshMain(int(argv.size() - 1), argv.data()) : pervertexIndirectMain(int(argv.size() - 1), argv.data());
+		int (*entry)(int, char**) = trial.fixture == kMesh ? pervertexMeshMain : trial.fixture == kBarrier ? pervertexBarrierMain : pervertexIndirectMain;
+		int rc = entry(int(argv.size() - 1), argv.data());
 		double seconds = -begin.timeIntervalSinceNow;
 		fflush(stdout);
 		fflush(stderr);
@@ -202,7 +220,7 @@ NSDictionary* deviceInfo() {
 		// The lines that carry the fixture's own checks.
 		NSMutableArray* lines = [NSMutableArray array];
 		for (NSString* line in [@(text.c_str()) componentsSeparatedByString:@"\n"]) {
-			if ([line hasPrefix:@"PERVERTEX_INDIRECT"] || [line hasPrefix:@"MESH_DRAW"] || [line hasPrefix:@"submission="] || [line hasPrefix:@"dependent wait"] ||
+			if ([line hasPrefix:@"PERVERTEX_INDIRECT"] || [line hasPrefix:@"MESH_DRAW"] || [line hasPrefix:@"BARRIER_"] || [line hasPrefix:@"submission="] || [line hasPrefix:@"dependent wait"] ||
 				[line hasPrefix:@"queue idle"] || [line hasPrefix:@"  sample"] || [line hasPrefix:@"[mvk-error]"] || [line hasPrefix:@"DEVICE="] || [line hasPrefix:@"VK_EXT"] ||
 				[line hasPrefix:@"ERROR"]) { [lines addObject:line]; }
 		}
@@ -216,6 +234,7 @@ NSDictionary* deviceInfo() {
 	for (NSDictionary* result in results) { validation |= [result[@"validation_announced"] boolValue]; }
 	NSDictionary* report = @{
 		@"format": @"PerVertexVulkanTrial 2",
+		@"suite": barrier ? @"metal-barrier" : @"vulkan",
 		@"metal_validation_announced": @(validation),
 		@"started_utc": started,
 		@"device": deviceInfo(),
