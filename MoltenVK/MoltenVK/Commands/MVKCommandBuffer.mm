@@ -509,7 +509,7 @@ static uint64_t mvkPerVertexIndirectRecordCapacity() {
 	return capacity < 1 ? 0 : capacity > UINT32_MAX ? UINT32_MAX : uint64_t(capacity);
 }
 
-VkResult MVKCommandBuffer::recordPerVertexIndirectDraw(bool indexed) {
+VkResult MVKCommandBuffer::recordPerVertexIndirectDraw(bool indexed, uint32_t drawCount) {
 	if (!_recordedPerVertexPipeline) { return VK_SUCCESS; }
 	auto* pipeline = _recordedPerVertexPipeline;
 	if (pipeline->getZeroDivisorVertexBindings().size()) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indirect draws do not support zero-divisor vertex bindings yet."); }
@@ -536,7 +536,10 @@ VkResult MVKCommandBuffer::recordPerVertexIndirectDraw(bool indexed) {
 	MVKPerVertexScratchRequest request = {NSUInteger(capacity * stride), NSUInteger(occurrences * 2 * sizeof(uint32_t)), NSUInteger(primitives * 3 * sizeof(uint32_t)), pipeline->usesPortableBarycentrics() ? NSUInteger(occurrences * sizeof(uint32_t)) : 0, NSUInteger(indexBytes), restart};
 	request.indirectCapacity = uint32_t(capacity);
 	// Plan words, then one 256-byte perVertexRestart parameter block per dispatch.
-	request.planSize = 1024 + (restart ? (mvkPerVertexIndirectRestartScanSteps(uint32_t(capacity)) + 3) * 256 : 0);
+	uint64_t basePlanSize = 1024 + (restart ? (mvkPerVertexIndirectRestartScanSteps(uint32_t(capacity)) + 3) * 256 : 0);
+	uint64_t planSize = basePlanSize + (drawCount > 1 ? uint64_t(drawCount) * 5 * sizeof(uint32_t) : 0);
+	if (planSize > getMetalFeatures().maxMTLBufferSize) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR indirect argument snapshot exceeds Metal buffer limits."); }
+	request.planSize = NSUInteger(planSize);
 	// Capacity counts physical records, so every multiview pass reserves the same bounded scratch.
 	uint32_t passCount = std::max(getDevice()->getMultiviewMetalPassCount(getViewMask()), 1u);
 	size_t firstRequest = _perVertexScratchRequests.size();

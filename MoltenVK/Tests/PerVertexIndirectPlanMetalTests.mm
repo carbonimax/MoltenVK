@@ -1,6 +1,6 @@
 // Copyright 2026 Jean-Philippe Meunier
 // SPDX-License-Identifier: Apache-2.0
-// Runs the production Metal helper and checks one-draw arguments and Count snapshots across phases.
+// Runs the production Metal helper and checks argument and Count snapshots across phases.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <array>
@@ -29,17 +29,17 @@ int main(int argc, char** argv) {
         require(function != nil, "perVertexIndirect function");
         id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:function error:&error];
         require(pipeline != nil, error ? error.localizedDescription.UTF8String : "Metal pipeline");
-        auto run = [&](std::array<uint32_t, 5> command, uint32_t indexBytes, uint32_t views, uint32_t capacity, bool counted, uint32_t count, bool resumeAfterMutation = false, bool secondDraw = false) {
+        auto run = [&](std::array<uint32_t, 5> command, uint32_t indexBytes, uint32_t views, uint32_t capacity, bool counted, uint32_t count, bool resumeAfterMutation = false, bool secondDraw = false, bool mutateSecond = false) {
             id<MTLBuffer> args = [device newBufferWithLength:secondDraw ? 64 : 32 options:MTLResourceStorageModeShared];
             id<MTLBuffer> counts = [device newBufferWithLength:4 options:MTLResourceStorageModeShared];
-            id<MTLBuffer> plan = [device newBufferWithLength:1024 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> plan = [device newBufferWithLength:secondDraw ? 1064 : 1024 options:MTLResourceStorageModeShared];
             require(args && counts && plan, "Metal buffers");
             std::memset(args.contents, 0, args.length);
             std::memcpy(args.contents, command.data(), command.size() * sizeof(uint32_t));
-            if (secondDraw) { uint32_t second[4] = {9, 1, 0, 0}; std::memcpy(static_cast<uint8_t*>(args.contents) + 32, second, sizeof(second)); }
+            if (secondDraw) { uint32_t second[5] = {9, 1, indexBytes ? 3u : 0u, indexBytes ? uint32_t(-4) : 0u, indexBytes ? 7u : 0u}; std::memcpy(static_cast<uint8_t*>(args.contents) + 32, second, sizeof(second)); }
             std::memcpy(counts.contents, &count, sizeof(count));
             std::memset(plan.contents, 0, plan.length);
-            uint32_t params[18] = {secondDraw ? 2u : 1u, 32, indexBytes, UINT32_MAX, 1, capacity, views, 3, 0, 0, uint32_t(counted), secondDraw ? 1u : 0u, 7, 5, 3, 0, 0, 0};
+            uint32_t params[19] = {secondDraw ? 2u : 1u, 32, indexBytes, UINT32_MAX, 1, capacity, views, 3, 0, 0, uint32_t(counted), secondDraw ? 1u : 0u, 7, 5, 3, 0, 0, 0, secondDraw ? 256u : 48u};
             id<MTLCommandQueue> queue = [device newCommandQueue];
             auto dispatch = [&](uint32_t phase) {
                 params[15] = phase;
@@ -61,11 +61,12 @@ int main(int argc, char** argv) {
             if (resumeAfterMutation) {
                 std::array<uint32_t, 5> changed = {9, 1, 0, 0, 0};
                 std::memcpy(args.contents, changed.data(), changed.size() * sizeof(uint32_t));
+                if (mutateSecond) { uint32_t changedSecond[5] = {12, 1, 4, 5, 8}; std::memcpy(static_cast<uint8_t*>(args.contents) + 32, changedSecond, sizeof(changedSecond)); }
                 if (counted) { uint32_t changedCount = count ? 0 : secondDraw ? 2 : 1; std::memcpy(counts.contents, &changedCount, sizeof(changedCount)); }
                 dispatch(1);
             }
             std::array<uint32_t, 256> result;
-            std::memcpy(result.data(), plan.contents, plan.length);
+            std::memcpy(result.data(), plan.contents, sizeof(result));
             return result;
         };
         auto small = run({6, 2, 4, 7, 0}, 0, 1, 5, false, 0);
@@ -89,7 +90,11 @@ int main(int argc, char** argv) {
         require(admittedMulti[4] == 9 && admittedMulti[56] == 2, "multi-draw Count remains admitted after source mutation");
         auto skippedMulti = run({6, 1, 0, 0, 0}, 0, 1, 20, true, 0, true, true);
         require(skippedMulti[4] == 0 && skippedMulti[56] == 0, "multi-draw Count remains skipped after source mutation");
-        std::puts("PASS: production Metal one-draw arguments and Count snapshots across phases, indexed arguments and 64-bit bounds");
+        auto frozenMulti = run({6, 1, 0, 0, 0}, 0, 1, 20, false, 0, true, true, true);
+        require(frozenMulti[4] == 9, "multi-draw arguments remain frozen after source mutation");
+        auto frozenIndexedMulti = run({6, 1, 0, 0, 0}, 2, 1, 20, false, 0, true, true, true);
+        require(frozenIndexedMulti[4] == 9 && frozenIndexedMulti[35] == 3 && frozenIndexedMulti[6] == uint32_t(-4) && frozenIndexedMulti[7] == 7, "indexed multi-draw retains all five argument words");
+        std::puts("PASS: production Metal single/multiple argument and Count snapshots, indexed arguments and 64-bit bounds");
         return 0;
     }
 }

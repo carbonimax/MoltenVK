@@ -640,14 +640,15 @@ kernel void perVertexRestart(const device uint8_t* source [[buffer(0)]], device 
 // Portable PerVertexKHR indirect draws, planned from Vulkan arguments and Count read on the GPU.
 // p: maxDrawCount, stride, indexBytes, index capacity lo/hi, record capacity, views, topology,
 //    provokingLast, corners, hasCount, draw, table/gather/capture threadgroup widths, phase,
-//    restart, restart scan steps.
+//    restart, restart scan steps, snapshot word offset.
 // Phases: admit every draw of the command, plan one draw, build replay tables, gather indices.
 // Plan words: 0 status (1 capacity, 2 index range), 4 capture draw, 8 capture dispatch,
 // 12 stage-in region, 20 replay draw, 24 table dispatch, 28 gather dispatch, 32 table params,
 // 36 restart dispatch, 40 restart expansion dispatch, 48-52 one-draw argument snapshot,
 // 53-54 saturated 64-bit physical record requirement, 55 snapshot-valid flag, 56 frozen Count,
 // 64 replay constants (byte 256), 128 capture params (byte 512),
-// then perVertexRestart parameters every 64 words from byte 1024.
+// then perVertexRestart parameters every 64 words from byte 1024, followed by
+// five argument words per draw when maxDrawCount exceeds one.
 kernel void perVertexIndirect(const device uint8_t* args [[buffer(0)]], const device uint* count [[buffer(1)]], device uint* w [[buffer(2)]], const device uint8_t* source [[buffer(3)]], device uint* gathered [[buffer(4)]], device uint* pairs [[buffer(5)]], device uint* triplets [[buffer(6)]], device uint* corners [[buffer(7)]], constant uint* p [[buffer(8)]], uint i [[thread_position_in_grid]]) {
     uint draws = p[15] == 0 ? (p[10] ? min(p[0], count[0]) : p[0]) : w[56];
     uint topology = p[7], rasterVertices = topology == 0 ? 1 : topology <= 2 ? 2 : 3;
@@ -655,12 +656,13 @@ kernel void perVertexIndirect(const device uint8_t* args [[buffer(0)]], const de
         if (i == 0) { w[56] = draws; }
         if (i >= draws) { return; }
         const device uint* a = reinterpret_cast<const device uint*>(args + ulong(i) * p[1]);
+        device uint* snapshot = w + ulong(p[18]) + ulong(i) * 5;
+        for (uint word = 0; word < (p[2] ? 5u : 4u); ++word) { snapshot[word] = a[word]; }
         if (p[0] == 1) {
             ulong base = ulong(a[0]) * a[1];
             ulong lower = ulong(uint(base)) * p[6];
             // The high limb detects overflow without a full-width division in Metal.
             ulong upper = ulong(uint(base >> 32)) * p[6] + (lower >> 32);
-            for (uint word = 0; word < (p[2] ? 5u : 4u); ++word) { w[48 + word] = a[word]; }
             w[53] = upper > 0xfffffffful ? 0xffffffffu : uint(lower);
             w[54] = upper > 0xfffffffful ? 0xffffffffu : uint(upper);
             w[55] = 1;
@@ -674,7 +676,7 @@ kernel void perVertexIndirect(const device uint8_t* args [[buffer(0)]], const de
     if (p[15] == 1) {
         if (i) { return; }
         // A single draw uses the phase-0 snapshot if the source changes before phase 1.
-        const device uint* a = p[0] == 1 ? w + 48 : reinterpret_cast<const device uint*>(args + ulong(p[11]) * p[1]);
+        const device uint* a = w + ulong(p[18]) + ulong(p[11]) * 5;
         bool enabled = !w[0] && p[11] < draws && a[0] && a[1];
         uint vertices = enabled ? a[0] : 0, instances = enabled ? a[1] * p[6] : 0;
         uint first = p[2] ? a[3] : a[2], firstInstance = p[2] ? a[4] : a[3];
