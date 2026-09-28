@@ -34,21 +34,35 @@ struct MVKPerVertexScratch {
 	MVKPerVertexScratch& operator=(const MVKPerVertexScratch&) = delete;
 	~MVKPerVertexScratch() { for (auto buffer : buffers) { [buffer release]; } [indexPipeline release]; [widenUint8Pipeline release]; [indirectPipeline release]; [tessTopologyPipeline release]; }
 
-	bool reserve(id<MTLDevice> device, const MVKPerVertexScratchRequest& request) {
-		// Indirect dispatch/draw arguments plus replay constants aligned to 256 bytes.
-		NSUInteger lengths[] = {request.captureSize, sizeof(uint32_t), request.occurrenceSize, request.primitiveSize, request.cornerSize, request.indexSize, request.restart ? 68 * sizeof(uint32_t) : 0, request.tessSizes[0], request.tessSizes[1], request.tessSizes[2], request.tessSizes[3], request.tessSizes[4], std::max(request.planSize, request.tessSizes[5])};
-		for (size_t i = 0; i < std::size(buffers); ++i) {
+	bool reserveReplay(id<MTLDevice> device, const MVKPerVertexScratchRequest& request) {
+		NSUInteger lengths[] = {request.captureSize, sizeof(uint32_t), request.occurrenceSize, request.primitiveSize, request.cornerSize, request.indexSize, request.restart ? 68 * sizeof(uint32_t) : 0, request.tessSizes[0], request.tessSizes[1], request.tessSizes[2], request.tessSizes[3], request.tessSizes[4]};
+		for (size_t i = 0; i < std::size(lengths); ++i) {
 			if (!lengths[i]) { continue; }
-			bool shared = (i > 0 && i < 5) || i == 7 || i == 12;
+			if (buffers[i]) { return false; }
+			bool shared = (i > 0 && i < 5) || i == 7;
 			id<MTLBuffer> buffer = [device newBufferWithLength:lengths[i] options:shared ? MTLResourceStorageModeShared : MTLResourceStorageModePrivate];
 			if (!buffer || buffer.length < lengths[i] || (shared && !buffer.contents)) { [buffer release]; return false; }
 			buffers[i] = buffer;
 		}
-		// The GPU only ORs admission failures into the status word; each submission starts admitted.
-		if (buffers[12]) { memset(buffers[12].contents, 0, buffers[12].length); }
+		return true;
+	}
+
+	bool reservePlan(id<MTLDevice> device, const MVKPerVertexScratchRequest& request) {
+		// Indirect dispatch/draw arguments and replay constants share a 256-byte-aligned plan.
+		NSUInteger length = std::max(request.planSize, request.tessSizes[5]);
+		if (length) {
+			if (buffers[12]) { return false; }
+			id<MTLBuffer> buffer = [device newBufferWithLength:length options:MTLResourceStorageModeShared];
+			if (!buffer || buffer.length < length || !buffer.contents) { [buffer release]; return false; }
+			buffers[12] = buffer;
+			// The GPU ORs admission failures into the status word; each submission starts admitted.
+			memset(buffer.contents, 0, buffer.length);
+		}
 		indirectCapacity = request.indirectCapacity;
 		return true;
 	}
+
+	bool reserve(id<MTLDevice> device, const MVKPerVertexScratchRequest& request) { return reserveReplay(device, request) && reservePlan(device, request); }
 
 	// Admission failures ORed by the GPU into the plan buffer; read only after the work completed.
 	uint32_t getIndirectStatus() const { return indirectCapacity && buffers[12] ? *(volatile const uint32_t*)buffers[12].contents : 0; }
