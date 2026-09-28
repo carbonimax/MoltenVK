@@ -6,9 +6,13 @@
 // VK_KHR_portability_subset is a beta extension, as the macOS builds of the fixtures declare it.
 #define VK_ENABLE_BETA_EXTENSIONS 1
 #include <vulkan/vulkan.h>
+#include <vulkan/vulkan_metal.h>
 #include <dlfcn.h>
+#include <objc/message.h>
+#include <objc/runtime.h>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -17,6 +21,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <vector>
 

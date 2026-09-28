@@ -27,7 +27,7 @@ compile pervertex-indirect-args.comp args.comp.spv
 for variant in after before; do
 	library=${!variant}
 	xcrun clang++ -arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -I"$root/External/Vulkan-Headers/include" \
-		"$test_dir/PerVertexIndirectGPUTests.cpp" "$library" -Wl,-rpath,"$(dirname "$library")" -o "$output/pervertex-indirect-gpu-$variant"
+		"$test_dir/PerVertexIndirectGPUTests.cpp" "$library" -lobjc -Wl,-rpath,"$(dirname "$library")" -o "$output/pervertex-indirect-gpu-$variant"
 done
 shasum -a 256 "$after" "$before" "$shaders"/*.spv "$output"/pervertex-indirect-gpu-* > "$output/INPUTS.sha256"
 echo 'case,expected_exit,actual_exit,verdict' > "$output/results.csv"

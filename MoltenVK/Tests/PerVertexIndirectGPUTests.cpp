@@ -7,10 +7,14 @@
 // recorded to check DrawID, first/base values, instances and exactly-once side effects.
 #define VK_ENABLE_BETA_EXTENSIONS 1 // VK_KHR_portability_subset
 #include <vulkan/vulkan.h>
+#include <vulkan/vulkan_metal.h>
 #include <dlfcn.h>
+#include <objc/message.h>
+#include <objc/runtime.h>
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +22,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -62,6 +67,53 @@ struct Device {
 	uint32_t family = 0;
 	uint32_t producerFamily = 0;
 };
+
+// Sends an Objective-C message to a Metal object, so that this C++ fixture can act as an external Metal client.
+template <typename R, typename... A> static R objcMessage(void* object, const char* selector, A... arguments) {
+	return reinterpret_cast<R (*)(void*, SEL, A...)>(objc_msgSend)(object, sel_registerName(selector), arguments...);
+}
+
+// A Metal command buffer outside Vulkan that waits an exported event at a value, then writes 0xA5 bytes.
+struct ExternalMetalWaiter {
+	void* queue = nullptr;
+	void* marker = nullptr;
+	void* commands = nullptr;
+};
+
+static ExternalMetalWaiter startExternalWaiter(void* event, uint64_t value) {
+	struct Range { unsigned long location, length; };
+	ExternalMetalWaiter w;
+	void* device = objcMessage<void*>(event, "device");
+	w.queue = objcMessage<void*>(device, "newCommandQueue");
+	w.marker = objcMessage<void*>(device, "newBufferWithLength:options:", 64ul, 0ul);  // shared storage
+	std::memset(objcMessage<void*>(w.marker, "contents"), 0, 64);
+	w.commands = objcMessage<void*>(w.queue, "commandBuffer");  // autoreleased: retained until finished
+	objcMessage<void*>(w.commands, "retain");
+	objcMessage<void>(w.commands, "encodeWaitForEvent:value:", event, value);
+	void* blit = objcMessage<void*>(w.commands, "blitCommandEncoder");
+	objcMessage<void>(blit, "fillBuffer:range:value:", w.marker, Range{0, 4}, (unsigned char)0xA5);
+	objcMessage<void>(blit, "endEncoding");
+	objcMessage<void>(w.commands, "commit");
+	return w;
+}
+
+static uint32_t externalWaiterMarker(const ExternalMetalWaiter& w) {
+	uint32_t value;
+	std::memcpy(&value, objcMessage<void*>(w.marker, "contents"), sizeof(value));
+	return value;
+}
+
+// Releases the waiter as a later signal of the event would, and waits for it, bounded.
+static void finishExternalWaiter(void* event, ExternalMetalWaiter& w, uint64_t value) {
+	if (objcMessage<uint64_t>(event, "signaledValue") < value) objcMessage<void>(event, "setSignaledValue:", value);
+	auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (objcMessage<unsigned long>(w.commands, "status") < 4 && std::chrono::steady_clock::now() < deadline)  // 4: completed
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	objcMessage<void>(w.commands, "release");
+	objcMessage<void>(w.marker, "release");
+	objcMessage<void>(w.queue, "release");
+	w = ExternalMetalWaiter{};
+}
 
 struct Buffer {
 	VkBuffer buffer = VK_NULL_HANDLE;
@@ -128,6 +180,15 @@ int main(int argc, char** argv) {
 		const bool dependentNoWait = getenv("PERVERTEX_TEST_DEPENDENT_NO_WAIT") != nullptr;
 		const bool waitIdleProbe = getenv("PERVERTEX_TEST_WAIT_IDLE") != nullptr;
 		const bool dependentFirst = getenv("PERVERTEX_TEST_DEPENDENT_FIRST") != nullptr;
+		// PERVERTEX_TEST_LONG_DEPENDENT: the dependent submission copies a large buffer many times between two markers.
+		// When its fence reports a loss, the source buffer is destroyed at once; it must not be running then.
+		const bool longDependent = getenv("PERVERTEX_TEST_LONG_DEPENDENT") != nullptr;
+		// PERVERTEX_TEST_EXTERNAL_WAITER: the draw-to-dependent binary semaphore exports its Metal event and has served one
+		// signal and one wait. An external Metal client waits the generation after the dependent wait: the value of the
+		// next Vulkan signal. A loss rescue must not release that client when the draw is lost.
+		const bool externalWaiter = getenv("PERVERTEX_TEST_EXTERNAL_WAITER") != nullptr;
+		if ((longDependent || externalWaiter) && !dependentSubmission) throw std::runtime_error("long dependent and external waiter require dependent submission");
+		if (externalWaiter && dependentNoWait) throw std::runtime_error("external waiter requires the draw-to-dependent binary semaphore");
 		if (dependentSubmission && (!splitProducer || !lateSignal)) throw std::runtime_error("dependent submission requires split producer and late signal");
 		if (dependentSameQueue && !dependentSubmission) throw std::runtime_error("same-queue dependent submission requires dependent submission");
 		if (dependentNoWait && (!dependentSubmission || !dependentSameQueue)) throw std::runtime_error("dependent no-wait requires dependent submission and same queue");
@@ -204,6 +265,7 @@ int main(int argc, char** argv) {
 		Device d;
 		std::vector<const char*> deviceExtensions{VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME};
 		if (dynamicRestart) deviceExtensions.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME);
+		if (externalWaiter) deviceExtensions.push_back(VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
 		for (auto candidate : physicals) {
 			// The combined test library exposes an adapter; shipping libraries have no such symbol.
 			if (auto enable = reinterpret_cast<void (*)(VkPhysicalDevice)>(dlsym(RTLD_DEFAULT, "mvkEnableTESFixtureDevice"))) { enable(candidate); }
@@ -515,7 +577,13 @@ int main(int argc, char** argv) {
 		}
 		VkCommandPool producerPool = pool;
 		Buffer dependentMarker;
-		if (dependentSubmission) dependentMarker = makeBuffer(d, sizeof(uint32_t), VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+		if (dependentSubmission) dependentMarker = makeBuffer(d, 2 * sizeof(uint32_t), VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+		constexpr VkDeviceSize kLongSize = 256ull << 20;
+		Buffer longSource, longTarget;
+		if (longDependent) {
+			longSource = makeBuffer(d, kLongSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+			longTarget = makeBuffer(d, kLongSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+		}
 		if (splitProducer) {
 			if (d.producerFamily != d.family) {
 				poolInfo.queueFamilyIndex = d.producerFamily;
@@ -679,6 +747,16 @@ int main(int argc, char** argv) {
 			if (dependentSubmission) {
 				check(vkBeginCommandBuffer(dependentCommands, &begin), "Begin dependent command buffer");
 				vkCmdFillBuffer(dependentCommands, dependentMarker.buffer, 0, sizeof(uint32_t), 0xA55A5AA5);
+				if (longDependent) {
+					VkMemoryBarrier transfer{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+					transfer.srcAccessMask = transfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+					VkBufferCopy whole{0, 0, kLongSize};
+					for (int i = 0; i < 48; ++i) {
+						vkCmdCopyBuffer(dependentCommands, longSource.buffer, longTarget.buffer, 1, &whole);
+						vkCmdPipelineBarrier(dependentCommands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &transfer, 0, nullptr, 0, nullptr);
+					}
+					vkCmdFillBuffer(dependentCommands, dependentMarker.buffer, sizeof(uint32_t), sizeof(uint32_t), 0xA55A5AA5);
+				}
 				check(vkEndCommandBuffer(dependentCommands), "End dependent command buffer");
 			}
 		}
@@ -697,7 +775,20 @@ int main(int argc, char** argv) {
 			typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
 			VkSemaphoreCreateInfo signalInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
 			if (dependentNoWait) signalInfo.pNext = &typeInfo;
+			VkExportMetalObjectCreateInfoEXT exportable{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT};
+			exportable.exportObjectType = VK_EXPORT_METAL_OBJECT_TYPE_METAL_SHARED_EVENT_BIT_EXT;
+			if (externalWaiter) signalInfo.pNext = &exportable;
 			check(vkCreateSemaphore(d.device, &signalInfo, nullptr, &dependentSignal), "Create dependent semaphore");
+		}
+		void* dependentEvent = nullptr;
+		if (externalWaiter) {
+			VkExportMetalSharedEventInfoEXT sharedEvent{VK_STRUCTURE_TYPE_EXPORT_METAL_SHARED_EVENT_INFO_EXT};
+			sharedEvent.semaphore = dependentSignal;
+			VkExportMetalObjectsInfoEXT exportInfo{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT};
+			exportInfo.pNext = &sharedEvent;
+			vkExportMetalObjectsEXT(d.device, &exportInfo);
+			dependentEvent = sharedEvent.mtlSharedEvent;
+			if (!dependentEvent) throw std::runtime_error("The dependent semaphore exports no MTLSharedEvent");
 		}
 		if (splitProducer) {
 			VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -724,6 +815,27 @@ int main(int argc, char** argv) {
 			Result r{};
 			VkResult producerSubmit = VK_SUCCESS;
 			VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+			ExternalMetalWaiter external;
+			uint64_t externalValue = 0;
+			if (split && externalWaiter) {
+				// As an earlier use would: one signal and one encoded wait, which register the semaphore for loss release.
+				VkPipelineStageFlags primeStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+				VkSubmitInfo primeSignal{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+				primeSignal.signalSemaphoreCount = 1;
+				primeSignal.pSignalSemaphores = &dependentSignal;
+				VkSubmitInfo primeWait{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+				primeWait.waitSemaphoreCount = 1;
+				primeWait.pWaitSemaphores = &dependentSignal;
+				primeWait.pWaitDstStageMask = &primeStage;
+				check(vkResetFences(d.device, 1, &dependentFence), "Reset prime fence");
+				check(vkQueueSubmit(d.producerQueue, 1, &primeSignal, VK_NULL_HANDLE), "Prime signal");
+				check(vkQueueSubmit(d.producerQueue, 1, &primeWait, dependentFence), "Prime wait");
+				check(vkWaitForFences(d.device, 1, &dependentFence, VK_TRUE, 5000000000ull), "Prime wait fence");
+				check(vkResetFences(d.device, 1, &dependentFence), "Reset dependent fence");
+				// The draw signals the next generation and the dependent submission waits it; the one after is the value of
+				// the next Vulkan signal of this semaphore.
+				externalValue = objcMessage<uint64_t>(dependentEvent, "signaledValue") + 2;
+			}
 			if (split) {
 				VkSubmitInfo source{VK_STRUCTURE_TYPE_SUBMIT_INFO};
 				VkPipelineStageFlags sourceWaitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
@@ -770,6 +882,7 @@ int main(int argc, char** argv) {
 				r.dependentBeforeSignal = vkGetFenceStatus(d.device, dependentFence);
 				std::printf("dependent queue=%s submit=%d fence before host signal=%d\n", dependentSameQueue ? "draw" : "producer", r.dependentSubmit, r.dependentBeforeSignal);
 				if (r.dependentSubmit != VK_SUCCESS || r.dependentBeforeSignal != VK_NOT_READY) throw std::runtime_error("Dependent submission was not pending before host timeline signal");
+				if (externalWaiter) external = startExternalWaiter(dependentEvent, externalValue);
 			}
 			if (lateSignal && split && r.submit == VK_SUCCESS) {
 				VkResult beforeSignal = vkGetFenceStatus(d.device, producerFence);
@@ -791,8 +904,24 @@ int main(int argc, char** argv) {
 				std::printf("dependent timeline wait before draw fence=%d\n", r.dependentTimelineWait);
 			}
 			auto waitDependent = [&] {
-				r.dependentWait = r.dependentSubmit == VK_SUCCESS ? vkWaitForFences(d.device, 1, &dependentFence, VK_TRUE, 5000000000ull) : r.dependentSubmit;
+				r.dependentWait = r.dependentSubmit == VK_SUCCESS ? vkWaitForFences(d.device, 1, &dependentFence, VK_TRUE, 10000000000ull) : r.dependentSubmit;
+				uint32_t endAtReport = 0;
+				std::memcpy(&endAtReport, dependentMarker.data + sizeof(uint32_t), sizeof(uint32_t));
 				memcpy(&r.dependentMarkerValue, dependentMarker.data, sizeof(uint32_t));
+				if (longDependent && r.dependentWait == VK_ERROR_DEVICE_LOST) {
+					// The application may destroy what the lost submission used once a host wait reported the loss.
+					uint32_t startAtReport = r.dependentMarkerValue;
+					vkDestroyBuffer(d.device, longSource.buffer, nullptr);
+					vkFreeMemory(d.device, longSource.memory, nullptr);
+					longSource = Buffer{};
+					uint32_t startLater = startAtReport;
+					for (int i = 0; i < 200; ++i) {
+						std::this_thread::sleep_for(std::chrono::milliseconds(10));
+						std::memcpy(&startLater, dependentMarker.data, sizeof(uint32_t));
+					}
+					std::printf("long dependent at loss report: start=%08x end=%08x; start later=%08x\n", startAtReport, endAtReport, startLater);
+					if (endAtReport != 0xA55A5AA5 && startLater == 0xA55A5AA5) throw std::runtime_error("Dependent submission was still running when its fence reported the loss");
+				}
 				std::printf("dependent wait=%d fence status=%d marker=%08x\n", r.dependentWait, vkGetFenceStatus(d.device, dependentFence), r.dependentMarkerValue);
 			};
 			if (dependentFirst && dependentSubmission && split) {
@@ -807,6 +936,13 @@ int main(int argc, char** argv) {
 				if (!dependentFirst) waitDependent();
 				if (r.wait == VK_SUCCESS && (r.dependentWait != VK_SUCCESS || r.dependentMarkerValue != 0xA55A5AA5)) throw std::runtime_error("Dependent submission did not complete after the indirect draw");
 				if (r.wait == VK_ERROR_DEVICE_LOST && r.dependentWait != VK_ERROR_DEVICE_LOST) throw std::runtime_error("Dependent submission reported success or remained blocked after draw device loss");
+				if (externalWaiter && external.commands) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(300));
+					uint32_t marker = externalWaiterMarker(external);
+					std::printf("external waiter at generation %llu: marker=%08x after draw result %d\n", (unsigned long long)externalValue, marker, r.wait);
+					finishExternalWaiter(dependentEvent, external, externalValue);
+					if (r.wait == VK_ERROR_DEVICE_LOST && marker) throw std::runtime_error("The loss rescue released an external Metal waiter of a binary semaphore generation that no Vulkan signal reached");
+				}
 			}
 			if (waitIdleProbe && split) {
 				VkResult expectedIdle = r.wait == VK_SUCCESS ? VK_SUCCESS : VK_ERROR_DEVICE_LOST;
