@@ -1319,7 +1319,8 @@ void MVKPhysicalDevice::getProperties(VkPhysicalDeviceProperties2* properties) {
 			}
 			case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT: {
 				auto* meshProps = (VkPhysicalDeviceMeshShaderPropertiesEXT*)next;
-				// ponytail: provisional Vulkan minimum limits, not measured Metal mesh limits; measure them before exposing the extension.
+				// Vulkan minimum limits, except where Metal is measured and documented lower (MeshLimits probe, Metal Feature
+				// Set Tables): those two fall below Vulkan's minimums, so this path cannot be exposed as the extension as is.
 				// Task shaders are not supported, so their limits are zero.
 				meshProps->maxTaskWorkGroupTotalCount = 0;
 				mvkClear(meshProps->maxTaskWorkGroupCount, 3);
@@ -1328,14 +1329,17 @@ void MVKPhysicalDevice::getProperties(VkPhysicalDeviceProperties2* properties) {
 				meshProps->maxTaskPayloadSize = 0;
 				meshProps->maxTaskSharedMemorySize = 0;
 				meshProps->maxTaskPayloadAndSharedMemorySize = 0;
-				meshProps->maxMeshWorkGroupTotalCount = 1u << 22;
+				// "Maximum threadgroups per mesh shader grid": 1024 on Apple7 and Apple8, 1,048,575 on Apple9, 4,194,303 on
+				// Apple10. Each pipeline also reports its own limit, which vkCmdDrawMeshTasksEXT() enforces.
+				meshProps->maxMeshWorkGroupTotalCount = _gpuCapabilities.supportsApple10 ? 4194303 : _gpuCapabilities.supportsApple9 ? 1048575 : 1024;
 				for (uint32_t i = 0; i < 3; i++) { meshProps->maxMeshWorkGroupCount[i] = 65535; meshProps->maxMeshWorkGroupSize[i] = 128; }
 				meshProps->maxMeshWorkGroupInvocations = 128;
 				meshProps->maxMeshSharedMemorySize = 28 * KIBI;
 				meshProps->maxMeshPayloadAndSharedMemorySize = 28 * KIBI;
 				meshProps->maxMeshOutputMemorySize = 32 * KIBI;
 				meshProps->maxMeshPayloadAndOutputMemorySize = 47 * KIBI;
-				meshProps->maxMeshOutputComponents = 128;
+				// Metal counts at most 124 unique scalars per mesh vertex and primitive, the position included.
+				meshProps->maxMeshOutputComponents = 120;
 				meshProps->maxMeshOutputVertices = 256;
 				meshProps->maxMeshOutputPrimitives = 256;
 				meshProps->maxMeshOutputLayers = 8;

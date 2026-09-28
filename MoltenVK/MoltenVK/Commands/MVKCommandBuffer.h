@@ -180,6 +180,8 @@ public:
 	MVKCmdBindPipeline* _lastTessellationPipeline;
 	bool recordedGraphicsPipelineUsesPerVertexInput() const { return _recordedPerVertexPipeline != nullptr; }
 	bool recordedGraphicsPipelineUsesPerVertexTessEval() const;
+	/** The mesh pipeline bound for the draws being recorded, if any. */
+	MVKGraphicsPipeline* getRecordedMeshPipeline() const { return _recordedMeshPipeline; }
 
 	/**
 	 * The recorded graphics pipeline if its draws take the ordinary tessellation path, and the patch control points
@@ -230,6 +232,7 @@ protected:
 	MVKPerVertexScratchReservations _prefilledPerVertexScratch;
 	MVKGraphicsPipeline* _recordedPerVertexPipeline = nullptr;
 	MVKGraphicsPipeline* _recordedTessellationPipeline = nullptr;
+	MVKGraphicsPipeline* _recordedMeshPipeline = nullptr;
 	uint8_t _recordedPatchControlPoints = 0;
 
 	bool _recordedAttachmentsKnown = false;

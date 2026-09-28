@@ -256,6 +256,9 @@ public:
 	/** Threads per mesh threadgroup: the workgroup size of the mesh shader. */
 	MTLSize getMeshThreadgroupSize() const { return _meshThreadgroupSize; }
 
+	/** The mesh grid limit, in threadgroups, that the Metal pipeline state reports; only smaller grids are executed. */
+	NSUInteger getMaxMeshThreadgroupsPerGrid() const { return _maxMeshThreadgroupsPerGrid; }
+
 	/** Portable PerVertexKHR uses render capture for direct draws and compute capture for indexed draws, followed by replay.
 	 * Vertex stage resources describe capture; replay uses getPerVertexReplayBinding() and the optional implicit reversed-depth mask. */
 	bool usesPerVertexInputBuffer() const { return _usesPerVertexInputBuffer; }
@@ -463,6 +466,7 @@ protected:
 	bool _ownsMeshModule = false;
 	bool _isMeshPipeline = false;
 	MTLSize _meshThreadgroupSize = {};
+	NSUInteger _maxMeshThreadgroupsPerGrid = 0;
 	bool _ownsTessCtlModule = false;
 	bool _ownsTessEvalModule = false;
 	bool _ownsFragmentModule = false;

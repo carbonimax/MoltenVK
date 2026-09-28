@@ -1346,6 +1346,18 @@ bool MVKGraphicsPipeline::initMeshPipelineState(const VkGraphicsPipelineCreateIn
 		if (!_mtlPipelineState) { setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Could not create the mesh pipeline: %s", error.localizedDescription.UTF8String)); }
 	}
 	[meshDesc release];
+	// The created Metal pipeline reports what it executes: the mesh workgroup must fit its threadgroup limit, and draws
+	// are checked against its grid limit, beyond which Metal draws nothing and reports no error.
+	if (_mtlPipelineState) {
+		NSUInteger invocations = _meshThreadgroupSize.width * _meshThreadgroupSize.height * _meshThreadgroupSize.depth;
+		if (invocations > _mtlPipelineState.maxTotalThreadsPerMeshThreadgroup) {
+			NSUInteger limit = _mtlPipelineState.maxTotalThreadsPerMeshThreadgroup;
+			[_mtlPipelineState release];
+			_mtlPipelineState = nil;
+			return unsupported("mesh workgroup of " + std::to_string(invocations) + " invocations exceeds the " + std::to_string(limit) + " its Metal pipeline supports.");
+		}
+		_maxMeshThreadgroupsPerGrid = _mtlPipelineState.maxTotalThreadgroupsPerMeshGrid;
+	}
 	return compiled && _mtlPipelineState;
 }
 
