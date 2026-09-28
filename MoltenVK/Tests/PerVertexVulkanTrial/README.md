@@ -60,6 +60,13 @@ bash MoltenVK/Tests/PerVertexVulkanTrial/run-trial-device.sh build/ios-trial-dev
 
 Il accepte `plain` à la place de `validated`.
 
+**iOS 16 et plus ancien.** `devicectl` ne gère pas ces appareils. `run-trial-legacy-device.sh` prend les mêmes arguments et passe par libimobiledevice (Homebrew) :
+- `ideviceinstaller` installe l'app ;
+- `idevicedebug` la lance avec l'environnement, puis s'en détache ;
+- `afcclient` rapatrie les runs.
+
+Le lancement à distance exige l'image disque développeur de cette version, déjà montée sur l'appareil. Sans elle, `TRIAL_MANUAL_LAUNCH=1` attend qu'on touche l'icône. L'app tourne alors avec la configuration MoltenVK par défaut (soumission synchrone, sans pré-remplissage) et sans validation Metal : seul `sync plain` est possible.
+
 **Lecture du rapport.** Chaque cas finit en `PASS`, `FAIL` ou `SKIPPED` (capacité absente, avec sa raison). Le rapport global vaut `PASS`, `FAIL` ou `INCOMPLETE`.
 
 **Arrêt en cours de cas.** Si un cas arrête l'app, le `journal.txt` du run garde un `START` sans `END`. Le rapport du lancement suivant le liste sous `interrupted_previous_runs`.
@@ -77,11 +84,14 @@ Il accepte `plain` à la place de `validated`.
 | iPhone 18 Pro (`iPhone19,2`, iOS 27.2, Apple10) | natif `vertex_value`, et portable pour `portable-*`, `continuation-*`, `tes-*` | 19/19 | 19/19 | 19/19 |
 | iPhone 15 Pro (`iPhone16,1`, iOS 27.0, Apple9) | portable | 19/19 | 19/19 | 19/19 |
 | iPad Pro 11″ M4 (`iPad16,3`, iPadOS 27.2, Apple9) | portable | 19/19 | 19/19 | 19/19 |
+| iPad Pro 9,7″ (`iPad6,3`, iPadOS 16.7.16, Apple3) | aucun | non lancé | non lancé | 1 réussi, 18 ignorés |
+
+**iPad Pro 9,7″.** L'app a été lancée à la main : aucune image disque développeur n'était montée. Seul `public-gate-closed` s'exécute, et réussit. Les 18 autres cas sont ignorés, faute de barycentriques Metal et de Metal 3 : ils s'arrêtent au choix du périphérique, avant tout travail GPU.
 
 **Défauts trouvés par ces essais, et corrigés.**
 - **Collision SPIRV-Cross.** Un fragment qui lit PerVertexKHR et `BaryCoordKHR` ne compilait pas : fausse collision de location privée. Corrigé par SPIRV-Cross `6af5a67f`, épinglé en `41a6c184`.
 - **Replay non indexé vide.** Les dessins portables non indexés ne rendaient rien sur les deux iPhone, tout en rapportant un succès : la barrière dans la passe ne rendait pas la capture visible au replay. Corrigé en `a564af04` par une frontière de passe de rendu.
 
 **Non vérifié.**
-- L'iPad Pro 9,7″ (2016). Il n'a pas de barycentriques Metal : ses cas seraient ignorés.
+- Sur l'iPad Pro 9,7″, les modes asynchrone et avec validation : ils demandent un lancement à distance.
 - Tout autre iPhone ou iPad.
