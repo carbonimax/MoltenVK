@@ -175,8 +175,12 @@ void MVKCmdDraw::encodeIndexedIndirect(MVKCommandEncoder* cmdEncoder) {
 }
 
 static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance, uint32_t drawIndex, const MVKIndexMTLBufferBinding* indexBinding = nullptr, uint32_t firstIndex = 0, int32_t baseVertex = 0) {
+	// A draw refused while encoding also loses the device: vkQueueSubmit() may have returned, and the submission must
+	// never complete without it.
 	auto reject = [&](VkResult result, const char* message) {
 		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(result, "Portable PerVertexKHR %s", message));
+		cmdEncoder->getDevice()->markLost();
+		cmdEncoder->stopEncoding();
 	};
 	auto* subpass = cmdEncoder->getSubpass();
 	uint32_t viewCount = subpass->isMultiview() ? subpass->getViewCountInMetalPass(cmdEncoder->getMultiviewPassIndex()) : 1;
@@ -222,7 +226,7 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	uint64_t primitiveCount = primitivesPerInstance * instanceCount;
 	uint64_t replayCount = primitivesPerInstance * replayVertices;
 	if (!mvkCanEncodePerVertexDraw(vertexCount, instanceCount, layout.stride, topology, cmdEncoder->getMetalFeatures().maxMTLBufferSize)) {
-		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR draw exceeds its capture or replay buffer limits."));
+		reject(VK_ERROR_OUT_OF_DEVICE_MEMORY, "draw exceeds its capture or replay buffer limits.");
 		return;
 	}
 	id<MTLBuffer> captured = scratch->buffers[0];
