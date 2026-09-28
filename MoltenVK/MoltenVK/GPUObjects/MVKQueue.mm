@@ -603,6 +603,9 @@ id<MTLCommandBuffer> MVKQueueCommandBufferSubmission::getActiveMTLCommandBuffer(
 			needsRetain = true;
 		}
 		setActiveMTLCommandBuffer(_queue->getMTLCommandBuffer(_commandUse, needsRetain));
+		// Commands encoded without a Metal command buffer never execute, even if a later one is available:
+		// report them as a lost device, never as complete.
+		if ( !_activeMTLCommandBuffer ) { getDevice()->markLost(); }
 	}
 	return _activeMTLCommandBuffer;
 }
@@ -655,12 +658,6 @@ VkResult MVKQueueCommandBufferSubmission::commitActiveMTLCommandBuffer(bool sign
 	id<MTLCommandBuffer> mtlCmdBuff = signalCompletion ? getActiveMTLCommandBuffer() : _activeMTLCommandBuffer;
 	_activeMTLCommandBuffer = nil;
 
-	// Commands encoded without a Metal command buffer never execute: report them as a lost device, never as complete.
-	if ( !mtlCmdBuff && signalCompletion ) {
-		reportError(VK_ERROR_DEVICE_LOST, "No Metal command buffer is available for this queue submission.");
-		getDevice()->markLost();
-	}
-
 	uint64_t startTime = getPerformanceTimestamp();
 	MVKDevice* device = getDevice();
 	device->addMTLCommandBufferHandler(mtlCmdBuff, ^(id<MTLCommandBuffer> mtlCB) {
@@ -669,7 +666,7 @@ VkResult MVKQueueCommandBufferSubmission::commitActiveMTLCommandBuffer(bool sign
 	});
 
 	// Retrieve the result before committing MTLCommandBuffer, because finish() will destroy this instance.
-	VkResult rslt = mtlCmdBuff ? getConfigurationResult() : VK_ERROR_OUT_OF_POOL_MEMORY;
+	VkResult rslt = mtlCmdBuff ? getConfigurationResult() : VK_ERROR_DEVICE_LOST;
 	device->commitMTLCommandBuffer(mtlCmdBuff);
 	[mtlCmdBuff release];		// retained
 
