@@ -721,17 +721,28 @@ public:
 	 */
 	VkResult getHostWaitResult(bool isFinished, uint64_t timeout);
 
-	/** Brackets the encoding of a queue submission. A device loss is reported to host waits only between encodings. */
+	/**
+	 * Brackets the encoding of a queue submission, from its dispatch to a queue worker if it has one. A device loss
+	 * is reported to host waits, and this device destroyed, only while no submission is encoding. endEncoding() is
+	 * the caller's last use of this device and of its queue.
+	 */
 	void beginEncoding();
 	void endEncoding();
 
 	/**
-	 * Counts a queue submission's Metal command buffer until it completes. Call just before committing it, and before
-	 * adding the completion handler that may signal a fence. A device loss is reported to host waits only once these
-	 * have completed: MoltenVK does not retain the application resources they use, which the application may destroy
-	 * as soon as a host wait reports the loss, while the loss rescue can still release their Metal waits.
+	 * Adds a completion handler, or a scheduled handler, to a Metal command buffer that commitMTLCommandBuffer()
+	 * commits. A device loss is reported to host waits, and this device destroyed, only once every such handler of
+	 * every committed command buffer has returned: the handlers use this device and objects that the application may
+	 * destroy as soon as a loss is reported, and Metal documents no order between the handlers of a command buffer.
+	 * Handlers of a command buffer not yet committed, such as a prefilled one, are not waited for.
 	 */
-	void trackCommittedMTLCommandBuffer(id<MTLCommandBuffer> mtlCmdBuff);
+	void addMTLCommandBufferHandler(id<MTLCommandBuffer> mtlCmdBuff, MTLCommandBufferHandler handler, bool isScheduled = false);
+
+	/**
+	 * Commits a Metal command buffer, counting its handlers added by addMTLCommandBufferHandler(). A device loss is
+	 * then reported only once it has completed, since MoltenVK does not retain the application resources it uses.
+	 */
+	void commitMTLCommandBuffer(id<MTLCommandBuffer> mtlCmdBuff);
 
 	/** Registers a semaphore or event whose encoded Metal waits must be released if this device is lost. */
 	void addLossReleasable(MVKLossReleasable* releasable);
@@ -1163,7 +1174,7 @@ protected:
 	std::condition_variable _lossCondition;
 	dispatch_queue_t _lossPublisher = nullptr;
 	std::atomic<uint32_t> _activeEncodings{0};
-	std::atomic<uint32_t> _committedMTLCommandBuffers{0};
+	std::atomic<int64_t> _pendingMTLCommandBufferHandlers{0};
 	bool _isLossPublished = false;
 	std::atomic<bool> _losing{false};
 	std::atomic<bool> _markPhysicalDeviceLost{false};

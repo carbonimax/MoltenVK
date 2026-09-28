@@ -36,8 +36,10 @@
 
 #import "CAMetalLayer+MoltenVK.h"
 
+#include <objc/runtime.h>
 #include <sys/stat.h>
 #include <cmath>
+#include <thread>
 
 using namespace std;
 
@@ -3986,19 +3988,31 @@ VkResult MVKDevice::markLost(bool alsoMarkPhysicalDevice) {
 	return VK_ERROR_DEVICE_LOST;
 }
 
+// Counts the handlers added to a Metal command buffer by MVKDevice::addMTLCommandBufferHandler(), until it is committed.
+@interface MVKMTLCommandBufferHandlerCount : NSObject {
+@public
+	uint32_t _count;
+}
+@end
+
+@implementation MVKMTLCommandBufferHandlerCount
+@end
+
+static char kMVKMTLCommandBufferHandlerCountKey;
+
+// Polls rather than waits for a notification: whatever decremented the count may not use this device again.
+template <typename T>
+static void mvkWaitForZero(const std::atomic<T>& count) {
+	while (count.load()) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+}
+
 // Reports the loss to host waits once no queue submission is encoding, after a final release of the Metal waits
 // those submissions encoded. Later submissions are refused or dropped without encoding, since isLosing() is set.
 void MVKDevice::publishLoss() {
-	{
-		unique_lock<mutex> lock(_lossLock);
-		_lossCondition.wait(lock, [this]{ return !_activeEncodings; });
-	}
+	mvkWaitForZero(_activeEncodings);
 	releaseSemaphoreWaitsAfterLoss();
 	// Work released above, or committed before the loss, may still use application resources.
-	{
-		unique_lock<mutex> lock(_lossLock);
-		_lossCondition.wait(lock, [this]{ return !_committedMTLCommandBuffers; });
-	}
+	mvkWaitForZero(_pendingMTLCommandBufferHandlers);
 	{
 		lock_guard<mutex> lock(_sem4Lock);
 		setConfigurationResult(VK_ERROR_DEVICE_LOST);
@@ -4031,7 +4045,7 @@ void MVKDevice::releaseSemaphoreWaitsAfterLoss() {
 		id<MTLCommandBuffer> mtlCmdBuff = [mtlQueue commandBuffer];		// retains the events it signals
 		bool released = true;
 		for (auto* releasable : _lossReleasables) { released &= releasable->releaseWaitsAfterLoss(mtlCmdBuff); }
-		[mtlCmdBuff commit];
+		commitMTLCommandBuffer(mtlCmdBuff);
 		if ( !released ) { reportWarning(VK_ERROR_DEVICE_LOST, "Could not release every Metal semaphore wait after device loss. Metal work waiting on them may not complete."); }
 	}
 }
@@ -4054,27 +4068,40 @@ VkResult MVKDevice::getHostWaitResult(bool isFinished, uint64_t timeout) {
 	return isFinished ? VK_SUCCESS : VK_TIMEOUT;
 }
 
-// Lock-free outside a loss. The count and _losing are sequentially consistent, so either the last encoding sees the
-// loss and notifies under the lock, or publishLoss() sees no encoding left.
 void MVKDevice::beginEncoding() {
 	_activeEncodings++;
 }
 
 void MVKDevice::endEncoding() {
-	if (--_activeEncodings == 0 && _losing.load()) {
-		lock_guard<mutex> lock(_lossLock);
-		_lossCondition.notify_all();
+	_activeEncodings--;
+}
+
+void MVKDevice::addMTLCommandBufferHandler(id<MTLCommandBuffer> mtlCmdBuff, MTLCommandBufferHandler handler, bool isScheduled) {
+	if ( !mtlCmdBuff ) { return; }
+	MVKMTLCommandBufferHandlerCount* handlerCount = objc_getAssociatedObject(mtlCmdBuff, &kMVKMTLCommandBufferHandlerCountKey);
+	if ( !handlerCount ) {
+		handlerCount = [MVKMTLCommandBufferHandlerCount new];		// temp retain
+		objc_setAssociatedObject(mtlCmdBuff, &kMVKMTLCommandBufferHandlerCountKey, handlerCount, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		[handlerCount release];										// temp release
+	}
+	handlerCount->_count++;
+	// The decrement is the handler's last use of this device, which may be destroyed right after it.
+	MTLCommandBufferHandler counted = ^(id<MTLCommandBuffer> mtlCB) {
+		handler(mtlCB);
+		_pendingMTLCommandBufferHandlers--;
+	};
+	if (isScheduled) {
+		[mtlCmdBuff addScheduledHandler: counted];
+	} else {
+		[mtlCmdBuff addCompletedHandler: counted];
 	}
 }
 
-void MVKDevice::trackCommittedMTLCommandBuffer(id<MTLCommandBuffer> mtlCmdBuff) {
-	_committedMTLCommandBuffers++;
-	[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer>) {
-		if (--_committedMTLCommandBuffers == 0 && _losing.load()) {
-			lock_guard<mutex> lock(_lossLock);
-			_lossCondition.notify_all();
-		}
-	}];
+void MVKDevice::commitMTLCommandBuffer(id<MTLCommandBuffer> mtlCmdBuff) {
+	if ( !mtlCmdBuff ) { return; }
+	MVKMTLCommandBufferHandlerCount* handlerCount = objc_getAssociatedObject(mtlCmdBuff, &kMVKMTLCommandBufferHandlerCountKey);
+	if (handlerCount) { _pendingMTLCommandBufferHandlers += handlerCount->_count; }
+	[mtlCmdBuff commit];
 }
 
 void MVKDevice::addLossReleasable(MVKLossReleasable* releasable) {
@@ -5025,7 +5052,7 @@ VkResult MVKDevice::invalidateMappedMemoryRanges(uint32_t memRangeCount, const V
 		}
 		if (mvkBlitEnc.mtlBlitEncoder) { [mvkBlitEnc.mtlBlitEncoder endEncoding]; }
 		if (mvkBlitEnc.mtlCmdBuffer) {
-			[mvkBlitEnc.mtlCmdBuffer commit];
+			commitMTLCommandBuffer(mvkBlitEnc.mtlCmdBuffer);
 			[mvkBlitEnc.mtlCmdBuffer waitUntilCompleted];
 		}
 		return rslt;
@@ -5757,6 +5784,10 @@ void MVKDevice::reservePrivateData(const VkDeviceCreateInfo* pCreateInfo) {
 }
 
 MVKDevice::~MVKDevice() {
+	// Queue submissions still encoding, and handlers of committed Metal command buffers, still use this device.
+	mvkWaitForZero(_activeEncodings);
+	mvkWaitForZero(_pendingMTLCommandBufferHandlers);
+
 	if (_isPerformanceTracking) {
 		auto perfLogStyle = getMVKConfig().activityPerformanceLoggingStyle;
 		if (perfLogStyle == MVK_CONFIG_ACTIVITY_PERFORMANCE_LOGGING_STYLE_DEVICE_LIFETIME) {
