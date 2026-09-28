@@ -33,3 +33,14 @@ extern "C" void mvkTestLimitMetalBufferSize(VkPhysicalDevice device, uint64_t si
 extern "C" void mvkTestMarkDeviceLost(VkDevice device) {
     MVKDevice::getMVKDevice(device)->markLost();
 }
+struct TestDevice : MVKDevice {
+    static void getLossCounters(MVKDevice* device, int64_t* pendingHandlers, uint32_t* activeEncodings) {
+        *pendingHandlers = (device->* &TestDevice::_pendingMTLCommandBufferHandlers).load();
+        *activeEncodings = (device->* &TestDevice::_activeEncodings).load();
+    }
+};
+// The counts that a device loss report waits for: handlers of committed Metal command buffers, and queue submissions
+// still encoding. A loss test reads them when a host wait returns the loss, which must find both at zero.
+extern "C" void mvkTestGetLossCounters(VkDevice device, int64_t* pendingHandlers, uint32_t* activeEncodings) {
+    TestDevice::getLossCounters(MVKDevice::getMVKDevice(device), pendingHandlers, activeEncodings);
+}
