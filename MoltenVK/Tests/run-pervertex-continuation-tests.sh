@@ -4,7 +4,8 @@
 # Short, sequential M4 oracles for PerVertexKHR indirect continuation and queue publication, under Metal API and GPU
 # validation (the binary semaphore oracles run without it, as recorded). Each executable loads the library through
 # @executable_path/lib, so the same binaries can be rerun against another library for before/after comparisons.
-# Usage: run-pervertex-continuation-tests.sh <libMoltenVK.dylib> <output directory> <before|after> [repeats]
+# Usage: run-pervertex-continuation-tests.sh <libMoltenVK.dylib> <output directory> <before|after> [repeats] [tes]
+# "tes" runs the PerVertex TES cases instead, which need a library built with the test-only TES admission.
 # "before" records the expected outcomes of the parent runtime (legal draws beyond the private capacity lose the
 # device, dependent work reports success after that loss); "after" requires the continuation outcomes. An expected
 # value may list alternatives ("1|2"): in the parent runtime the loss is published by a completion handler that races
@@ -20,6 +21,8 @@ library=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 output=$(mkdir -p "$2" && cd "$2" && pwd)
 mode=$3
 repeats=${4:-0}
+suite=${5:-indirect}
+[[ $suite == indirect || $suite == tes ]] || { echo "suite must be indirect or tes"; exit 64; }
 [[ $mode == before || $mode == after ]] || { echo "mode must be before or after"; exit 64; }
 mkdir -p "$output/shaders" "$output/runs" "$output/bin/lib"
 exec > >(tee "$output/oracles.log") 2>&1
@@ -33,6 +36,13 @@ compile pervertex-indirect.vert reference.vert.spv -DREFERENCE
 compile pervertex-indirect.frag pervertex.frag.spv
 compile pervertex-indirect.frag pervertex-swap.frag.spv -DSWAP
 compile pervertex-indirect-args.comp args.comp.spv
+tes() { compile "PerVertexTES/$1" "$2" "${@:3}"; }
+tes triangle.vert tes-triangle.vert.spv
+tes triangle.tesc tes-triangle.tesc.spv
+tes triangle.tesc tes-level4.tesc.spv -DLEVEL=4.0
+tes ordered.tese tes-ordered.tese.spv
+tes ordered.frag tes-ordered.frag.spv
+tes wrong-patch.frag tes-wrong-patch.frag.spv
 flags=(-arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -I"$root/External/Vulkan-Headers/include")
 xcrun clang++ "${flags[@]}" "$test_dir/PerVertexIndirectGPUTests.cpp" "$library" -Wl,-rpath,@executable_path/lib -o "$output/bin/pervertex-indirect-gpu"
 xcrun clang++ "${flags[@]}" "$test_dir/PerVertexBinarySemaphoreOrderTests.mm" "$library" -Wl,-rpath,@executable_path/lib -framework Metal -framework Foundation -o "$output/bin/pervertex-binary-order"
@@ -69,6 +79,24 @@ run() {
 sync=(MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=1 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0)
 async=(MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0)
 same=(PERVERTEX_TEST_DEPENDENT_SAME_QUEUE=1)
+# TES suite: a PerVertex TES draw and an indirect draw in one command buffer. Legal levels render in both orders;
+# level 4, with no proven topology, must lose the device before the indirect draw, and no dependent work may report
+# success. The parent runtime reads the TES status only when the submission completes, after its signals.
+if [[ $suite == tes ]]; then
+	withtes=(PERVERTEX_TEST_INCLUDE_TES=1)
+	first=(PERVERTEX_TEST_INCLUDE_TES=1 PERVERTEX_TEST_TES_FIRST=1)
+	level4=(PERVERTEX_TEST_INCLUDE_TES=1 PERVERTEX_TEST_TES_FIRST=1 PERVERTEX_TEST_TES_LEVEL4=1)
+	run tes-after-indirect-single-sync 0 0 1 "${sync[@]}" "${common[@]}" "${same[@]}" "${withtes[@]}" -- pervertex-indirect-gpu "$output/shaders" draw u32 single compute tes-after-single
+	run tes-first-restart-two-async 0 0 1 "${async[@]}" "${common[@]}" "${first[@]}" PERVERTEX_TEST_DEPENDENT_FIRST=1 -- pervertex-indirect-gpu "$output/shaders" indexed-count u16 restart-two compute tes-first-restart-two
+	for ((i = 0; i <= repeats; ++i)); do
+		run tes-level4-cross-async-r$i 1 0 1 "${async[@]}" "${common[@]}" "${level4[@]}" PERVERTEX_TEST_DEPENDENT_FIRST=1 -- pervertex-indirect-gpu "$output/shaders" indexed-count u32 decisive compute tes-level4-cross-r$i
+		run tes-level4-same-sync-r$i 2 0 1 "${sync[@]}" "${common[@]}" "${same[@]}" "${level4[@]}" -- pervertex-indirect-gpu "$output/shaders" draw u32 single compute tes-level4-same-r$i
+		run tes-level4-no-wait-r$i 1 0 1 "${async[@]}" "${common[@]}" "${same[@]}" "${level4[@]}" PERVERTEX_TEST_DEPENDENT_NO_WAIT=1 -- pervertex-indirect-gpu "$output/shaders" indexed-count u32 decisive compute tes-level4-no-wait-r$i
+	done
+	shasum -a 256 "$output"/runs/* "$output/results.csv" > "$output/EVIDENCE.sha256"
+	echo "PERVERTEX_CONTINUATION $mode tes PASS: $(($(wc -l < "$output/results.csv") - 1)) cases"
+	exit 0
+fi
 # 1. Legal six-record draw, same-queue C, synchronous submits: red before at private capacity 5, green after.
 run single-capacity5-sync 2 0 1 "${sync[@]}" "${common[@]}" "${same[@]}" MVK_PERVERTEX_INDIRECT_RECORD_CAPACITY=5 -- pervertex-indirect-gpu "$output/shaders" draw u32 single compute single5
 run single-capacity6-sync 0 0 1 "${sync[@]}" "${common[@]}" "${same[@]}" MVK_PERVERTEX_INDIRECT_RECORD_CAPACITY=6 -- pervertex-indirect-gpu "$output/shaders" draw u32 single compute single6
