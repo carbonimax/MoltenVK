@@ -28,7 +28,10 @@ before=$(runs "$output/.before")
 
 environment="{\"MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS\":\"$([[ $mode == sync ]] && echo 1 || echo 0)\",\"MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS\":\"0\",\"MVK_CONFIG_LOG_LEVEL\":\"2\""
 [[ $validation == plain ]] || environment="$environment,\"MTL_DEBUG_LAYER\":\"1\",\"MTL_SHADER_VALIDATION\":\"1\""
+# TRIAL_EXTRA_ENVIRONMENT adds "NAME":"VALUE" pairs, comma separated, to the launch environment.
+[[ -z ${TRIAL_EXTRA_ENVIRONMENT:-} ]] || environment="$environment,$TRIAL_EXTRA_ENVIRONMENT"
 environment="$environment}"
+echo "launch environment: $environment"
 xcrun devicectl device process launch --device "$device" --terminate-existing -e "$environment" "$bundle"
 
 # Bounded wait: 15 minutes for a run directory that did not exist before and now holds report.json.
