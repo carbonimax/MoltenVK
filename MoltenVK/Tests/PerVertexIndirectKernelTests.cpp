@@ -27,14 +27,14 @@ static void check(bool condition, const char* message) {
 	if (!condition) { std::fprintf(stderr, "FAIL: %s\n", message); std::exit(1); }
 }
 
-enum : uint { kDrawCount, kStride, kIndexBytes, kIndexLo, kIndexHi, kCapacity, kViews, kTopology, kProvoking, kCorners, kHasCount, kDraw, kTableWidth, kGatherWidth, kCaptureWidth, kPhase, kRestart, kSteps };
+enum : uint { kDrawCount, kStride, kIndexBytes, kIndexLo, kIndexHi, kCapacity, kViews, kTopology, kProvoking, kCorners, kHasCount, kDraw, kTableWidth, kGatherWidth, kCaptureWidth, kPhase, kRestart, kSteps, kSnapshot };
 constexpr uint kGuard = 0xDEADBEEF;
 
 struct Kernel {
 	std::vector<uint8_t> args = std::vector<uint8_t>(4096);
 	std::vector<uint> count = {0}, plan = std::vector<uint>(256 + 64 * 40), gathered, pairs, triplets, corners;
 	std::vector<uint8_t> source;
-	uint p[18] = {};
+	uint p[19] = {};
 	void run(uint phase, uint64_t threads) {
 		p[kPhase] = phase;
 		for (uint64_t i = 0; i < threads; ++i) {
@@ -46,8 +46,9 @@ struct Kernel {
 
 static Kernel kernel(uint topology, bool provokingLast, bool corners, uint views, uint indexBytes) {
 	Kernel k;
-	uint p[18] = {1, 32, indexBytes, 1000, 0, 1u << 20, views, topology, provokingLast, corners, 0, 0, 7, 5, 3, 0, 0, 0};
-	std::copy(p, p + 18, k.p);
+	// Phase 0 freezes a single draw at plan word 48, as MVKCmdDraw lays it out; several draws start at word 256.
+	uint p[19] = {1, 32, indexBytes, 1000, 0, 1u << 20, views, topology, provokingLast, corners, 0, 0, 7, 5, 3, 0, 0, 0, 48};
+	std::copy(p, p + 19, k.p);
 	k.source.resize(4096);
 	k.gathered.assign(1024, kGuard);
 	return k;
@@ -120,6 +121,7 @@ static void checkAdmission() {
 			Kernel k = kernel(3, false, false, c.views, indexBytes);
 			k.p[kCapacity] = c.capacity;
 			k.p[kDrawCount] = 2;
+			k.p[kSnapshot] = 256;
 			k.p[kHasCount] = c.counted;
 			k.count[0] = c.count;
 			k.p[kIndexLo] = UINT32_MAX;
@@ -135,6 +137,7 @@ static void checkAdmission() {
 	// Count clamps to maxDrawCount; draws beyond Count are neither admitted nor planned.
 	Kernel k = kernel(3, false, false, 1, 0);
 	k.p[kDrawCount] = 2;
+	k.p[kSnapshot] = 256;
 	k.p[kHasCount] = 1;
 	k.p[kCapacity] = 12;
 	k.count[0] = 1;
