@@ -90,8 +90,33 @@ Le lancement à distance exige l'image disque développeur de cette version, dé
 
 **Défauts trouvés par ces essais, et corrigés.**
 - **Collision SPIRV-Cross.** Un fragment qui lit PerVertexKHR et `BaryCoordKHR` ne compilait pas : fausse collision de location privée. Corrigé par SPIRV-Cross `6af5a67f`, épinglé en `41a6c184`.
-- **Replay non indexé vide.** Les dessins portables non indexés ne rendaient rien sur les deux iPhone, tout en rapportant un succès : la barrière dans la passe ne rendait pas la capture visible au replay. Corrigé en `a564af04` par une frontière de passe de rendu.
+- **Replay non indexé vide, sous validation des shaders seulement.** Avant `a564af04`, la capture et le replay non indexés étaient séparés par une barrière dans la passe de rendu. Sous `MTL_SHADER_VALIDATION=1`, ces dessins ne rendaient rien, tout en rapportant un succès, sur l'iPhone 15 Pro, l'iPhone 18 Pro et l'iPad Pro M4. Sans validation, la même build (`b9165508`) passe 19/19 sur les trois. `a564af04` remplace la barrière par une frontière de passe de rendu, qui marche dans les deux cas mais coûte plus cher (voir ci-dessous).
 
 **Non vérifié.**
 - Sur l'iPad Pro 9,7″, les modes asynchrone et avec validation : ils demandent un lancement à distance.
 - Tout autre iPhone ou iPad.
+
+## Reproducteur Metal de la barrière
+
+`TRIAL_EXTRA_ENVIRONMENT='"TRIAL_SUITE":"metal-barrier"'` fait tourner à l'app `PerVertexBarrierRepro` au lieu des cas Vulkan. C'est du Metal pur, sans MoltenVK, qui reproduit la capture et le replay d'avant `a564af04`. Chaque variante tourne 5 fois ; le tableau donne le nombre de fois où le replay a vu les enregistrements de la capture.
+
+| GPU | Mode | Barrière (toutes variantes) | Frontière de passe | Sans ordre (témoin) |
+| --- | --- | --- | --- | --- |
+| iPhone 15 Pro, iPhone 18 Pro, iPad Pro M4 (iOS et iPadOS 27) | validation des shaders | 0/5 | 5/5 | 0/5 |
+| les mêmes | sans validation, ou validation de l'API seule | 5/5 | 5/5 | 0/5 |
+| Mac M4 Pro (macOS 27.2) | avec ou sans validation | 5/5 | 5/5 | 0/5 |
+
+- Les variantes de barrière : portée `Buffers`, barrière sur la ressource, `before` réduit au vertex, capture indirecte, capture qui rastérise, enregistrements `Shared`. Toutes se comportent comme le témoin sous la validation des shaders d'iOS.
+- La barrière est admise sur ces GPU : les Metal Feature Set Tables n'excluent pour Apple3 à Apple10 que `fragment` ou `tile` dans `after` et la portée `renderTargets`.
+- Aucun message de validation ne signale l'échec.
+
+**Coût de la frontière de passe**, sans validation : images de 16 dessins PerVertex sur des attachements RGBA8 et Depth32Float de 2556 × 1179, barrière et frontière alternées, médiane de 100 paires.
+
+| GPU | Barrière | Frontière de passe | Par frontière |
+| --- | --- | --- | --- |
+| iPhone 15 Pro | 0,515 ms | 1,501 ms | 62 µs |
+| iPhone 18 Pro | 0,165 ms | 0,594 ms | 27 µs |
+| iPad Pro M4 | 0,305 ms | 0,872 ms | 36 µs |
+| Mac M4 Pro | 0,251 ms | 0,642 ms | 24 µs |
+
+Le chemin indexé paie déjà ce coût : sa capture tourne dans un encodeur de calcul.
