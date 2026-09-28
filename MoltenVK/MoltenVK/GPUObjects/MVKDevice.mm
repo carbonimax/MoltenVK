@@ -4032,6 +4032,9 @@ void MVKDevice::releaseSemaphoreWaitsAfterLoss() {
 }
 
 VkResult MVKDevice::getHostWaitResult(bool isFinished, uint64_t timeout) {
+	// Orders the completion state the caller read before the loss checks below: a semaphore value raised by the
+	// release of Metal waits after a loss is then always followed by a check that sees the loss.
+	std::atomic_thread_fence(std::memory_order_seq_cst);
 	VkResult rslt = getConfigurationResult();
 	if (rslt != VK_SUCCESS) { return rslt; }
 	if (isLosing()) {
