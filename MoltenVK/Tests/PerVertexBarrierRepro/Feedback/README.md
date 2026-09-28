@@ -27,7 +27,8 @@ barrier uses the `Buffers` scope, `after: .vertex` and `before: [.vertex, .fragm
    running iOS 27.
 2. Every variant prints `BARRIER_REPRO PASS`. The summary reads 6 of 6.
 3. Run the `BarrierRepro-ShaderValidation` scheme. It differs only by the environment variable
-   `MTL_SHADER_VALIDATION=1`.
+   `MTL_SHADER_VALIDATION=1`. Alternatively, run the `BarrierRepro` scheme with Edit Scheme > Run > Diagnostics > Shader
+   Validation checked; this gives the same result.
 
 ## Expected result
 
@@ -80,8 +81,9 @@ Where the results come from:
   and 0/6 with `MTL_SHADER_VALIDATION=1`.
 - **macOS:** a command-line build of the same file (`-DBARRIER_REPRO_STANDALONE`).
 
-Not checked yet: whether the Shader Validation diagnostic of the Xcode scheme gives the same result as the environment
-variable.
+The Shader Validation diagnostic of the Xcode scheme gives the same result as the environment variable. This was
+checked on the iPad Pro M4 from Xcode 27.1: 0/6 with the diagnostic checked, and 6/6 without. Xcode saves the checked
+diagnostic as `enableGPUShaderValidationMode = "2"` on the scheme's `LaunchAction`.
 
 ## Impact
 
