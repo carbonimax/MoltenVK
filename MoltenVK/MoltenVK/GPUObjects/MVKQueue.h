@@ -23,6 +23,7 @@
 #include "MVKImage.h"
 #include "MVKSync.h"
 #include "MVKSmallVector.h"
+#include <atomic>
 #include <mutex>
 #include <condition_variable>
 
@@ -148,6 +149,9 @@ protected:
 	MVKQueueFamily* _queueFamily;
 	std::string _name;
 	dispatch_queue_t _execQueue;
+	dispatch_group_t _completionGroup;
+	dispatch_queue_t _retirementQueue;
+	std::atomic<uint32_t> _pendingRetirements{0};
 	std::mutex _execQueueMutex;
 	std::condition_variable _execQueueConditionVariable;
 	uint32_t _execQueueJobCount = 0;
@@ -272,6 +276,9 @@ protected:
 	virtual void reportPerVertexIndirectFailures() {}
 	virtual void reportPerVertexTessFailures() {}
 
+	// Set by scratch preflight or by following an outstanding retirement on this queue.
+	// Once selected, all remaining commits of this submission use ordered retirement.
+	bool _needsOrderedRetirement = false;
 	MVKCommandEncodingContext _encodingContext;
 	MVKSmallVector<MVKSemaphoreSubmitInfo> _signalSemaphores;
 	MVKFence* _fence = nullptr;

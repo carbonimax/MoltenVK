@@ -169,6 +169,8 @@ VkResult MVKQueue::waitIdle(MVKCommandUse cmdUse) {
 		[mtlCmdBuff commit];
 		[mtlCmdBuff waitUntilCompleted];
 	}
+	// The Metal sentinel does not wait for the ordered CPU retirement tasks.
+	dispatch_group_wait(_completionGroup, DISPATCH_TIME_FOREVER);
 	return _device->getConfigurationResult();
 }
 
@@ -297,7 +299,9 @@ MVKQueue::MVKQueue(MVKDevice* device, MVKQueueFamily* queueFamily, uint32_t inde
 	_priority = priority;
 	_globalPriority = globalPriority;
 
+	_completionGroup = dispatch_group_create();
 	initName();
+	_retirementQueue = dispatch_queue_create((getName() + "-Retirement").c_str(), DISPATCH_QUEUE_SERIAL);
 	initExecQueue();
 	initMTLCommandQueue();
 }
@@ -350,6 +354,8 @@ void MVKQueue::initMTLCommandQueue() {
 
 MVKQueue::~MVKQueue() {
 	destroyExecQueue();
+	dispatch_release(_completionGroup);
+	dispatch_release(_retirementQueue);
 	_submissionCaptureScope->destroy();
 	_device->removeResidencySet(_mtlQueue);
 
@@ -555,20 +561,47 @@ VkResult MVKQueueCommandBufferSubmission::commitActiveMTLCommandBuffer(bool sign
 	_activeMTLCommandBuffer = nil;
 
 	uint64_t startTime = getPerformanceTimestamp();
-	[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer> mtlCB) {
-		addPerformanceInterval(getPerformanceStats().queue.mtlCommandBufferExecution, startTime);
-		if (signalCompletion) { this->finish(); }	// Must be the last thing the completetion callback does.
-	}];
-
-	// Retrieve the result before committing MTLCommandBuffer, because finish() will destroy this instance.
+	// Encoding/commit is serial per VkQueue (external synchronization or _execQueue).
+	// A successor, even ordinary, cannot publish its fence before a pending status check.
+	_needsOrderedRetirement |= _queue->_pendingRetirements.load(std::memory_order_acquire) != 0;
+	bool orderedRetirement = _needsOrderedRetirement;
 	VkResult rslt = mtlCmdBuff ? getConfigurationResult() : VK_ERROR_OUT_OF_POOL_MEMORY;
-	[mtlCmdBuff commit];
-	[mtlCmdBuff release];		// retained
-
-	// If we need to signal completion, but an error occurred and the MTLCommandBuffer
-	// was not created, call the finish() function directly.
-	if (signalCompletion && !mtlCmdBuff) { finish(); }
-
+	if (orderedRetirement) {
+		MVKQueue* queue = _queue;
+		MVKDevice* device = getDevice();
+		dispatch_group_t completionGroup = queue->_completionGroup;
+		queue->retain();
+		device->retain();
+		dispatch_retain(completionGroup);
+		queue->_pendingRetirements.fetch_add(1, std::memory_order_relaxed);
+		dispatch_group_enter(completionGroup);
+		[mtlCmdBuff commit];
+		// Enqueue here, in commit order, never from an unordered Metal callback.
+		// Transfer the active buffer's retain to this task, including prefilled buffers.
+		dispatch_async(queue->_retirementQueue, ^{ @autoreleasepool {
+			// Apple: waits for GPU execution "and all of its completion handlers".
+			// https://developer.apple.com/documentation/metal/mtlcommandbuffer/waituntilcompleted().md
+			[mtlCmdBuff waitUntilCompleted];
+			if (mtlCmdBuff) { addPerformanceInterval(getPerformanceStats().queue.mtlCommandBufferExecution, startTime); }
+			[mtlCmdBuff release];
+			// A nil final buffer still follows every earlier retirement on this queue.
+			if (signalCompletion) { finish(); } // Last access to this submission.
+			queue->_pendingRetirements.fetch_sub(1, std::memory_order_release);
+			queue->release();
+			device->release();
+			dispatch_group_leave(completionGroup);
+			dispatch_release(completionGroup);
+		} });
+	} else {
+		// No outstanding retirement: retain the ordinary inline completion path.
+		[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer> mtlCB) {
+			addPerformanceInterval(getPerformanceStats().queue.mtlCommandBufferExecution, startTime);
+			if (signalCompletion) { finish(); } // Last access to this submission.
+		}];
+		[mtlCmdBuff commit];
+		[mtlCmdBuff release];
+		if (signalCompletion && !mtlCmdBuff) { finish(); }
+	}
 	return rslt;
 }
 
@@ -681,6 +714,10 @@ VkResult MVKQueueFullCommandBufferSubmission<N>::reservePerVertexScratch(std::un
 	for (auto& cbInfo : _cmdBuffers) {
 		VkResult result = cbInfo.commandBuffer->reservePerVertexScratch(cbInfo.perVertexScratch, prefilledExecutions);
 		if (result != VK_SUCCESS) { return result; }
+		for (auto& scratch : cbInfo.perVertexScratch) {
+			// These paths inspect GPU admission status in finish(). Drain all handlers first.
+			if (scratch->indirectCapacity || scratch->tessTopologyPipeline) { _needsOrderedRetirement = true; }
+		}
 	}
 	return VK_SUCCESS;
 }
