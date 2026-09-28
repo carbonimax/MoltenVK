@@ -2170,6 +2170,14 @@ void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder, const MVKI
 #pragma mark MVKCmdDrawMeshTasks
 
 VkResult MVKCmdDrawMeshTasks::setContent(MVKCommandBuffer* cmdBuff, uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) {
+	// Metal executes nothing, and reports no error, for a mesh grid beyond its limit: refuse such a draw here rather than
+	// omit it. The Metal Feature Set Tables list 1024 threadgroups on Apple7 and Apple8, 1,048,575 on Apple9 and
+	// 4,194,303 on Apple10, all below Vulkan's minimum maxMeshWorkGroupTotalCount of 2^22. On Apple9 the pipeline
+	// reports 1,048,576, and a grid of exactly that many threadgroups draws nothing: the reported value is exclusive.
+	uint64_t groups = uint64_t(groupCountX) * groupCountY * groupCountZ;
+	if (auto* mesh = cmdBuff->getRecordedMeshPipeline(); mesh && groups >= mesh->getMaxMeshThreadgroupsPerGrid()) {
+		return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCmdDrawMeshTasksEXT(): %llu workgroups reach the %lu this Metal mesh pipeline reports, beyond which it draws nothing.", (unsigned long long)groups, (unsigned long)mesh->getMaxMeshThreadgroupsPerGrid());
+	}
 	_groupCountX = groupCountX;
 	_groupCountY = groupCountY;
 	_groupCountZ = groupCountZ;

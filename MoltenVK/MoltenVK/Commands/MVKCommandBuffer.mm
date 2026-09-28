@@ -262,6 +262,7 @@ VkResult MVKCommandBuffer::reset(VkCommandBufferResetFlags flags) {
 	_lastTessellationPipeline = nullptr;
 	_recordedPerVertexPipeline = nullptr;
 	_recordedTessellationPipeline = nullptr;
+	_recordedMeshPipeline = nullptr;
 	_recordedPatchControlPoints = 0;
 	_recordedAttachmentsKnown = false;
 	_recordedRenderingError = nullptr;
@@ -690,6 +691,7 @@ void MVKCommandBuffer::recordBindPipeline(MVKCmdBindPipeline* mvkBindPipeline) {
 		_recordedPerVertexPipeline = graphics->usesPerVertexInputBuffer() ? graphics : nullptr;
 		bool ordinaryTessellation = graphics->isTessellationPipeline() && !graphics->usesPerVertexTessEval() && !graphics->usesPerVertexInputBuffer();
 		_recordedTessellationPipeline = ordinaryTessellation ? graphics : nullptr;
+		_recordedMeshPipeline = graphics->isMeshPipeline() ? graphics : nullptr;
 	}
 }
 
