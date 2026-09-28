@@ -20,7 +20,7 @@ static unsigned liveBuffers;
 @public
 	NSUInteger _length;
 	bool _visible;
-	uint8_t _bytes[512];
+	alignas(uint32_t) uint8_t _bytes[512];
 }
 @end
 @implementation ScratchTestBuffer
@@ -127,6 +127,42 @@ int main() {
 			for (unsigned i = 0; i < 7; ++i) { assert(restart[0]->buffers[i] != restart[1]->buffers[i]); }
 		}
 		assert(liveBuffers == 0);
+		// The GPU plan must survive a later replay reservation, including its failure path.
+		MVKPerVertexScratchRequest planRequest{0, 0, 0};
+		planRequest.planSize = 256;
+		planRequest.indirectCapacity = 6;
+		MVKPerVertexScratchRequest replayRequest{48, 24, 12};
+		device->calls = 0; device->failAt = 0;
+		{
+			MVKPerVertexScratch staged;
+			assert(staged.reservePlan((id<MTLDevice>)device, planRequest));
+			assert(staged.buffers[12] && !staged.buffers[0]);
+			*(uint32_t*)staged.buffers[12].contents = 2;
+			device->failAt = device->calls + 2; device->failureMode = 0;
+			assert(!staged.reserveReplay((id<MTLDevice>)device, replayRequest));
+			assert(staged.getIndirectStatus() == 2);
+		}
+		assert(liveBuffers == 0);
+		device->calls = 0; device->failAt = 0;
+		{
+			MVKPerVertexScratch staged;
+			assert(staged.reservePlan((id<MTLDevice>)device, planRequest));
+			*(uint32_t*)staged.buffers[12].contents = 2;
+			assert(staged.reserveReplay((id<MTLDevice>)device, replayRequest));
+			assert(staged.buffers[0].length == 48 && staged.getIndirectStatus() == 2);
+		}
+		assert(liveBuffers == 0);
+		MVKPerVertexScratchRequest tesPlan{0, 0, 0};
+		tesPlan.tessSizes[5] = 256;
+		device->calls = 0; device->failAt = 0;
+		{
+			MVKPerVertexScratch staged;
+			assert(staged.reservePlan((id<MTLDevice>)device, tesPlan));
+			*(uint32_t*)staged.buffers[12].contents = 2;
+			assert(staged.reserveReplay((id<MTLDevice>)device, replayRequest));
+			assert(staged.getTessEvalStatus() == 2);
+		}
+		assert(liveBuffers == 0);
 		// Reject a real-looking shared buffer with no CPU mapping.
 		device->calls = 0; device->failAt = 2; device->failureMode = 2;
 		MVKPerVertexScratchReservations unmapped;
@@ -184,5 +220,5 @@ int main() {
 		assert(liveBuffers == 0);
 		[device release];
 	}
-	std::puts("PASS: 120 allocation failures, optional corner/restart allocation failures/success, unmapped buffer, whole-call rollback, prefill retry, independent executions, completion ownership, host OOM (CPU only)");
+	std::puts("PASS: 120 allocation failures, optional corner/restart allocation failures/success, unmapped buffer, whole-call rollback, prefill retry, independent executions, completion ownership, staged plan/replay, host OOM (CPU only)");
 }
