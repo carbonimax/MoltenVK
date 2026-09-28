@@ -76,11 +76,12 @@ Il accepte `plain` à la place de `validated`.
 | --- | --- | --- | --- | --- |
 | iPhone 18 Pro (`iPhone19,2`, iOS 27.2, Apple10) | natif `vertex_value`, et portable pour `portable-*`, `continuation-*`, `tes-*` | 19/19 | 19/19 | 19/19 |
 | iPhone 15 Pro (`iPhone16,1`, iOS 27.0, Apple9) | portable | 19/19 | 19/19 | 19/19 |
+| iPad Pro 11″ M4 (`iPad16,3`, iPadOS 27.2, Apple9) | portable | 19/19 | 19/19 | 19/19 |
 
 **Défauts trouvés par ces essais, et corrigés.**
 - **Collision SPIRV-Cross.** Un fragment qui lit PerVertexKHR et `BaryCoordKHR` ne compilait pas : fausse collision de location privée. Corrigé par SPIRV-Cross `6af5a67f`, épinglé en `41a6c184`.
 - **Replay non indexé vide.** Les dessins portables non indexés ne rendaient rien sur les deux iPhone, tout en rapportant un succès : la barrière dans la passe ne rendait pas la capture visible au replay. Corrigé en `a564af04` par une frontière de passe de rendu.
 
 **Non vérifié.**
-- L'iPad Pro M4 et l'iPad Pro 9,7″. Ce dernier n'a pas de barycentriques Metal : ses cas seraient ignorés.
-- Tout iPhone autre que ces deux-là.
+- L'iPad Pro 9,7″ (2016). Il n'a pas de barycentriques Metal : ses cas seraient ignorés.
+- Tout autre iPhone ou iPad.
