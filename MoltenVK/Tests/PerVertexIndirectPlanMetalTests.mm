@@ -3,6 +3,7 @@
 // Runs the production Metal helper and checks argument and Count snapshots across phases.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include "MVKPerVertexScratch.h"
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -71,6 +72,16 @@ int main(int argc, char** argv) {
         };
         auto small = run({6, 2, 4, 7, 0}, 0, 1, 5, false, 0);
         require(small[0] == 1 && small[48] == 6 && small[49] == 2 && small[50] == 4 && small[51] == 7 && small[53] == 12 && small[54] == 0 && small[55] == 1, "single draw beyond old capacity");
+        // Plan alone with the representable record ceiling, then size and reserve actual replay scratch.
+        auto planned = run({6, 1, 0, 0, 0}, 0, 1, UINT32_MAX, false, 0);
+        MVKPerVertexScratchRequest replay{};
+        NSUInteger gatheredOffset = 0;
+        uint32_t scanSteps = 0;
+        require(planned[0] == 0 && planned[53] == 6 && planned[54] == 0 && planned[55] == 1 && planned[56] == 1, "six-record GPU plan survives the old five-record cutoff");
+        require(mvkSizePerVertexIndirectReplay(planned.data(), sizeof(planned), 48 * sizeof(uint32_t), 1, 1, 32, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, false, false, device.maxBufferLength, replay, gatheredOffset, scanSteps), "size replay from frozen GPU plan");
+        require(replay.captureSize == 192 && replay.occurrenceSize == 48 && replay.primitiveSize == 24 && !gatheredOffset && !scanSteps, "exact six-record replay sizes");
+        MVKPerVertexScratch exact;
+        require(exact.reserveReplay(device, replay) && exact.buffers[0].length >= replay.captureSize, "allocate exact Metal replay scratch after GPU plan");
         auto resumed = run({6, 2, 4, 7, 0}, 0, 1, 12, false, 0, true);
         require(resumed[4] == 6 && resumed[5] == 2 && resumed[6] == 4 && resumed[7] == 7, "phase 1 consumes GPU snapshot after source mutation");
         auto zero = run({6, 2, 4, 7, 0}, 0, 1, 5, true, 0, true);
@@ -94,7 +105,7 @@ int main(int argc, char** argv) {
         require(frozenMulti[4] == 9, "multi-draw arguments remain frozen after source mutation");
         auto frozenIndexedMulti = run({6, 1, 0, 0, 0}, 2, 1, 20, false, 0, true, true, true);
         require(frozenIndexedMulti[4] == 9 && frozenIndexedMulti[35] == 3 && frozenIndexedMulti[6] == uint32_t(-4) && frozenIndexedMulti[7] == 7, "indexed multi-draw retains all five argument words");
-        std::puts("PASS: production Metal single/multiple argument and Count snapshots, indexed arguments and 64-bit bounds");
+        std::puts("PASS: production Metal snapshots, GPU-plan replay sizing/allocation, indexed arguments and 64-bit bounds");
         return 0;
     }
 }
