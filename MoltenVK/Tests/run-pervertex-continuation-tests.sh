@@ -35,6 +35,8 @@ compile pervertex-indirect.vert indirect.vert.spv
 compile pervertex-indirect.vert reference.vert.spv -DREFERENCE
 compile pervertex-indirect.frag pervertex.frag.spv
 compile pervertex-indirect.frag pervertex-swap.frag.spv -DSWAP
+compile pervertex-indirect.frag pervertex-portable.frag.spv -DPORTABLE
+compile pervertex-indirect.frag pervertex-portable-swap.frag.spv -DPORTABLE -DSWAP
 compile pervertex-indirect-args.comp args.comp.spv
 tes() { compile "PerVertexTES/$1" "$2" "${@:3}"; }
 tes triangle.vert tes-triangle.vert.spv
@@ -117,6 +119,9 @@ run index-oob-sync 0 0 1 "${sync[@]}" "${common[@]}" "${same[@]}" -- pervertex-i
 #    B/A/C/D is a preexisting pairing defect and must keep its outcome; imported reuse must stay green.
 run binary-bacd 1 1 0 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 -- pervertex-binary-order
 run binary-imported-reuse 0 0 0 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 -- pervertex-binary-order --imported-reuse
+# 5b. A fragment reading PerVertexKHR inputs and BaryCoordKHR together: before SPIRV-Cross 6af5a67f its pipeline
+#     failed to compile (a false collision of the barycentric private Location with a builtin input mapping).
+run portable-bary-single-sync 1 0 1 "${sync[@]}" "${common[@]}" "${same[@]}" PERVERTEX_TEST_PORTABLE=1 -- pervertex-indirect-gpu "$output/shaders" draw u32 single compute portable-bary
 # 6. Secondary command buffers and Metal command buffer prefill. The draw recorded in a secondary pauses the primary's
 #    encoder; a loss there stops the primary too. Deferred (1) and immediate (2) prefill encode these draws at submission.
 secondary=(PERVERTEX_TEST_SECONDARY=1)

@@ -389,7 +389,10 @@ int main(int argc, char** argv) {
 			check(vkCreateShaderModule(d.device, &info, nullptr, &result), "Create shader module");
 			return result;
 		};
-		VkShaderModule indirectVertex = module("indirect.vert.spv"), referenceVertex = module("reference.vert.spv"), fragment = module("pervertex.frag.spv"), producerShader = module("args.comp.spv");
+		// PERVERTEX_TEST_PORTABLE=1 uses fragments that also read BaryCoordKHR, which forces MoltenVK's portable capture and
+		// replay where plain PerVertexKHR would be native (Apple10 with MSL 4.0).
+		const bool portable = getenv("PERVERTEX_TEST_PORTABLE") != nullptr;
+		VkShaderModule indirectVertex = module("indirect.vert.spv"), referenceVertex = module("reference.vert.spv"), fragment = module(portable ? "pervertex-portable.frag.spv" : "pervertex.frag.spv"), producerShader = module("args.comp.spv");
 		auto graphicsPipeline = [&](VkShaderModule vertex) {
 			// Restart needs a strip here: list restart would require primitiveTopologyListRestart.
 			VkPipelineShaderStageCreateInfo stages[2]{{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
@@ -452,7 +455,7 @@ int main(int argc, char** argv) {
 		VkPipeline referencePipeline = graphicsPipeline(referenceVertex);
 		// PERVERTEX_TEST_SWAP_FRAGMENT=1 is a negative control: only the indirect pipeline permutes corners.
 		const char* swap = getenv("PERVERTEX_TEST_SWAP_FRAGMENT");
-		if (swap && !strcmp(swap, "1")) fragment = module("pervertex-swap.frag.spv");
+		if (swap && !strcmp(swap, "1")) fragment = module(portable ? "pervertex-portable-swap.frag.spv" : "pervertex-swap.frag.spv");
 		VkPipeline indirectPipeline = graphicsPipeline(indirectVertex);
 		VkPipeline tessPipeline = VK_NULL_HANDLE;
 		if (withTES) {
@@ -861,9 +864,18 @@ int main(int argc, char** argv) {
 			auto expected = expectedRecords(s);
 			record(referenceCommands, true, s);
 			Result ref = run(referenceCommands);
-			bool refOk = ref.submit == VK_SUCCESS && ref.wait == VK_SUCCESS && ref.records == expected && ref.invocations == expected.size();
+			// Vulkan may invoke the vertex shader more than once per vertex. PERVERTEX_TEST_ALLOW_REPEATED_INVOCATIONS=1 accepts
+			// that, for pipelines that may run natively: the records must then be the expected ones, each at least once.
+			const bool allowRepeated = getenv("PERVERTEX_TEST_ALLOW_REPEATED_INVOCATIONS") != nullptr;
+			auto recordsMatch = [&](const Result& r) {
+				if (r.records == expected && r.invocations == expected.size()) return true;
+				if (!allowRepeated || r.invocations < expected.size() || r.invocations > kMaxRecords) return false;
+				auto unique = [](std::vector<std::array<uint32_t, 4>> v) { v.erase(std::unique(v.begin(), v.end()), v.end()); return v; };
+				return unique(r.records) == unique(expected);
+			};
+			bool refOk = ref.submit == VK_SUCCESS && ref.wait == VK_SUCCESS && recordsMatch(ref);
 			// Direct draws are the pixel reference; their recorded invocations must also match the CPU oracle.
-			std::printf("submission=%zu reference submit=%d wait=%d invocations=%u expected=%zu records_match=%d\n", n, ref.submit, ref.wait, ref.invocations, expected.size(), int(ref.records == expected));
+			std::printf("submission=%zu reference submit=%d wait=%d invocations=%u expected=%zu records_match=%d\n", n, ref.submit, ref.wait, ref.invocations, expected.size(), int(recordsMatch(ref)));
 			if (!n || scenarioName != "repeat") record(indirectCommands, false, s);
 			Result got = run(indirectCommands, splitProducer);
 			VkResult wantWait = s.expectLost ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
@@ -892,9 +904,9 @@ int main(int argc, char** argv) {
 			// After a device loss mapped memory is undefined (Vulkan, Lost Device): the runtime may stop the command
 			// buffer at the lost draw, so the readback that follows it is not compared.
 			bool image = s.expectLost || (!mismatches && magenta && coverage && oracle && tessOracle);
-			bool ok = refOk && got.submit == VK_SUCCESS && got.wait == wantWait && got.produced && image && got.records == expected && got.invocations == expected.size();
+			bool ok = refOk && got.submit == VK_SUCCESS && got.wait == wantWait && got.produced && image && recordsMatch(got);
 			std::printf("submission=%zu indirect submit=%d wait=%d expected_wait=%d gpu_written_arguments=%d pixel_mismatches=%zu prior_write=%d covered_pixels=%u cpu_samples=%u/%d tess_oracle=%d tess_red=%u invocations=%u expected=%zu records_match=%d %s\n",
-				n, got.submit, got.wait, wantWait, int(got.produced), mismatches, int(magenta), covered, samples, int(oracle), int(tessOracle), tessRed, got.invocations, expected.size(), int(got.records == expected), ok ? "PASS" : "FAIL");
+				n, got.submit, got.wait, wantWait, int(got.produced), mismatches, int(magenta), covered, samples, int(oracle), int(tessOracle), tessRed, got.invocations, expected.size(), int(recordsMatch(got)), ok ? "PASS" : "FAIL");
 			std::ofstream(prefix + "-" + std::to_string(n) + "-indirect.rgba", std::ios::binary).write(reinterpret_cast<const char*>(got.image.data()), got.image.size());
 			std::ofstream(prefix + "-" + std::to_string(n) + "-reference.rgba", std::ios::binary).write(reinterpret_cast<const char*>(ref.image.data()), ref.image.size());
 			pass &= ok;
