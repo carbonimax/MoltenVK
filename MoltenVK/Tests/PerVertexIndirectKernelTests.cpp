@@ -163,6 +163,66 @@ static void checkAdmission() {
 	}
 }
 
+// The one-draw GPU plan must retain producer-written arguments even when admission later fails.
+static void checkSingleDrawSnapshot() {
+	Kernel k = kernel(3, false, false, 2, 0);
+	k.p[kCapacity] = 5;
+	k.setDraw(0, {6, 2, 4, 7});
+	k.run(0, 1);
+	check(k.plan[0] == 1 && k.plan[55] == 1, "rejected single draw still has a plan snapshot");
+	check(k.plan[48] == 6 && k.plan[49] == 2 && k.plan[50] == 4 && k.plan[51] == 7, "nonindexed GPU arguments snapshotted");
+	check((uint64_t(k.plan[54]) << 32 | k.plan[53]) == 24, "physical records include views beyond old capacity");
+	k.setDraw(0, {9, 1, 0, 0});
+	check(k.plan[48] == 6 && k.plan[49] == 2, "later argument writes cannot change the snapshot");
+	Kernel resumed = kernel(3, false, false, 1, 0);
+	resumed.p[kCapacity] = 12;
+	resumed.setDraw(0, {6, 2, 4, 7});
+	resumed.run(0, 1);
+	resumed.setDraw(0, {9, 1, 0, 0});
+	resumed.run(1, 1);
+	check(resumed.plan[4] == 6 && resumed.plan[5] == 2 && resumed.plan[6] == 4 && resumed.plan[7] == 7, "phase 1 consumes the plan snapshot");
+	Kernel counted = kernel(3, false, false, 1, 0);
+	counted.p[kHasCount] = 1;
+	counted.setDraw(0, {6, 2, 4, 7});
+	counted.run(0, 1);
+	check(counted.plan[55] == 0 && counted.plan[53] == 0, "Count zero has no snapshot or records");
+	counted.count[0] = 1;
+	counted.run(1, 1);
+	check(counted.plan[4] == 0 && counted.plan[5] == 0, "Count becoming one cannot enable a skipped draw");
+	Kernel admittedCount = kernel(3, false, false, 1, 0);
+	admittedCount.p[kHasCount] = 1;
+	admittedCount.count[0] = 1;
+	admittedCount.setDraw(0, {6, 2, 4, 7});
+	admittedCount.run(0, 1);
+	admittedCount.count[0] = 0;
+	admittedCount.setDraw(0, {9, 1, 0, 0});
+	admittedCount.run(1, 1);
+	check(admittedCount.plan[4] == 6 && admittedCount.plan[5] == 2 && admittedCount.plan[6] == 4, "Count becoming zero cannot suppress an admitted draw");
+	Kernel indexed = kernel(3, false, false, 1, 2);
+	indexed.setDraw(0, {6, 2, 3, uint(-4), 7});
+	indexed.run(0, 1);
+	check(indexed.plan[48] == 6 && indexed.plan[50] == 3 && indexed.plan[51] == uint(-4) && indexed.plan[52] == 7, "indexed arguments include vertex offset and first instance");
+	indexed.setDraw(0, {9, 1, 0, 0, 0});
+	indexed.run(1, 1);
+	check(indexed.plan[6] == uint(-4) && indexed.plan[7] == 7 && indexed.plan[35] == 3, "indexed phase 1 retains the snapped vertex offset and first index");
+	Kernel overflow = kernel(3, false, false, 32, 0);
+	overflow.setDraw(0, {UINT32_MAX, UINT32_MAX, 0, 0});
+	overflow.run(0, 1);
+	check(overflow.plan[53] == UINT32_MAX && overflow.plan[54] == UINT32_MAX, "record requirement saturates instead of wrapping");
+	Kernel wide = kernel(3, false, false, 1, 0);
+	wide.setDraw(0, {UINT32_MAX, 2, 0, 0});
+	wide.run(0, 1);
+	check(wide.plan[53] == UINT32_MAX - 1 && wide.plan[54] == 1, "record requirement keeps the nonoverflowing high word");
+	Kernel carry = kernel(3, false, false, 2, 0);
+	carry.setDraw(0, {UINT32_MAX, 2, 0, 0});
+	carry.run(0, 1);
+	check(carry.plan[53] == UINT32_MAX - 3 && carry.plan[54] == 3, "low-limb carry reaches the high word");
+	Kernel empty = kernel(3, false, false, 1, 0);
+	empty.setDraw(0, {0, 2, 4, 7});
+	empty.run(0, 1);
+	check(empty.plan[55] == 1 && empty.plan[53] == 0 && empty.plan[48] == 0, "empty draw preserves arguments with zero records");
+}
+
 // Gathered indices start at firstIndex, keep little-endian values, and widen only the restart marker.
 static void checkGather() {
 	for (uint bytes : {1u, 2u, 4u}) {
@@ -176,6 +236,7 @@ static void checkGather() {
 				for (uint b = 0; b < bytes; ++b) { k.source[(5 + i) * bytes + b] = uint8_t(values[i] >> (8 * b)); }
 			}
 			k.setDraw(0, {uint(values.size()), 1, 5, 0, 0});
+			k.run(0, 1);
 			k.run(1, 1);
 			k.run(3, uint64_t(k.plan[28]) * 5);
 			for (size_t i = 0; i < values.size(); ++i) {
@@ -227,6 +288,7 @@ static void checkRestartBlocks() {
 						k.p[kSteps] = steps;
 						k.p[kCapacity] = capacity;
 						k.setDraw(0, {count, instances, 0, 0, 9});
+						k.run(0, 1);
 						k.run(1, 1);
 						for (uint block = 0; block < steps + 3; ++block) {
 							const uint* p = k.plan.data() + 256 + 64 * block;
@@ -250,7 +312,8 @@ static void checkRestartBlocks() {
 int main() {
 	checkTables();
 	checkAdmission();
+	checkSingleDrawSnapshot();
 	checkGather();
 	checkRestartBlocks();
-	std::printf("PASS: %u checks; production perVertexIndirect tables for all six topologies, both provoking modes, corners, views and indexed/non-indexed plans; admission bounds, Count clamp and 64-bit products; gathers for three index widths; fixed-step restart blocks equal to direct restart dispatch\n", checks);
+	std::printf("PASS: %u checks; production perVertexIndirect tables for all six topologies, both provoking modes, corners, views and indexed/non-indexed plans; admission bounds, Count clamp, one-draw snapshots and 64-bit products; gathers for three index widths; fixed-step restart blocks equal to direct restart dispatch\n", checks);
 }

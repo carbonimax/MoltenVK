@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
 		const std::string topologyText = topologyName ? topologyName : "triangle-list";
 		const VkPrimitiveTopology topology = restart ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : topologyText == "point-list" ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST : topologyText == "line-list" ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : topologyText == "line-strip" ? VK_PRIMITIVE_TOPOLOGY_LINE_STRIP : topologyText == "triangle-strip" ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : topologyText == "triangle-fan" ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 		if (topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST && topologyText != "triangle-list") throw std::runtime_error("Unknown topology");
-		if (scenarioName == "single" && (form != "draw" || topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)) throw std::runtime_error("single requires a nonindexed triangle-list draw");
+		if (scenarioName == "single" && ((form != "draw" && form != "indexed") || topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)) throw std::runtime_error("single requires a triangle-list draw without Count");
 		// Dynamic restart state: the pipeline may restart, so restart scratch is reserved either way.
 		const bool dynamicRestart = scenarioName.rfind("restart-dynamic", 0) == 0, restartOn = scenarioName != "restart-dynamic-off";
 		if (restart && !indexed) throw std::runtime_error("restart scenarios need an indexed form");
@@ -148,7 +148,7 @@ int main(int argc, char** argv) {
 			Draw empty = base;
 			empty.instances = 0;
 			Scenario s{{base, counted ? base : empty}, 1, false};
-			if (name == "single") { s.draws = {Draw{6, 1, 4, 0, 2}, empty}; s.gpuCount = 1; }
+			if (name == "single") { Draw one = base; one.instances = 1; s.draws = {one, empty}; s.gpuCount = 1; }
 			else if (name == "zero") { s.draws = {counted ? base : empty, counted ? base : empty}; s.gpuCount = 0; }
 			else if (name == "two" || name == "overflow-second" || name == "restart-two") { s.draws = {base, base}; s.gpuCount = 7; }
 			else if (name == "restart-overflow") { s.expectLost = true; }
