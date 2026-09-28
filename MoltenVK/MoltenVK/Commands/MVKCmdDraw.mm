@@ -327,9 +327,9 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 		return;
 	}
 	if (!indexBinding) {
-		// The replay reads what the capture wrote: separate them by a render pass boundary. A vertex-to-vertex memory
-		// barrier inside the pass left the capture's records invisible to the replay on iPhone GPUs (A17 Pro, A20 Pro),
-		// which then drew nothing, while it worked on an M4.
+		// The replay reads what the capture wrote: separate them by a render pass boundary. Like MVKCmdPipelineBarrier,
+		// this avoids memory barriers inside a render pass on Apple GPUs. Metal shader validation on iOS and iPadOS 27
+		// silently ignores them, and the replay then draws nothing (Tests/PerVertexBarrierRepro).
 		cmdEncoder->encodeStoreActions(true);
 		cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass);
 		cmdEncoder->finalizeDrawState(kMVKGraphicsStageRasterization);
