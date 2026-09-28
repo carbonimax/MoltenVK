@@ -70,16 +70,24 @@ void MVKQueue::propagateDebugName() { setMetalObjectLabel(_mtlQueue, _debugName)
 
 // Execute the queue submission under an autoreleasepool to ensure transient Metal objects are autoreleased.
 // This is critical for apps that don't use standard OS autoreleasing runloop threading.
-static inline VkResult execute(MVKQueueSubmission* qSubmit) { @autoreleasepool { return qSubmit->execute(); } }
+// The device reports a loss to host waits only while no submission is encoding.
+static inline VkResult execute(MVKDevice* device, MVKQueueSubmission* qSubmit) {
+	device->beginEncoding();
+	VkResult rslt;
+	@autoreleasepool { rslt = qSubmit->execute(); }		// May destroy qSubmit.
+	device->endEncoding();
+	return rslt;
+}
 
 // Executes the submmission, either immediately, or by dispatching to an execution queue.
 // Submissions to the execution queue are wrapped in a dedicated autoreleasepool.
 // Relying on the dispatch queue to find time to drain the autoreleasepool can
 // result in significant memory creep under heavy workloads.
 VkResult MVKQueue::submit(MVKQueueSubmission* qSubmit) {
-	if (_device->getConfigurationResult() != VK_SUCCESS) {
+	VkResult devRslt = _device->isLosing() ? VK_ERROR_DEVICE_LOST : _device->getConfigurationResult();
+	if (devRslt != VK_SUCCESS) {
 		if (qSubmit) { qSubmit->destroy(); }
-		return _device->getConfigurationResult();
+		return devRslt;
 	}
 
 	if ( !qSubmit ) { return VK_SUCCESS; }     // Ignore nils
@@ -88,19 +96,32 @@ VkResult MVKQueue::submit(MVKQueueSubmission* qSubmit) {
 	// Submit regardless of config result, to ensure submission semaphores and fences are signalled.
 	// The submissions will ensure a misconfiguration will be safe to execute.
 	VkResult rslt = qSubmit->getConfigurationResult();
-	if (_execQueue) {
-		std::unique_lock lock(_execQueueMutex);
+	MVKDevice* device = _device;
+	std::unique_lock lock(_execQueueMutex);
+	dispatch_queue_t execQueue = _execQueue;
+	bool usesWorker = !execQueue && (qSubmit->needsWorker() || _execQueueJobCount);
+	if (usesWorker) {
+		// With synchronous submits, a submission that waits for its own Metal work would block the caller, which may
+		// be the only thread able to release that work. It, and every later submission to this queue until the worker
+		// is idle, execute in order on a worker, and report execution errors to host waits instead of vkQueueSubmit().
+		if ( !_workerQueue ) { _workerQueue = dispatch_queue_create((getName() + "-Worker").c_str(), DISPATCH_QUEUE_SERIAL); }	// retained
+		execQueue = _workerQueue;
+		// Synchronous submits assign the values of semaphores encoded by Metal here, in the order of submission.
+		qSubmit->reserveSemaphores();
+	}
+	if (execQueue) {
 		_execQueueJobCount++;
 
-		dispatch_async(_execQueue, ^{
-			execute(qSubmit);
+		dispatch_async(execQueue, ^{
+			execute(device, qSubmit);
 
 			std::unique_lock execLock(_execQueueMutex);
 			if (!--_execQueueJobCount)
 				_execQueueConditionVariable.notify_all();
 		} );
 	} else {
-		rslt = execute(qSubmit);
+		lock.unlock();
+		rslt = execute(device, qSubmit);
 	}
 	return rslt;
 }
@@ -159,7 +180,7 @@ VkResult MVKQueue::submit(const VkPresentInfoKHR* pPresentInfo) {
 }
 
 VkResult MVKQueue::waitIdle(MVKCommandUse cmdUse) {
-	if (_execQueue) {
+	{
 		std::unique_lock lock(_execQueueMutex);
 		while (_execQueueJobCount)
 			_execQueueConditionVariable.wait(lock);
@@ -171,7 +192,7 @@ VkResult MVKQueue::waitIdle(MVKCommandUse cmdUse) {
 	}
 	// The Metal sentinel does not wait for the ordered CPU retirement tasks.
 	dispatch_group_wait(_completionGroup, DISPATCH_TIME_FOREVER);
-	return _device->getConfigurationResult();
+	return _device->getHostWaitResult(true, UINT64_MAX);
 }
 
 id<MTLCommandBuffer> MVKQueue::getMTLCommandBuffer(MVKCommandUse cmdUse, bool retainRefs) {
@@ -368,11 +389,15 @@ MVKQueue::~MVKQueue() {
 	[_mtlCmdBuffLabelInvalidateMappedMemoryRanges release];
 }
 
-// Destroys the execution dispatch queue.
+// Destroys the execution dispatch queues.
 void MVKQueue::destroyExecQueue() {
 	if (_execQueue) {
 		dispatch_release(_execQueue);
 		_execQueue = nullptr;
+	}
+	if (_workerQueue) {
+		dispatch_release(_workerQueue);
+		_workerQueue = nullptr;
 	}
 }
 
@@ -381,11 +406,40 @@ void MVKQueue::destroyExecQueue() {
 #pragma mark MVKQueueSubmission
 
 void MVKSemaphoreSubmitInfo::encodeWait(id<MTLCommandBuffer> mtlCmdBuff) {
-	if (_semaphore) { _semaphore->encodeWait(mtlCmdBuff, value); }
+	if ( !_semaphore ) { return; }
+	if (_isReserved) {
+		_semaphore->encodeReservedWait(mtlCmdBuff, _reservation);
+	} else {
+		_semaphore->encodeWait(mtlCmdBuff, value);
+	}
 }
 
 void MVKSemaphoreSubmitInfo::encodeSignal(id<MTLCommandBuffer> mtlCmdBuff) {
-	if (_semaphore) { _semaphore->encodeSignal(mtlCmdBuff, value); }
+	if ( !_semaphore ) { return; }
+	if (_isReserved) {
+		_semaphore->encodeDeferredSignal(mtlCmdBuff, _reservation);
+	} else {
+		_semaphore->encodeSignal(mtlCmdBuff, value);
+	}
+}
+
+// Binary Metal event semaphores assign their values while encoding; timeline values come from the application.
+bool MVKSemaphoreSubmitInfo::isReservable() {
+	return _semaphore && _semaphore->getSemaphoreType() == VK_SEMAPHORE_TYPE_BINARY && _semaphore->isUsingCommandEncoding();
+}
+
+void MVKSemaphoreSubmitInfo::reserveWait() {
+	if (isReservable()) {
+		_reservation = _semaphore->reserveWait();
+		_isReserved = true;
+	}
+}
+
+void MVKSemaphoreSubmitInfo::reserveSignal() {
+	if (isReservable()) {
+		_reservation = _semaphore->deferSignal();
+		_isReserved = true;
+	}
 }
 
 MVKSemaphoreSubmitInfo::MVKSemaphoreSubmitInfo(const VkSemaphoreSubmitInfo& semaphoreSubmitInfo) :
@@ -407,6 +461,8 @@ MVKSemaphoreSubmitInfo::MVKSemaphoreSubmitInfo(const VkSemaphore semaphore,
 
 MVKSemaphoreSubmitInfo::MVKSemaphoreSubmitInfo(const MVKSemaphoreSubmitInfo& other) :
 	_semaphore(other._semaphore),
+	_reservation(other._reservation),
+	_isReserved(other._isReserved),
 	value(other.value),
 	stageMask(other.stageMask),
 	deviceIndex(other.deviceIndex) {
@@ -419,6 +475,8 @@ MVKSemaphoreSubmitInfo& MVKSemaphoreSubmitInfo::operator=(const MVKSemaphoreSubm
 	if (_semaphore) { _semaphore->release(); }
 	_semaphore = other._semaphore;
 
+	_reservation = other._reservation;
+	_isReserved = other._isReserved;
 	value = other.value;
 	stageMask = other.stageMask;
 	deviceIndex = other.deviceIndex;
@@ -480,6 +538,13 @@ VkResult MVKQueueCommandBufferSubmission::execute() {
 
 	_queue->_submissionCaptureScope->beginScope();
 
+	// While the device is being lost, a submission accepted earlier encodes nothing, and never reads its command
+	// buffers: host waits report the loss once no submission is encoding. Its Metal waiters are released by the device.
+	if (getDevice()->isLosing()) {
+		finish();
+		return VK_ERROR_DEVICE_LOST;
+	}
+
 	// If using encoded semaphore waiting, do so now.
 	for (auto& ws : _waitSemaphores) { ws.encodeWait(getActiveMTLCommandBuffer()); }
 
@@ -489,12 +554,42 @@ VkResult MVKQueueCommandBufferSubmission::execute() {
 	// Submit each command buffer.
 	submitCommandBuffers();
 
-	// If using encoded semaphore signaling, do so now.
-	for (auto& ss : _signalSemaphores) { ss.encodeSignal(getActiveMTLCommandBuffer()); }
+	// If using encoded semaphore signaling, do so now. A device lost while encoding, for example when a GPU-planned
+	// draw cannot be replayed, signals nothing: no successor may take this submission as complete.
+	if ( !getDevice()->isLosing() ) {
+		for (auto& ss : _signalSemaphores) { ss.encodeSignal(getActiveMTLCommandBuffer()); }
+	}
 
 	// Commit the last MTLCommandBuffer.
 	// Nothing after this because callback might destroy this instance before this function ends.
 	return commitActiveMTLCommandBuffer(true);
+}
+
+void MVKQueueCommandBufferSubmission::reserveSemaphores() {
+	for (auto& ws : _waitSemaphores) { ws.reserveWait(); }
+	for (auto& ss : _signalSemaphores) { ss.reserveSignal(); }
+}
+
+// Waits in slices: once the device is being lost, the committed work may wait on a signal that never comes.
+static constexpr uint64_t kMVKContinuationWaitSliceNanos = 1000000;
+
+id<MTLCommandBuffer> MVKQueueCommandBufferSubmission::continueOnNewMTLCommandBuffer() {
+	id<MTLCommandBuffer> mtlCmdBuff = [getActiveMTLCommandBuffer() retain];
+	if ( !mtlCmdBuff ) { return nil; }
+
+	// Registered after every handler added while encoding.
+	dispatch_semaphore_t completion = dispatch_semaphore_create(0);		// retained
+	[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer>) { dispatch_semaphore_signal(completion); }];
+	commitActiveMTLCommandBuffer();
+
+	bool isCompleted = false;
+	while ( !(isCompleted = !dispatch_semaphore_wait(completion, dispatch_time(DISPATCH_TIME_NOW, kMVKContinuationWaitSliceNanos))) && !getDevice()->isLosing() ) {}
+	// Also waits for the completed handlers, which release resources the new Metal command buffer may reuse.
+	if (isCompleted) { [mtlCmdBuff waitUntilCompleted]; }
+	bool succeeded = isCompleted && mtlCmdBuff.status == MTLCommandBufferStatusCompleted && !getDevice()->isLosing();
+	[mtlCmdBuff release];
+	dispatch_release(completion);
+	return succeeded ? getActiveMTLCommandBuffer() : nil;
 }
 
 // Returns the active MTLCommandBuffer, lazily retrieving it from the queue if needed.
@@ -560,6 +655,12 @@ VkResult MVKQueueCommandBufferSubmission::commitActiveMTLCommandBuffer(bool sign
 	id<MTLCommandBuffer> mtlCmdBuff = signalCompletion ? getActiveMTLCommandBuffer() : _activeMTLCommandBuffer;
 	_activeMTLCommandBuffer = nil;
 
+	// Commands encoded without a Metal command buffer never execute: report them as a lost device, never as complete.
+	if ( !mtlCmdBuff && signalCompletion ) {
+		reportError(VK_ERROR_DEVICE_LOST, "No Metal command buffer is available for this queue submission.");
+		getDevice()->markLost();
+	}
+
 	uint64_t startTime = getPerformanceTimestamp();
 	// Encoding/commit is serial per VkQueue (external synchronization or _execQueue).
 	// A successor, even ordinary, cannot publish its fence before a pending status check.
@@ -612,19 +713,21 @@ VkResult MVKQueueCommandBufferSubmission::commitActiveMTLCommandBuffer(bool sign
 // and the app immediately destroys objects. Rare, but it has been encountered.
 void MVKQueueCommandBufferSubmission::finish() {
 
-	// Before any fence signals, a refused indirect command or TES draw loses the device.
-	reportPerVertexIndirectFailures();
+	// Before any fence signals, a refused TES draw loses the device.
 	reportPerVertexTessFailures();
 
 	// Performed here instead of as part of execute() for rare case where app destroys queue
 	// immediately after a waitIdle() is cleared by fence below, taking the capture scope with it.
 	_queue->_submissionCaptureScope->endScope();
 
-	// If using inline semaphore signaling, do so now.
-	for (auto& ss : _signalSemaphores) { ss.encodeSignal(nil); }
+	// During a device loss, nothing is reported complete: host waits report the loss once it is published.
+	if ( !getDevice()->isLosing() ) {
+		// If using inline semaphore signaling, do so now.
+		for (auto& ss : _signalSemaphores) { ss.encodeSignal(nil); }
 
-	// If a fence exists, signal it.
-	if (_fence) { _fence->signal(); }
+		// If a fence exists, signal it.
+		if (_fence) { _fence->signal(); }
+	}
 
 	this->destroy();
 }
@@ -715,26 +818,12 @@ VkResult MVKQueueFullCommandBufferSubmission<N>::reservePerVertexScratch(std::un
 		VkResult result = cbInfo.commandBuffer->reservePerVertexScratch(cbInfo.perVertexScratch, prefilledExecutions);
 		if (result != VK_SUCCESS) { return result; }
 		for (auto& scratch : cbInfo.perVertexScratch) {
-			// These paths inspect GPU admission status in finish(). Drain all handlers first.
+			// TES inspects its GPU status in finish(); indirect draws wait for their GPU plan while encoding.
 			if (scratch->indirectCapacity || scratch->tessTopologyPipeline) { _needsOrderedRetirement = true; }
+			if (scratch->indirectCapacity) { _needsContinuation = true; }
 		}
 	}
 	return VK_SUCCESS;
-}
-
-// Every Metal command buffer of this submission has completed, so GPU admission statuses are final.
-// Checked here rather than in a per-command completion handler, whose order Metal does not document.
-template <size_t N>
-void MVKQueueFullCommandBufferSubmission<N>::reportPerVertexIndirectFailures() {
-	for (auto& cbInfo : _cmdBuffers) {
-		for (auto& scratch : cbInfo.perVertexScratch) {
-			uint32_t status = scratch->getIndirectStatus();
-			if (!status) { continue; }
-			reportError(VK_ERROR_DEVICE_LOST, "Portable PerVertexKHR indirect command was not executed: %s.", (status & 1) ? "a draw exceeds the reserved capture capacity" : "a draw reads indices beyond the bound index buffer");
-			getDevice()->markLost();
-			return;
-		}
-	}
 }
 
 // All Metal command buffers of this submission completed, so the GPU statuses are final. Checked here rather
@@ -756,6 +845,8 @@ void MVKQueueFullCommandBufferSubmission<N>::submitCommandBuffers() {
 	uint64_t startTime = getPerformanceTimestamp();
 
 	for (auto& cbInfo : _cmdBuffers) {
+		// After a loss, later command buffers are neither encoded nor marked as executing.
+		if (getDevice()->isLosing()) { break; }
 		cbInfo.commandBuffer->submit(this, &_encodingContext, cbInfo.perVertexScratch);
 		// Preserve encode-time failures for synchronous submissions. Async submit has
 		// already returned; allocation pressure must not be promoted to device loss.
@@ -807,6 +898,12 @@ MVKQueueFullCommandBufferSubmission<N>::MVKQueueFullCommandBufferSubmission(MVKQ
 // If the semaphores are not encodable, wait on them inline after presenting.
 // The semaphores know what to do.
 VkResult MVKQueuePresentSurfaceSubmission::execute() {
+	// While the device is being lost, a presentation accepted earlier is dropped.
+	if (getDevice()->isLosing()) {
+		finish();
+		return VK_ERROR_DEVICE_LOST;
+	}
+
 	// MTLCommandBuffer retain references to avoid rare case where objects are destroyed too early.
 	// Although testing could not determine which objects were being lost, queue present MTLCommandBuffers
 	// are used only once per frame, and retain so few objects, that blanket retention is still performant.

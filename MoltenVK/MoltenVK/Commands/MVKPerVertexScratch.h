@@ -16,7 +16,8 @@ struct MVKPerVertexScratchRequest {
 	NSUInteger indexSize = 0;
 	bool restart = false;
 	bool widenUint8 = false;
-	// Indirect draws: dense record capacity checked on the GPU, and the shared plan/status buffer.
+	// Indirect draws: record ceiling of the GPU plan, and the shared plan/status buffer. The replay scratch is
+	// reserved only after the plan completes, from the counts it froze (mvkSizePerVertexIndirectReplay).
 	uint32_t indirectCapacity = 0;
 	NSUInteger planSize = 0;
 	// TES invocation ABI, VS output, TCS vertex and patch output, float32 levels, topology plan.
@@ -136,7 +137,7 @@ static inline bool mvkReservePerVertexScratch(id<MTLDevice> device, const std::v
 	pending.reserve(requests.size());
 	for (const auto& request : requests) {
 		auto scratch = std::make_shared<MVKPerVertexScratch>();
-		if (!scratch->reserve(device, request)) { return false; }
+		if (request.indirectCapacity ? !scratch->reservePlan(device, request) : !scratch->reserve(device, request)) { return false; }
 		pending.push_back(std::move(scratch));
 	}
 	reservations = std::move(pending);

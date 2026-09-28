@@ -157,15 +157,15 @@ int main(int argc, char** argv) {
 			if (name == "single") { Draw one = base; one.instances = 1; s.draws = {one, empty}; s.gpuCount = 1; }
 			else if (name == "zero") { s.draws = {counted ? base : empty, counted ? base : empty}; s.gpuCount = 0; }
 			else if (name == "two" || name == "overflow-second" || name == "restart-two") { s.draws = {base, base}; s.gpuCount = 7; }
-			else if (name == "restart-overflow") { s.expectLost = true; }
+			// Legal draws beyond the parent runtime's private record capacity (run with 11 or 15): they must render.
+			else if (name == "restart-overflow" || name == "overflow") {}
 			// Two heavy overlapping draws: draw 1 reuses the scratch that draw 0's replay reads, with different values.
 			else if (name == "stress") { s.draws = {base, base}; s.draws[0].instances = s.draws[1].instances = 20000; s.gpuCount = 2; }
 			else if (name == "huge") { s.draws[0].instances = UINT32_MAX; s.expectLost = true; }
 			else if (name == "index-oob") { if (!indexed) throw std::runtime_error("index-oob needs an indexed form"); s.draws[0].first = 100000; s.expectLost = true; }
-			else if (name == "overflow") { s.expectLost = true; }
 			else if (name != "decisive" && name != "repeat" && name != "restart" && !dynamicRestart) throw std::runtime_error("Unknown scenario");
-			// Only the second draw exceeds a capacity of 11 records: the whole command must still do nothing.
-			if (name == "overflow-second") { s.draws[0].instances = 1; s.expectLost = true; }
+			// Only the second draw exceeds the parent's capacity of 11 records; both must render.
+			if (name == "overflow-second") { s.draws[0].instances = 1; }
 			return s;
 		};
 		std::vector<Scenario> submissions{scenarioFor(scenarioName)};
@@ -849,7 +849,10 @@ int main(int argc, char** argv) {
 				}
 				tessOracle &= tessRed == 0;
 			}
-			bool ok = refOk && got.submit == VK_SUCCESS && got.wait == wantWait && got.produced && !mismatches && magenta && coverage && oracle && tessOracle && got.records == expected && got.invocations == expected.size();
+			// After a device loss mapped memory is undefined (Vulkan, Lost Device): the runtime may stop the command
+			// buffer at the lost draw, so the readback that follows it is not compared.
+			bool image = s.expectLost || (!mismatches && magenta && coverage && oracle && tessOracle);
+			bool ok = refOk && got.submit == VK_SUCCESS && got.wait == wantWait && got.produced && image && got.records == expected && got.invocations == expected.size();
 			std::printf("submission=%zu indirect submit=%d wait=%d expected_wait=%d gpu_written_arguments=%d pixel_mismatches=%zu prior_write=%d covered_pixels=%u cpu_samples=%u/%d tess_oracle=%d tess_red=%u invocations=%u expected=%zu records_match=%d %s\n",
 				n, got.submit, got.wait, wantWait, int(got.produced), mismatches, int(magenta), covered, samples, int(oracle), int(tessOracle), tessRed, got.invocations, expected.size(), int(got.records == expected), ok ? "PASS" : "FAIL");
 			std::ofstream(prefix + "-" + std::to_string(n) + "-indirect.rgba", std::ios::binary).write(reinterpret_cast<const char*>(got.image.data()), got.image.size());

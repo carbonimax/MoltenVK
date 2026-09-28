@@ -190,6 +190,24 @@ public:
 	virtual bool isUsingCommandEncoding() = 0;
 
 	/**
+	 * Reserves the value that a later encodeReservedWait() waits for, for a semaphore that otherwise assigns it
+	 * while encoding. A submission whose encoding is deferred reserves its waits and signals (see deferSignal())
+	 * when it is submitted, so that they pair with other submissions exactly as if it were encoded then.
+	 * Returns zero for semaphores that do not assign values while encoding.
+	 */
+	virtual uint64_t reserveWait() { return 0; }
+
+	/** Encodes a wait for a value returned by reserveWait(). */
+	virtual void encodeReservedWait(id<MTLCommandBuffer> mtlCmdBuff, uint64_t reservation) {}
+
+	/**
+	 * After device loss, releases every Metal wait encoded on this semaphore, by signalling on the specified
+	 * Metal command buffer, or on the host if it is nil and the underlying event allows it.
+	 * Returns false if a wait could not be released.
+	 */
+	virtual bool releaseWaitsAfterLoss(id<MTLCommandBuffer> mtlCmdBuff) { return true; }
+
+	/**
 	 * Returns the MTLSharedEvent underlying this Vulkan semaphore,
 	 * or nil if this semaphore is not underpinned by a MTLSharedEvent.
 	 */
@@ -245,6 +263,9 @@ public:
 	uint64_t deferSignal() override;
 	void encodeDeferredSignal(id<MTLCommandBuffer> mtlCmdBuff, uint64_t deferToken) override;
 	bool isUsingCommandEncoding() override { return true; }
+	uint64_t reserveWait() override;
+	void encodeReservedWait(id<MTLCommandBuffer> mtlCmdBuff, uint64_t reservation) override;
+	bool releaseWaitsAfterLoss(id<MTLCommandBuffer> mtlCmdBuff) override;
 
 	MVKSemaphoreMTLEvent(MVKDevice* device,
 						 const VkSemaphoreCreateInfo* pCreateInfo,
@@ -256,6 +277,7 @@ public:
 protected:
 	id<MTLEvent> _mtlEvent;
 	std::atomic<uint64_t> _mtlEventValue;
+	std::atomic<bool> _isLossReleased{false};
 };
 
 
@@ -334,6 +356,7 @@ public:
 	void signal(const VkSemaphoreSignalInfo* pSignalInfo) override;
 	bool registerWait(MVKFenceSitter* sitter, const VkSemaphoreWaitInfo* pWaitInfo, uint32_t index) override;
 	void unregisterWait(MVKFenceSitter* sitter) override;
+	bool releaseWaitsAfterLoss(id<MTLCommandBuffer> mtlCmdBuff) override;
 
 	MVKTimelineSemaphoreMTLEvent(MVKDevice* device,
 								 const VkSemaphoreCreateInfo* pCreateInfo,
@@ -347,6 +370,8 @@ protected:
 	id<MTLSharedEvent> _mtlEvent = nil;
 	std::mutex _lock;
 	std::unordered_set<MVKFenceSitter*> _sitters;
+	std::atomic<uint64_t> _maxEncodedWaitValue{0};
+	std::atomic<bool> _isLossReleased{false};
 };
 
 

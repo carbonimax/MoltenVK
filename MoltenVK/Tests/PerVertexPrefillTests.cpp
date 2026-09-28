@@ -15,6 +15,7 @@ struct MVKCommand {
 struct MVKCommandEncoder {
     uint32_t _multiviewPassIndex = 0;
     MVKCommand* _lastMultiviewPassCmd = nullptr;
+    bool _isEncodingStopped = false;
     void endEncoding() { assert(_lastMultiviewPassCmd && !_lastMultiviewPassCmd->released); }
     void encodeCommandsImpl(MVKCommand*);
     void encodeCommands(MVKCommand* command) { encodeCommandsImpl(command); }
@@ -81,5 +82,18 @@ int main(int argc, char**) {
         buffer.releaseRecordedCommands();
         for (const auto& command : commands) { assert(command.released); }
     }
-    puts("no-prefill, deferred and immediate sequencing; reusable/one-time, two multiview subpasses: PASS");
+    // A device loss inside a command stops the loop: the commands recorded after it are never encoded.
+    {
+        MVKCommandEncoder encoder;
+        std::vector<unsigned> seen;
+        MVKCommand commands[3];
+        commands[0].action = [&](auto*) { seen.push_back(0); };
+        commands[1].action = [&](auto* e) { seen.push_back(1); e->_isEncodingStopped = true; };
+        commands[2].action = [&](auto*) { seen.push_back(2); };
+        commands[0]._next = &commands[1];
+        commands[1]._next = &commands[2];
+        encoder.encodeCommands(&commands[0]);
+        assert((seen == std::vector<unsigned>{0, 1}));
+    }
+    puts("no-prefill, deferred and immediate sequencing; reusable/one-time, two multiview subpasses; stop after loss: PASS");
 }

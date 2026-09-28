@@ -27,9 +27,12 @@
 #include "MVKPixelFormats.h"
 #include "MVKOSExtensions.h"
 #include "mvk_datatypes.hpp"
+#include <atomic>
+#include <condition_variable>
 #include <shared_mutex>
 #include <string>
 #include <mutex>
+#include <unordered_set>
 #include <os/lock.h>
 
 #import <Metal/Metal.h>
@@ -441,6 +444,13 @@ public:
 	/** Returns info on the sizes of argument buffers. */
 	const MVKPhysicalDeviceArgumentBufferSizes& getArgumentBufferSizes() const { return _argumentBufferSizes; }
 
+	/**
+	 * Returns a Metal command queue that only releases semaphore waits after a logical device is lost,
+	 * so that its command buffers never queue behind stalled application work. Created on first use,
+	 * then shared by the logical devices of this physical device. Returns nil if it cannot be created.
+	 */
+	id<MTLCommandQueue> getLossRescueMTLCommandQueue();
+
 
 #pragma mark Construction
 
@@ -527,6 +537,8 @@ protected:
 	uint32_t _privateMemoryTypes;
 	uint32_t _lazilyAllocatedMemoryTypes;
 	MVKPhysicalDeviceArgumentBufferSizes _argumentBufferSizes;
+	id<MTLCommandQueue> _lossRescueMTLQueue = nil;
+	std::mutex _lossRescueLock;
 	bool _hasUnifiedMemory = true;
 	bool _isUsingMetalArgumentBuffers = true;
 };
@@ -690,8 +702,39 @@ public:
 	/** Block the current thread until all queues in this device are idle. */
 	VkResult waitIdle();
 	
-	/** Mark this device (and optionally the physical device) as lost. Releases all waits for this device. */
+	/**
+	 * Marks this device (and optionally the physical device) as lost, without blocking the caller.
+	 * New submissions are refused at once, CPU waits made while encoding submissions are cancelled,
+	 * and Metal waits on this device's semaphores are released. Host waits report the loss only once
+	 * no queue submission is encoding (see beginEncoding()), because a loss reported to a host wait
+	 * allows the application to free the command buffers such a submission may still be reading.
+	 */
 	VkResult markLost(bool alsoMarkPhysicalDevice = false);
+
+	/** Returns whether this device has started to be lost, even if host waits do not report it yet. */
+	bool isLosing() { return _losing.load(std::memory_order_acquire); }
+
+	/**
+	 * Returns the result of a host wait that returned with the specified completion.
+	 * During a loss not yet reported to host waits, waits up to the timeout for it to be reported.
+	 */
+	VkResult getHostWaitResult(bool isFinished, uint64_t timeout);
+
+	/** Brackets the encoding of a queue submission. A device loss is reported to host waits only between encodings. */
+	void beginEncoding();
+	void endEncoding();
+
+	/** Registers a semaphore whose encoded Metal waits must be released if this device is lost. */
+	void addLossReleasedSemaphore(MVKSemaphore* sem4);
+
+	/** Unregisters a semaphore registered with addLossReleasedSemaphore(). */
+	void removeLossReleasedSemaphore(MVKSemaphore* sem4);
+
+	/** Adds a CPU wait made while encoding a submission, cancelled as soon as this device starts to be lost. */
+	void addEncodingSemaphore(MVKSemaphoreImpl* sem4);
+
+	/** Removes a CPU wait added with addEncodingSemaphore(). */
+	void removeEncodingSemaphore(MVKSemaphoreImpl* sem4);
 
 	/** Returns whether or not the given descriptor set layout is supported. */
 	void getDescriptorSetLayoutSupport(const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
@@ -1061,6 +1104,8 @@ protected:
     void initPerformanceTracking();
 	void initPhysicalDevice(MVKPhysicalDevice* physicalDevice, const VkDeviceCreateInfo* pCreateInfo);
 	void initQueues(const VkDeviceCreateInfo* pCreateInfo);
+	void releaseSemaphoreWaitsAfterLoss();
+	void publishLoss();
 	void initConfiguration();
 	void reservePrivateData(const VkDeviceCreateInfo* pCreateInfo);
 	void enableFeatures(const VkDeviceCreateInfo* pCreateInfo);
@@ -1101,7 +1146,17 @@ protected:
 	MVKSmallVector<MVKPrivateDataSlot*> _privateDataSlots;
 	MVKSmallVector<bool> _privateDataSlotsAvailability;
 	MVKSmallVector<MVKSemaphoreImpl*> _awaitingSemaphores;
+	MVKSmallVector<MVKSemaphoreImpl*> _encodingSemaphores;
 	MVKSmallVector<std::pair<MVKTimelineSemaphore*, uint64_t>> _awaitingTimelineSem4s;
+	std::unordered_set<MVKSemaphore*> _lossReleasedSemaphores;
+	std::mutex _lossReleaseLock;
+	std::mutex _lossLock;
+	std::condition_variable _lossCondition;
+	dispatch_queue_t _lossPublisher = nullptr;
+	uint32_t _activeEncodings = 0;
+	bool _isLossPublished = false;
+	std::atomic<bool> _losing{false};
+	std::atomic<bool> _markPhysicalDeviceLost{false};
 	MVKSmallVector<MVKVisibilityBuffer> _visibilityBuffers;
 	MVKLiveResourceSet _liveResources;
 	std::mutex _rezLock;

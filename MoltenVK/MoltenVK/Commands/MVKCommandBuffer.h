@@ -61,6 +61,8 @@ typedef struct MVKCommandEncodingContext {
 	BarrierFenceSlots fenceSlots;
 	const MVKPerVertexScratchReservations* perVertexScratch = nullptr;
 	size_t nextPerVertexScratch = 0;
+	/** The queue submission being encoded, which can continue on a new Metal command buffer, or null when prefilling. */
+	MVKQueueCommandBufferSubmission* submission = nullptr;
 
 	void syncFences(MVKDevice *device, id<MTLCommandBuffer> mtlCommandBuffer);
 	MVKRenderPass* getRenderPass() { return _renderPass; }
@@ -297,6 +299,23 @@ public:
 
 	/** Encode commands from the specified secondary command buffer onto the Metal command buffer. */
 	void encodeSecondary(MVKCommandBuffer* secondaryCmdBuffer);
+
+	/**
+	 * Commits the work encoded so far, waits until it completes on the GPU, then continues encoding on a new Metal
+	 * command buffer of the same queue submission. Ends any active Metal encoder; the caller restarts its render pass.
+	 * Returns false, and stops encoding this submission, if the submission cannot continue.
+	 */
+	bool awaitEncodedWork();
+
+	/** Returns whether encoding stopped after a failed awaitEncodedWork(). */
+	bool isEncodingStopped() { return _isEncodingStopped; }
+
+	/** Stops encoding the rest of this submission, after its device was lost while encoding it. */
+	void stopEncoding() { _isEncodingStopped = true; }
+
+	/** Pushes or pops a debug group of the Metal command buffer, carried over to later Metal command buffers. */
+	void pushCommandBufferDebugGroup(NSString* name);
+	void popCommandBufferDebugGroup();
 
 	/** Begins a render pass and establishes initial draw state. */
 	void beginRenderpass(MVKCommand* passCmd,
@@ -551,6 +570,9 @@ public:
 	/** Consume a preflight reservation and retain its resources until Metal completes. */
 	MVKPerVertexScratch* nextPerVertexScratch();
 
+	/** Keeps every buffer of the last reservation, including ones added since, resident and alive for the current Metal command buffer. */
+	void keepPerVertexScratchResident();
+
 #pragma mark Construction
 
 	MVKCommandEncoder(MVKCommandBuffer* cmdBuffer,
@@ -597,7 +619,10 @@ protected:
 	MVKCommandUse _mtlComputeEncoderUse;
 	uint32_t _mtlComputeEncoderStages;
 	MVKCommandUse _mtlBlitEncoderUse;
+	MVKSmallVector<NSString*, 4> _commandBufferDebugGroups;
+	std::shared_ptr<MVKPerVertexScratch> _lastPerVertexScratch;
 	bool _isRenderingEntireAttachment;
+	bool _isEncodingStopped = false;
 };
 
 

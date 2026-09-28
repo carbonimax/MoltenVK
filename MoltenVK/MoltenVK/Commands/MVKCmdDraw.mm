@@ -1051,14 +1051,22 @@ static const MVKMTLBufferAllocation* encodeIndirectCountConversion(
 }
 
 // Portable PerVertexKHR indirect draws. Arguments and Count may be written earlier in the same submission,
-// so only the GPU reads them. Before any draw executes, a GPU admission pass checks every draw of the
-// command against the capacity reserved before submission: either all draws execute exactly, or none
-// does and the device is lost when the submission finishes. Apple3-10 GPUs cannot order fragment reads before later
-// vertex writes inside a render encoder, so each draw ends the render encoder around its compute planning
-// and the next draw reuses the bounded, hazard-tracked scratch only after Metal orders the previous replay.
+// so only the GPU reads them. Phase 0 freezes every draw's arguments and the Count on the GPU and computes the
+// records they need, with the largest count a uint32 record ID can represent as its only ceiling. The encoder then
+// waits for that plan, reserves the exact replay scratch from the frozen counts, and encodes the replay on a new
+// Metal command buffer. A command that cannot be replayed (unrepresentable counts, indices beyond the bound
+// index buffer, or scratch beyond Metal limits or memory) executes no draw and loses the device, so that nothing
+// that follows it is reported complete. Apple3-10 GPUs cannot order fragment reads before later vertex writes
+// inside a render encoder, so each draw ends the render encoder around its compute planning and the next draw
+// reuses the hazard-tracked scratch only after Metal orders the previous replay.
 static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline, id<MTLBuffer> indirectBuffer, VkDeviceSize indirectOffset, uint32_t stride, uint32_t drawCount, id<MTLBuffer> countBuffer, VkDeviceSize countOffset, const MVKIndexMTLBufferBinding* indexBinding) {
 	auto reject = [&](VkResult result, const char* message) {
 		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(result, "Portable PerVertexKHR indirect %s", message));
+	};
+	auto lose = [&](const char* reason) {
+		cmdEncoder->reportError(VK_ERROR_DEVICE_LOST, "Portable PerVertexKHR indirect command was not executed: %s.", reason);
+		cmdEncoder->getDevice()->markLost();
+		cmdEncoder->stopEncoding();
 	};
 	auto* subpass = cmdEncoder->getSubpass();
 	uint32_t viewCount = subpass->isMultiview() ? subpass->getViewCountInMetalPass(cmdEncoder->getMultiviewPassIndex()) : 1;
@@ -1069,11 +1077,11 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	if (!plan || !helper || !scratch->indirectCapacity || !viewCount) { reject(VK_ERROR_INITIALIZATION_FAILED, "draw has no planning scratch."); return; }
 	if (const char* error = cmdEncoder->getIndexedPerVertexAttachmentError()) { reject(VK_ERROR_FEATURE_NOT_PRESENT, error); return; }
 	uint32_t indexSize = indexBinding ? mvkPerVertexIndexSize(indexBinding->vkIndexType) : 0;
-	if (indexBinding && (!indexSize || !indexBinding->mtlBuffer || !scratch->buffers[5])) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "indexed draw requires a bound uint8, uint16 or uint32 index buffer."); return; }
+	if (indexBinding && (!indexSize || !indexBinding->mtlBuffer)) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "indexed draw requires a bound uint8, uint16 or uint32 index buffer."); return; }
 	// Vulkan ignores restart for nonindexed draws. Restart assembly runs on the gathered indices.
 	bool restart = mvkPerVertexRequiresRestartAssembly(indexBinding != nullptr, cmdEncoder->getVkGraphics().isPrimitiveRestartEnabled());
 	id<MTLComputePipelineState> restartState = restart ? scratch->indexPipeline : nil;
-	if (restart && (!scratch->buffers[6] || !restartState || !restartState.threadExecutionWidth || !restartState.maxTotalThreadsPerThreadgroup)) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "restart assembly scratch is unavailable."); return; }
+	if (restart && (!restartState || !restartState.threadExecutionWidth || !restartState.maxTotalThreadsPerThreadgroup)) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "restart assembly helper is unavailable."); return; }
 	id<MTLRenderPipelineState> directCaptureState = indexBinding ? nil : pipeline->getPerVertexCapturePipelineState(viewCount);
 	id<MTLComputePipelineState> captureState = indexBinding ? pipeline->getPerVertexIndexedCapturePipelineState(true, viewCount) : nil;
 	if (indexBinding ? (!captureState || !captureState.threadExecutionWidth || !captureState.maxTotalThreadsPerThreadgroup) : !directCaptureState) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "capture pipeline is unavailable."); return; }
@@ -1084,28 +1092,62 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	uint32_t replayVertices = mvkPerVertexReplayVertexCount(topology);
 	NSUInteger width = std::max<NSUInteger>(std::min(helper.threadExecutionWidth, helper.maxTotalThreadsPerThreadgroup), 1);
 	if (restartState) { width = std::min(width, std::min(restartState.threadExecutionWidth, restartState.maxTotalThreadsPerThreadgroup)); }
-	uint32_t scanSteps = restart ? mvkPerVertexIndirectRestartScanSteps(scratch->indirectCapacity) : 0;
-	NSUInteger gatheredOffset = restart ? NSUInteger(mvkPerVertexRestartIndexScratchSize(scratch->indirectCapacity)) : 0;
-	if (restart && plan.length < 1024 + (scanSteps + 3) * 256) { reject(VK_ERROR_INITIALIZATION_FAILED, "restart planning scratch is too small."); return; }
-	uint32_t snapshotWords = drawCount == 1 ? 48 : 256 + (restart ? (scanSteps + 3) * 64 : 0);
+	// The plan layout, including where phase 0 freezes the arguments, follows the plan's record ceiling.
+	uint32_t planScanSteps = restart ? mvkPerVertexIndirectRestartScanSteps(scratch->indirectCapacity) : 0;
+	if (restart && plan.length < 1024 + (planScanSteps + 3) * 256) { reject(VK_ERROR_INITIALIZATION_FAILED, "restart planning scratch is too small."); return; }
+	uint32_t snapshotWords = drawCount == 1 ? 48 : 256 + (restart ? (planScanSteps + 3) * 64 : 0);
 	if (drawCount > 1 && plan.length < uint64_t(snapshotWords) * sizeof(uint32_t) + uint64_t(drawCount) * 5 * sizeof(uint32_t)) { reject(VK_ERROR_INITIALIZATION_FAILED, "argument snapshot scratch is too small."); return; }
 	NSUInteger captureWidth = captureState ? std::max<NSUInteger>(std::min(captureState.threadExecutionWidth, captureState.maxTotalThreadsPerThreadgroup), 1) : 1;
+	bool corners = pipeline->usesPortableBarycentrics();
 	uint32_t params[19] = {drawCount, stride, indexSize, uint32_t(indexCapacity), uint32_t(indexCapacity >> 32), scratch->indirectCapacity, viewCount, uint32_t(topology),
-		uint32_t(cmdEncoder->getVkGraphics().getProvokingVertexMode()), uint32_t(scratch->buffers[4] != nil), uint32_t(countBuffer != nil), 0, uint32_t(width), uint32_t(width), uint32_t(captureWidth), 0, uint32_t(restart), scanSteps, snapshotWords};
+		uint32_t(cmdEncoder->getVkGraphics().getProvokingVertexMode()), uint32_t(corners), uint32_t(countBuffer != nil), 0, uint32_t(width), uint32_t(width), uint32_t(captureWidth), 0, uint32_t(restart), planScanSteps, snapshotWords};
+	auto& computeState = cmdEncoder->getMtlCompute();
+	auto& metalState = cmdEncoder->getMtlGraphics();
+
+	// Phase 0 freezes every draw of the command, then the GPU plan must complete before the replay can be sized.
+	cmdEncoder->encodeStoreActions(true);
+	id<MTLComputeCommandEncoder> planEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseDrawIndirectConvertBuffers);
+	computeState.bindPipeline(planEncoder, helper);
+	computeState.bindBuffer(planEncoder, indirectBuffer, indirectOffset, 0);
+	computeState.bindBuffer(planEncoder, countBuffer ?: plan, countBuffer ? countOffset : 0, 1);
+	computeState.bindBuffer(planEncoder, plan, 0, 2);
+	computeState.bindBuffer(planEncoder, indexBinding ? indexBinding->mtlBuffer : plan, indexBinding ? indexBinding->offset : 0, 3);
+	for (uint32_t unused = 4; unused < 8; ++unused) { computeState.bindBuffer(planEncoder, plan, 0, unused); }
+	computeState.bindBytes(planEncoder, params, sizeof(params), 8);
+	[planEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(drawCount, width), 1, 1) threadsPerThreadgroup: MTLSizeMake(width, 1, 1)];
+	computeState._exists.descriptorSetData.reset();
+	if (!cmdEncoder->awaitEncodedWork()) {
+		if (!cmdEncoder->getDevice()->isLosing()) { lose("its GPU plan did not complete"); }
+		return;
+	}
+	MVKPerVertexScratchRequest replayRequest{};
+	NSUInteger gatheredOffset = 0;
+	uint32_t scanSteps = 0;
+	// Sized with the captured record stride, not the stride of the indirect arguments.
+	if (!mvkSizePerVertexIndirectReplay(plan.contents, plan.length, NSUInteger(snapshotWords) * sizeof(uint32_t), drawCount, viewCount, pipeline->getPerVertexCapturedLayout().stride, topology, indexBinding != nullptr, restart, corners,
+										cmdEncoder->getMetalFeatures().maxMTLBufferSize, replayRequest, gatheredOffset, scanSteps)) {
+		uint32_t status = *(volatile const uint32_t*)plan.contents;
+		lose((status & 1) ? "a draw needs more records than uint32 record IDs can represent" : (status & 2) ? "a draw reads indices beyond the bound index buffer" : "its replay scratch would exceed Metal buffer limits");
+		return;
+	}
+	// No draw records a vertex: Count zero, or zero vertices or instances in every draw.
+	if (!replayRequest.captureSize) { return; }
+	if (!scratch->reserveReplay(cmdEncoder->getMTLDevice(), replayRequest)) { lose("its replay scratch could not be allocated"); return; }
+	cmdEncoder->keepPerVertexScratchResident();
+	params[17] = scanSteps;
+
 	id<MTLBuffer> captured = scratch->buffers[0];
 	id<MTLBuffer> occurrences = scratch->buffers[2];
 	id<MTLBuffer> primitiveIndices = scratch->buffers[3];
-	id<MTLBuffer> corners = scratch->buffers[4] ?: plan;
+	id<MTLBuffer> cornerBuffer = scratch->buffers[4] ?: plan;
 	id<MTLBuffer> gathered = scratch->buffers[5] ?: plan;
 	const auto& replay = pipeline->getPerVertexReplayBinding();
 	const auto& fragment = pipeline->getPerVertexInputBinding();
-	auto& computeState = cmdEncoder->getMtlCompute();
-	auto& metalState = cmdEncoder->getMtlGraphics();
 	for (uint32_t draw = 0; draw < drawCount; ++draw) {
 		params[11] = draw;
-		// Plan this draw, build its replay tables and gather its indices from GPU-visible arguments.
+		// Plan this draw, build its replay tables and gather its indices from the frozen arguments.
 		cmdEncoder->encodeStoreActions(true);
-		id<MTLComputeCommandEncoder> planEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseDrawIndirectConvertBuffers);
+		planEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseDrawIndirectConvertBuffers);
 		computeState.bindPipeline(planEncoder, helper);
 		computeState.bindBuffer(planEncoder, indirectBuffer, indirectOffset, 0);
 		computeState.bindBuffer(planEncoder, countBuffer ?: plan, countBuffer ? countOffset : 0, 1);
@@ -1114,7 +1156,7 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 		computeState.bindBuffer(planEncoder, gathered, gatheredOffset, 4);
 		computeState.bindBuffer(planEncoder, occurrences, 0, 5);
 		computeState.bindBuffer(planEncoder, primitiveIndices, 0, 6);
-		computeState.bindBuffer(planEncoder, corners, 0, 7);
+		computeState.bindBuffer(planEncoder, cornerBuffer, 0, 7);
 		auto dispatch = [&](uint32_t phase, NSUInteger groups) {
 			params[15] = phase;
 			computeState.bindBytes(planEncoder, params, sizeof(params), 8);
@@ -1126,7 +1168,6 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 			computeState.bindBytes(planEncoder, params, sizeof(params), 8);
 			[planEncoder dispatchThreadgroupsWithIndirectBuffer: plan indirectBufferOffset: offset threadsPerThreadgroup: MTLSizeMake(width, 1, 1)];
 		};
-		if (!draw) { dispatch(0, mvkCeilingDivide<NSUInteger>(drawCount, width)); }
 		dispatch(1, 1);
 		if (!restart) { dispatchIndirect(2, 96); }
 		if (indexBinding) { dispatchIndirect(3, 112); }
@@ -1199,8 +1240,6 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 		metalState._exists.vertex().descriptorSetData.reset();
 		metalState._exists.fragment().descriptorSetData.reset();
 	}
-	// Admission failures are only known on the GPU. The submission reads the status when it finishes,
-	// before signalling its fence, and then loses the device (MVKQueueFullCommandBufferSubmission).
 }
 
 typedef struct MVKIndirectZeroDivisorVertexBuffer {
