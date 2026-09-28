@@ -183,7 +183,7 @@ int main(int argc, char** argv) {
 		// PERVERTEX_TEST_LONG_DEPENDENT: the dependent submission copies a large buffer many times between two markers.
 		// When its fence reports a loss, the source buffer is destroyed at once; it must not be running then.
 		const bool longDependent = getenv("PERVERTEX_TEST_LONG_DEPENDENT") != nullptr;
-		// PERVERTEX_TEST_EXTERNAL_WAITER: the draw-to-dependent binary semaphore exports its Metal event and has served one
+		// PERVERTEX_TEST_EXTERNAL_WAITER: the draw-to-dependent binary semaphore imports a Metal event and has served one
 		// signal and one wait. An external Metal client waits the generation after the dependent wait: the value of the
 		// next Vulkan signal. A loss rescue must not release that client when the draw is lost.
 		const bool externalWaiter = getenv("PERVERTEX_TEST_EXTERNAL_WAITER") != nullptr;
@@ -770,25 +770,25 @@ int main(int argc, char** argv) {
 		VkSemaphore semaphore = VK_NULL_HANDLE;
 		VkSemaphore hostGate = VK_NULL_HANDLE;
 		VkSemaphore dependentSignal = VK_NULL_HANDLE;
+		void* dependentEvent = nullptr;
 		if (dependentSubmission) {
 			VkSemaphoreTypeCreateInfo typeInfo{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
 			typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
 			VkSemaphoreCreateInfo signalInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
 			if (dependentNoWait) signalInfo.pNext = &typeInfo;
-			VkExportMetalObjectCreateInfoEXT exportable{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT};
-			exportable.exportObjectType = VK_EXPORT_METAL_OBJECT_TYPE_METAL_SHARED_EVENT_BIT_EXT;
-			if (externalWaiter) signalInfo.pNext = &exportable;
+			// MoltenVK exports the Metal event of timeline semaphores only: the binary one imports it.
+			VkImportMetalSharedEventInfoEXT imported{VK_STRUCTURE_TYPE_IMPORT_METAL_SHARED_EVENT_INFO_EXT};
+			if (externalWaiter) {
+				VkExportMetalDeviceInfoEXT metalDevice{VK_STRUCTURE_TYPE_EXPORT_METAL_DEVICE_INFO_EXT};
+				VkExportMetalObjectsInfoEXT exportInfo{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT};
+				exportInfo.pNext = &metalDevice;
+				vkExportMetalObjectsEXT(d.device, &exportInfo);
+				if (!metalDevice.mtlDevice) throw std::runtime_error("No exported MTLDevice");
+				dependentEvent = objcMessage<void*>(metalDevice.mtlDevice, "newSharedEvent");  // retained
+				imported.mtlSharedEvent = dependentEvent;
+				signalInfo.pNext = &imported;
+			}
 			check(vkCreateSemaphore(d.device, &signalInfo, nullptr, &dependentSignal), "Create dependent semaphore");
-		}
-		void* dependentEvent = nullptr;
-		if (externalWaiter) {
-			VkExportMetalSharedEventInfoEXT sharedEvent{VK_STRUCTURE_TYPE_EXPORT_METAL_SHARED_EVENT_INFO_EXT};
-			sharedEvent.semaphore = dependentSignal;
-			VkExportMetalObjectsInfoEXT exportInfo{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT};
-			exportInfo.pNext = &sharedEvent;
-			vkExportMetalObjectsEXT(d.device, &exportInfo);
-			dependentEvent = sharedEvent.mtlSharedEvent;
-			if (!dependentEvent) throw std::runtime_error("The dependent semaphore exports no MTLSharedEvent");
 		}
 		if (splitProducer) {
 			VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
