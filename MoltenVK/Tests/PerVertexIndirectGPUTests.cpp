@@ -116,7 +116,9 @@ int main(int argc, char** argv) {
 		const bool splitProducer = getenv("PERVERTEX_TEST_SPLIT_PRODUCER") != nullptr;
 		const bool lateSignal = getenv("PERVERTEX_TEST_LATE_SIGNAL") != nullptr;
 		const bool dependentSubmission = getenv("PERVERTEX_TEST_DEPENDENT_SUBMISSION") != nullptr;
+		const bool dependentSameQueue = getenv("PERVERTEX_TEST_DEPENDENT_SAME_QUEUE") != nullptr;
 		if (dependentSubmission && (!splitProducer || !lateSignal)) throw std::runtime_error("dependent submission requires split producer and late signal");
+		if (dependentSameQueue && !dependentSubmission) throw std::runtime_error("same-queue dependent submission requires dependent submission");
 		const bool indexed = form == "indexed" || form == "indexed-count";
 		const bool counted = form == "draw-count" || form == "indexed-count";
 		if (!indexed && form != "draw" && !counted) throw std::runtime_error("Unknown form");
@@ -493,11 +495,12 @@ int main(int argc, char** argv) {
 				check(vkCreateCommandPool(d.device, &poolInfo, nullptr, &producerPool), "Create producer command pool");
 			}
 			commandInfo.commandPool = producerPool;
-			commandInfo.commandBufferCount = dependentSubmission ? 2 : 1;
-			VkCommandBuffer producerBuffers[2]{};
-			check(vkAllocateCommandBuffers(d.device, &commandInfo, producerBuffers), "Allocate producer command buffers");
-			producerCommands = producerBuffers[0];
-			dependentCommands = producerBuffers[1];
+			commandInfo.commandBufferCount = 1;
+			check(vkAllocateCommandBuffers(d.device, &commandInfo, &producerCommands), "Allocate producer command buffer");
+			if (dependentSubmission) {
+				commandInfo.commandPool = dependentSameQueue ? pool : producerPool;
+				check(vkAllocateCommandBuffers(d.device, &commandInfo, &dependentCommands), "Allocate dependent command buffer");
+			}
 		}
 
 		// Staging layout: indices from byte 16, arguments at 256 (stride 32), Count at 384.
@@ -702,9 +705,9 @@ int main(int argc, char** argv) {
 				dependent.pWaitDstStageMask = &dependentStage;
 				dependent.commandBufferCount = 1;
 				dependent.pCommandBuffers = &dependentCommands;
-				r.dependentSubmit = vkQueueSubmit(d.producerQueue, 1, &dependent, dependentFence);
+				r.dependentSubmit = vkQueueSubmit(dependentSameQueue ? d.queue : d.producerQueue, 1, &dependent, dependentFence);
 				r.dependentBeforeSignal = vkGetFenceStatus(d.device, dependentFence);
-				std::printf("dependent submit=%d fence before host signal=%d\n", r.dependentSubmit, r.dependentBeforeSignal);
+				std::printf("dependent queue=%s submit=%d fence before host signal=%d\n", dependentSameQueue ? "draw" : "producer", r.dependentSubmit, r.dependentBeforeSignal);
 				if (r.dependentSubmit != VK_SUCCESS || r.dependentBeforeSignal != VK_NOT_READY) throw std::runtime_error("Dependent submission was not pending before host timeline signal");
 			}
 			if (lateSignal && split && r.submit == VK_SUCCESS) {
