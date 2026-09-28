@@ -3988,17 +3988,40 @@ VkResult MVKDevice::markLost(bool alsoMarkPhysicalDevice) {
 	return VK_ERROR_DEVICE_LOST;
 }
 
-// Counts the handlers added to a Metal command buffer by MVKDevice::addMTLCommandBufferHandler(), until it is committed.
-@interface MVKMTLCommandBufferHandlerCount : NSObject {
+// The handlers added to a Metal command buffer by MVKDevice::addMTLCommandBufferHandler(), until it is committed.
+@interface MVKMTLCommandBufferHandlers : NSObject {
 @public
-	uint32_t _count;
+	NSMutableArray* _completed;
+	NSMutableArray* _scheduled;
 }
 @end
 
-@implementation MVKMTLCommandBufferHandlerCount
+@implementation MVKMTLCommandBufferHandlers
+
+-(instancetype) init {
+	if ((self = [super init])) {
+		_completed = [NSMutableArray new];		// retained
+		_scheduled = [NSMutableArray new];		// retained
+	}
+	return self;
+}
+
+-(void) dealloc {
+	[_completed release];
+	[_scheduled release];
+	[super dealloc];
+}
+
 @end
 
-static char kMVKMTLCommandBufferHandlerCountKey;
+static char kMVKMTLCommandBufferHandlersKey;
+
+// Detaches and returns, retained, the handlers added to a Metal command buffer, if any.
+static MVKMTLCommandBufferHandlers* mvkTakeMTLCommandBufferHandlers(id<MTLCommandBuffer> mtlCmdBuff) {
+	MVKMTLCommandBufferHandlers* handlers = [objc_getAssociatedObject(mtlCmdBuff, &kMVKMTLCommandBufferHandlersKey) retain];
+	if (handlers) { objc_setAssociatedObject(mtlCmdBuff, &kMVKMTLCommandBufferHandlersKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+	return handlers;
+}
 
 // Polls rather than waits for a notification: whatever decremented the count may not use this device again.
 template <typename T>
@@ -4088,30 +4111,48 @@ void MVKDevice::endEncoding() {
 
 void MVKDevice::addMTLCommandBufferHandler(id<MTLCommandBuffer> mtlCmdBuff, MTLCommandBufferHandler handler, bool isScheduled) {
 	if ( !mtlCmdBuff ) { return; }
-	MVKMTLCommandBufferHandlerCount* handlerCount = objc_getAssociatedObject(mtlCmdBuff, &kMVKMTLCommandBufferHandlerCountKey);
-	if ( !handlerCount ) {
-		handlerCount = [MVKMTLCommandBufferHandlerCount new];		// temp retain
-		objc_setAssociatedObject(mtlCmdBuff, &kMVKMTLCommandBufferHandlerCountKey, handlerCount, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-		[handlerCount release];										// temp release
+	MVKMTLCommandBufferHandlers* handlers = objc_getAssociatedObject(mtlCmdBuff, &kMVKMTLCommandBufferHandlersKey);
+	if ( !handlers ) {
+		handlers = [MVKMTLCommandBufferHandlers new];		// temp retain
+		objc_setAssociatedObject(mtlCmdBuff, &kMVKMTLCommandBufferHandlersKey, handlers, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		[handlers release];									// temp release
 	}
-	handlerCount->_count++;
-	// The decrement is the handler's last use of this device, which may be destroyed right after it.
-	MTLCommandBufferHandler counted = ^(id<MTLCommandBuffer> mtlCB) {
-		handler(mtlCB);
-		_pendingMTLCommandBufferHandlers--;
-	};
-	if (isScheduled) {
-		[mtlCmdBuff addScheduledHandler: counted];
-	} else {
-		[mtlCmdBuff addCompletedHandler: counted];
-	}
+	id copiedHandler = [handler copy];						// temp retain
+	[(isScheduled ? handlers->_scheduled : handlers->_completed) addObject: copiedHandler];
+	[copiedHandler release];								// temp release
 }
 
 void MVKDevice::commitMTLCommandBuffer(id<MTLCommandBuffer> mtlCmdBuff) {
 	if ( !mtlCmdBuff ) { return; }
-	MVKMTLCommandBufferHandlerCount* handlerCount = objc_getAssociatedObject(mtlCmdBuff, &kMVKMTLCommandBufferHandlerCountKey);
-	if (handlerCount) { _pendingMTLCommandBufferHandlers += handlerCount->_count; }
+	MVKMTLCommandBufferHandlers* handlers = mvkTakeMTLCommandBufferHandlers(mtlCmdBuff);
+	NSArray* scheduled = handlers ? handlers->_scheduled : nil;
+	NSArray* completed = handlers ? handlers->_completed : nil;
+	// The end of each Metal handler is its last use of this device, which may be destroyed right after it.
+	if (scheduled.count) {
+		_pendingMTLCommandBufferHandlers++;
+		[mtlCmdBuff addScheduledHandler: ^(id<MTLCommandBuffer> mtlCB) {
+			for (MTLCommandBufferHandler handler in scheduled) { handler(mtlCB); }
+			_pendingMTLCommandBufferHandlers--;
+		}];
+	}
+	if (completed.count) {
+		_pendingMTLCommandBufferHandlers++;
+		[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer> mtlCB) {
+			for (MTLCommandBufferHandler handler in completed) { handler(mtlCB); }
+			_pendingMTLCommandBufferHandlers--;
+		}];
+	}
+	[handlers release];
 	[mtlCmdBuff commit];
+}
+
+void MVKDevice::abandonMTLCommandBuffer(id<MTLCommandBuffer> mtlCmdBuff) {
+	if ( !mtlCmdBuff ) { return; }
+	MVKMTLCommandBufferHandlers* handlers = mvkTakeMTLCommandBufferHandlers(mtlCmdBuff);
+	if (handlers) {
+		for (MTLCommandBufferHandler handler in handlers->_completed) { handler(mtlCmdBuff); }
+	}
+	[handlers release];
 }
 
 void MVKDevice::addLossReleasable(MVKLossReleasable* releasable) {

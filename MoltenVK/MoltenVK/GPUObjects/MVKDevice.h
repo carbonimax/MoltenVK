@@ -731,12 +731,19 @@ public:
 
 	/**
 	 * Adds a completion handler, or a scheduled handler, to a Metal command buffer that commitMTLCommandBuffer()
-	 * commits. A device loss is reported to host waits, and this device destroyed, only once every such handler of
-	 * every committed command buffer has returned: the handlers use this device and objects that the application may
-	 * destroy as soon as a loss is reported, and Metal documents no order between the handlers of a command buffer.
-	 * Handlers of a command buffer not yet committed, such as a prefilled one, are not waited for.
+	 * commits, or that abandonMTLCommandBuffer() abandons. The handlers of each kind run in the order they were added,
+	 * from one Metal handler: Metal documents no order between the handlers of a command buffer. A device loss is
+	 * reported to host waits, and this device destroyed, only once the handlers of every committed command buffer have
+	 * returned: they use this device and objects that the application may destroy as soon as a loss is reported.
 	 */
 	void addMTLCommandBufferHandler(id<MTLCommandBuffer> mtlCmdBuff, MTLCommandBufferHandler handler, bool isScheduled = false);
+
+	/**
+	 * Runs now, as cleanup, the completion handlers of a Metal command buffer that its owner then releases without
+	 * committing it, which discards its commands. Its status stays MTLCommandBufferStatusNotEnqueued, which handlers
+	 * that report completion must check.
+	 */
+	void abandonMTLCommandBuffer(id<MTLCommandBuffer> mtlCmdBuff);
 
 	/**
 	 * Commits a Metal command buffer, counting its handlers added by addMTLCommandBufferHandler(). A device loss is
