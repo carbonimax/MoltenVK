@@ -5,8 +5,12 @@
 On iOS and iPadOS 27, `MTL_SHADER_VALIDATION=1` makes
 `-[MTLRenderCommandEncoder memoryBarrierWithScope:afterStages:beforeStages:]` and
 `memoryBarrierWithResources:count:afterStages:beforeStages:` behave as if they were absent. Buffer stores made by the
-vertex function of one draw are not visible to the vertex or fragment functions of the next draw in the same render
-pass, and no validation message is reported.
+vertex function of one draw are not visible to the vertex function of the next draw in the same render pass. That
+draw then produces no fragments, so whether its fragment function would see the stores cannot be observed here.
+
+Shader validation reports nothing, even with `MTL_SHADER_VALIDATION_ENABLE_ERROR_REPORTING=1` and
+`MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1`. With `MTL_SHADER_VALIDATION_FAIL_MODE=allow` the result is the same, so
+this is not the zero-fill of an access that validation considers invalid. Both checks were run on the iPad Pro M4.
 
 The same code orders the draws correctly:
 - without shader validation, on the same devices;
@@ -82,7 +86,8 @@ variable.
 ## Impact
 
 A renderer that orders draws inside a render pass with these barriers renders wrongly while a developer debugs with
-shader validation, with no diagnostic. The only workaround found is to end the render pass.
+shader validation, with no diagnostic. Of the orderings tried, only ending the render pass works under shader
+validation.
 
 That workaround has a cost. Without validation, a render pass split cost 27 to 62 µs per split on the iPhones and the
 iPad listed above. The measurement used RGBA8 and Depth32Float attachments of 2556×1179. To run it, pass `cost` as the
