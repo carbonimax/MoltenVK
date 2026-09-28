@@ -72,9 +72,8 @@ Built with Xcode 27.1 (27A9269).
 
 Where the results come from:
 - **iOS table:** the same `BarrierRepro.mm`, run inside a test app launched with these environment variables.
-- **This project:** launched with `devicectl device process launch -e` on:
-  - the iPad Pro M4 and the iPhone 18 Pro: 6/6 without validation and 0/6 with `MTL_SHADER_VALIDATION=1`;
-  - the iPhone 15 Pro: 6/6 without validation only.
+- **This project:** launched with `devicectl device process launch -e` on all three iOS devices: 6/6 without validation
+  and 0/6 with `MTL_SHADER_VALIDATION=1`.
 - **macOS:** a command-line build of the same file (`-DBARRIER_REPRO_STANDALONE`).
 
 Not checked yet: whether the Shader Validation diagnostic of the Xcode scheme gives the same result as the environment
