@@ -8,7 +8,10 @@
 //   with stencil EQUAL 0, must stay hidden there;
 // - msaa: an ordinary 4x color attachment resolved to the readback image, red on the left half before the draw; the
 //   triangle is scissored to the right half, and the left must stay red;
-// - msaa-memoryless: the same with an imported memoryless 4x color attachment.
+// - msaa-memoryless: the same with an imported memoryless 4x color attachment;
+// - indirect-count-0, indirect-count-1: no other attachment; the same triangle through vkCmdDrawIndirectCount with a
+//   1 GiB argument buffer, stride 16 and the largest legal maxDrawCount (2^26), on a device whose Metal buffer limit
+//   the test build lowers to 1 GiB. Count 1 draws the triangle, Count 0 nothing.
 // Outcome: REFUSED when vkEndCommandBuffer refuses the draw, RENDERED when the image matches, WRONG otherwise.
 // Exit 0 for RENDERED, 4 for REFUSED, 1 for WRONG or a device loss, 2 for a setup failure, 3 for a missing capability.
 #import <Metal/Metal.h>
@@ -56,7 +59,10 @@ int main(int argc, char** argv) {
 	std::string shaders = argv[1], variant = argv[2];
 	bool depth = variant == "memoryless-depth", stencil = variant == "memoryless-stencil";
 	bool msaa = variant == "msaa" || variant == "msaa-memoryless", memorylessColor = variant == "msaa-memoryless";
-	if (!depth && !stencil && !msaa) { std::fprintf(stderr, "unknown variant %s\n", variant.c_str()); return 64; }
+	bool indirectCount = variant == "indirect-count-0" || variant == "indirect-count-1";
+	uint32_t drawnCount = variant == "indirect-count-1" ? 1 : 0;
+	constexpr VkDeviceSize kArgumentBytes = 1ull << 30;
+	if (!depth && !stencil && !msaa && !indirectCount) { std::fprintf(stderr, "unknown variant %s\n", variant.c_str()); return 64; }
 	VkSampleCountFlagBits samples = msaa ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT;
 
 	@autoreleasepool {
@@ -74,21 +80,30 @@ int main(int argc, char** argv) {
 		auto enable = reinterpret_cast<void (*)(VkPhysicalDevice)>(dlsym(RTLD_DEFAULT, "mvkEnableTESFixtureDevice"));
 		if (!enable) { std::fprintf(stderr, "Needs a MoltenVK test build with its test device adapter\n"); return 3; }
 		enable(physical);
+		if (indirectCount) {
+			auto limit = reinterpret_cast<void (*)(VkPhysicalDevice, uint64_t)>(dlsym(RTLD_DEFAULT, "mvkTestLimitMetalBufferSize"));
+			if (!limit) { std::fprintf(stderr, "Needs a MoltenVK test build with mvkTestLimitMetalBufferSize\n"); return 3; }
+			limit(physical, kArgumentBytes);
+		}
 		VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR barycentric{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR};
 		VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 		features.pNext = &barycentric;
 		vkGetPhysicalDeviceFeatures2(physical, &features);
 		if (!barycentric.fragmentShaderBarycentric) { std::fprintf(stderr, "No fragment shader barycentric feature\n"); return 3; }
+		if (indirectCount && !features.features.multiDrawIndirect) { std::fprintf(stderr, "No multiDrawIndirect\n"); return 3; }
+		VkPhysicalDeviceFeatures2 enabled{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+		enabled.pNext = &barycentric;
+		enabled.features.multiDrawIndirect = indirectCount;
 		float priority = 1;
 		VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
 		queueInfo.queueCount = 1;
 		queueInfo.pQueuePriorities = &priority;
-		const char* extensions[] = {VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, VK_EXT_METAL_OBJECTS_EXTENSION_NAME, "VK_KHR_portability_subset"};
+		const char* extensions[] = {VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, VK_EXT_METAL_OBJECTS_EXTENSION_NAME, "VK_KHR_portability_subset", VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME};
 		VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-		deviceInfo.pNext = &barycentric;
+		deviceInfo.pNext = &enabled;
 		deviceInfo.queueCreateInfoCount = 1;
 		deviceInfo.pQueueCreateInfos = &queueInfo;
-		deviceInfo.enabledExtensionCount = 3;
+		deviceInfo.enabledExtensionCount = 4;
 		deviceInfo.ppEnabledExtensionNames = extensions;
 		VkDevice device;
 		check(vkCreateDevice(physical, &deviceInfo, nullptr, &device), "vkCreateDevice");
@@ -141,7 +156,7 @@ int main(int argc, char** argv) {
 		if (stencil) { imported = memorylessTexture(MTLPixelFormatDepth32Float_Stencil8, 1); }
 		if (memorylessColor) { imported = memorylessTexture(MTLPixelFormatRGBA8Unorm, 4); }
 		VkImageUsageFlags testUsage = (msaa ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) | (imported ? VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT : 0);
-		makeImage(testFormat, testUsage, samples, imported, testImage, testMemory);
+		if (!indirectCount) { makeImage(testFormat, testUsage, samples, imported, testImage, testMemory); }
 		VkImageAspectFlags testAspect = depth ? VK_IMAGE_ASPECT_DEPTH_BIT : stencil ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
 		auto view = [&](VkImage image, VkFormat format, VkImageAspectFlags aspect) {
 			VkImageViewCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -154,7 +169,7 @@ int main(int argc, char** argv) {
 			return result;
 		};
 		VkImageView colorView = view(colorImage, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
-		VkImageView testView = view(testImage, testFormat, testAspect);
+		VkImageView testView = indirectCount ? VK_NULL_HANDLE : view(testImage, testFormat, testAspect);
 
 		// Render pass: color 0 (single sample, or MSAA resolved into it), and the depth/stencil attachment.
 		std::vector<VkAttachmentDescription> attachments;
@@ -173,7 +188,7 @@ int main(int argc, char** argv) {
 		test.stencilLoadOp = stencil ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 		test.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 		test.finalLayout = msaa ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-		attachments.push_back(test);
+		if (!indirectCount) { attachments.push_back(test); }
 		VkAttachmentReference colorRef{msaa ? 1u : 0u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
 		VkAttachmentReference resolveRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
 		VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
@@ -182,7 +197,7 @@ int main(int argc, char** argv) {
 		subpass.colorAttachmentCount = 1;
 		subpass.pColorAttachments = &colorRef;
 		subpass.pResolveAttachments = msaa ? &resolveRef : nullptr;
-		subpass.pDepthStencilAttachment = msaa ? nullptr : &depthRef;
+		subpass.pDepthStencilAttachment = msaa || indirectCount ? nullptr : &depthRef;
 		VkRenderPassCreateInfo passInfo{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
 		passInfo.attachmentCount = uint32_t(attachments.size());
 		passInfo.pAttachments = attachments.data();
@@ -193,7 +208,7 @@ int main(int argc, char** argv) {
 		VkImageView views[] = {colorView, testView};
 		VkFramebufferCreateInfo framebufferInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
 		framebufferInfo.renderPass = renderPass;
-		framebufferInfo.attachmentCount = 2;
+		framebufferInfo.attachmentCount = indirectCount ? 1 : 2;
 		framebufferInfo.pAttachments = views;
 		framebufferInfo.width = framebufferInfo.height = kSide;
 		framebufferInfo.layers = 1;
@@ -257,7 +272,7 @@ int main(int argc, char** argv) {
 		pipelineInfo.pViewportState = &viewportState;
 		pipelineInfo.pRasterizationState = &raster;
 		pipelineInfo.pMultisampleState = &multisample;
-		pipelineInfo.pDepthStencilState = msaa ? nullptr : &depthState;
+		pipelineInfo.pDepthStencilState = msaa || indirectCount ? nullptr : &depthState;
 		pipelineInfo.pColorBlendState = &blend;
 		pipelineInfo.layout = layout;
 		pipelineInfo.renderPass = renderPass;
@@ -281,6 +296,30 @@ int main(int argc, char** argv) {
 		void* pixels = nullptr;
 		check(vkMapMemory(device, readbackMemory, 0, VK_WHOLE_SIZE, 0, &pixels), "vkMapMemory");
 		std::memset(pixels, 0, kSide * kSide * 4);
+		// The argument buffer holds the triangle as its first command; the count buffer holds Count.
+		VkBuffer arguments = VK_NULL_HANDLE, countBuffer = VK_NULL_HANDLE;
+		VkDeviceMemory argumentMemory = VK_NULL_HANDLE, countMemory = VK_NULL_HANDLE;
+		auto hostBuffer = [&](VkDeviceSize size, VkBuffer& buffer, VkDeviceMemory& memory) {
+			VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+			info.size = size;
+			info.usage = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+			check(vkCreateBuffer(device, &info, nullptr, &buffer), "vkCreateBuffer indirect");
+			VkMemoryRequirements requirements;
+			vkGetBufferMemoryRequirements(device, buffer, &requirements);
+			VkMemoryAllocateInfo allocationInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+			allocationInfo.allocationSize = requirements.size;
+			allocationInfo.memoryTypeIndex = memoryType(physical, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+			check(vkAllocateMemory(device, &allocationInfo, nullptr, &memory), "vkAllocateMemory indirect");
+			check(vkBindBufferMemory(device, buffer, memory, 0), "vkBindBufferMemory indirect");
+			void* data = nullptr;
+			check(vkMapMemory(device, memory, 0, 64, 0, &data), "vkMapMemory indirect");
+			return static_cast<uint32_t*>(data);
+		};
+		if (indirectCount) {
+			uint32_t* command = hostBuffer(kArgumentBytes, arguments, argumentMemory);
+			command[0] = 3; command[1] = 1; command[2] = 0; command[3] = 0;
+			hostBuffer(4, countBuffer, countMemory)[0] = drawnCount;
+		}
 		VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
 		VkCommandPool pool;
 		check(vkCreateCommandPool(device, &poolInfo, nullptr, &pool), "vkCreateCommandPool");
@@ -294,12 +333,12 @@ int main(int argc, char** argv) {
 		VkClearValue clears[2]{};
 		clears[0].color.float32[2] = clears[0].color.float32[3] = 1;	// blue
 		clears[1] = clears[0];
-		if (!msaa) { clears[1].depthStencil = {1.0f, 0}; }
+		if (!msaa && !indirectCount) { clears[1].depthStencil = {1.0f, 0}; }
 		VkRenderPassBeginInfo passBegin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
 		passBegin.renderPass = renderPass;
 		passBegin.framebuffer = framebuffer;
 		passBegin.renderArea = {{0, 0}, {kSide, kSide}};
-		passBegin.clearValueCount = 2;
+		passBegin.clearValueCount = indirectCount ? 1 : 2;
 		passBegin.pClearValues = clears;
 		vkCmdBeginRenderPass(commands, &passBegin, VK_SUBPASS_CONTENTS_INLINE);
 		VkClearAttachment left{};
@@ -311,9 +350,13 @@ int main(int argc, char** argv) {
 			left.aspectMask = depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_STENCIL_BIT;
 			left.clearValue.depthStencil = {0.0f, 1};
 		}
-		vkCmdClearAttachments(commands, 1, &left, 1, &leftRect);
+		if (!indirectCount) { vkCmdClearAttachments(commands, 1, &left, 1, &leftRect); }
 		vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-		vkCmdDraw(commands, 3, 1, 0, 0);
+		if (indirectCount) {
+			vkCmdDrawIndirectCountKHR(commands, arguments, 0, countBuffer, 0, uint32_t(kArgumentBytes / 16), 16);
+		} else {
+			vkCmdDraw(commands, 3, 1, 0, 0);
+		}
 		vkCmdEndRenderPass(commands);
 		VkBufferImageCopy copy{};
 		copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -322,8 +365,8 @@ int main(int argc, char** argv) {
 		VkResult ended = vkEndCommandBuffer(commands);
 		std::printf("variant=%s vkEndCommandBuffer=%d\n", variant.c_str(), int(ended));
 		int rc;
-		if (ended == VK_ERROR_FEATURE_NOT_PRESENT) {
-			std::printf("SPLIT_ATTACHMENT REFUSED: the draw was refused before submission\n");
+		if (ended != VK_SUCCESS) {
+			std::printf("SPLIT_ATTACHMENT REFUSED: the draw was refused before submission (%d)\n", int(ended));
 			rc = 4;
 		} else {
 			check(ended, "vkEndCommandBuffer");
@@ -342,6 +385,7 @@ int main(int argc, char** argv) {
 				for (uint32_t x = 0; x < kSide; ++x, p += 4) {
 					bool leftHalf = x < kSide / 2;
 					uint8_t want[4] = {uint8_t(leftHalf && msaa ? 255 : 0), uint8_t(leftHalf ? 0 : 255), uint8_t(leftHalf && !msaa ? 255 : 0), 255};
+					if (indirectCount) { want[0] = 0; want[1] = drawnCount ? 255 : 0; want[2] = drawnCount ? 0 : 255; }
 					wrong += std::memcmp(p, want, 4) != 0;
 				}
 			}
