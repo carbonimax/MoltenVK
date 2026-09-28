@@ -51,6 +51,7 @@ int main(int argc, char** argv) {
                 [encoder setBuffer:counts offset:0 atIndex:1];
                 [encoder setBuffer:plan offset:0 atIndex:2];
                 for (NSUInteger binding = 3; binding <= 7; ++binding) { [encoder setBuffer:plan offset:0 atIndex:binding]; }
+                [encoder setBuffer:plan offset:0 atIndex:9];  // one draw: its snapshot lives in the plan, at word 48
                 [encoder setBytes:params length:sizeof(params) atIndex:8];
                 [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(phase == 0 && secondDraw ? 2 : 1, 1, 1)];
                 [encoder endEncoding];
@@ -78,7 +79,7 @@ int main(int argc, char** argv) {
         NSUInteger gatheredOffset = 0;
         uint32_t scanSteps = 0;
         require(planned[0] == 0 && planned[53] == 6 && planned[54] == 0 && planned[55] == 1 && planned[56] == 1, "six-record GPU plan survives the old five-record cutoff");
-        require(mvkSizePerVertexIndirectReplay(planned.data(), sizeof(planned), 48 * sizeof(uint32_t), 1, 1, 32, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, false, false, device.maxBufferLength, replay, gatheredOffset, scanSteps), "size replay from frozen GPU plan");
+        require(mvkSizePerVertexIndirectReplay(planned.data(), sizeof(planned), planned.data() + 48, sizeof(planned) - 48 * sizeof(uint32_t), 1, 1, 32, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, false, false, device.maxBufferLength, replay, gatheredOffset, scanSteps), "size replay from frozen GPU plan");
         require(replay.captureSize == 192 && replay.occurrenceSize == 48 && replay.primitiveSize == 24 && !gatheredOffset && !scanSteps, "exact six-record replay sizes");
         MVKPerVertexScratch exact;
         require(exact.reserveReplay(device, replay) && exact.buffers[0].length >= replay.captureSize, "allocate exact Metal replay scratch after GPU plan");

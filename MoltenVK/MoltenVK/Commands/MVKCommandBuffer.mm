@@ -547,10 +547,13 @@ VkResult MVKCommandBuffer::recordPerVertexIndirectDraw(bool indexed, uint32_t dr
 	request.restart = restart;
 	request.indirectCapacity = UINT32_MAX;
 	// Plan words, then one 256-byte perVertexRestart parameter block per dispatch, laid out for the plan's ceiling.
-	uint64_t basePlanSize = 1024 + (restart ? (mvkPerVertexIndirectRestartScanSteps(UINT32_MAX) + 3) * 256 : 0);
-	uint64_t planSize = basePlanSize + (drawCount > 1 ? uint64_t(drawCount) * 5 * sizeof(uint32_t) : 0);
-	if (planSize > getMetalFeatures().maxMTLBufferSize) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR indirect argument snapshot exceeds Metal buffer limits."); }
+	uint64_t planSize = 1024 + (restart ? (mvkPerVertexIndirectRestartScanSteps(UINT32_MAX) + 3) * 256 : 0);
+	// Several draws freeze their Vulkan commands in a buffer of their own, at their size. Vulkan bounds maxDrawCount by
+	// the argument buffer, whose stride is at least that size: a legal command never exceeds the Metal limits here.
+	uint64_t snapshotSize = drawCount > 1 ? uint64_t(drawCount) * (indexed ? 5 : 4) * sizeof(uint32_t) : 0;
+	if (planSize > getMetalFeatures().maxMTLBufferSize || snapshotSize > getMetalFeatures().maxMTLBufferSize) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR indirect argument snapshot exceeds Metal buffer limits."); }
 	request.planSize = NSUInteger(planSize);
+	request.snapshotSize = NSUInteger(snapshotSize);
 	// Every multiview pass plans and replays separately.
 	uint32_t passCount = std::max(getDevice()->getMultiviewMetalPassCount(getViewMask()), 1u);
 	size_t firstRequest = _perVertexScratchRequests.size();
