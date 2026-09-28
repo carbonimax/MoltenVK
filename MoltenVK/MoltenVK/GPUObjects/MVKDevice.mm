@@ -3627,12 +3627,11 @@ void MVKPhysicalDevice::initExtensions() {
 		pWritableExtns->vk_EXT_shader_subgroup_ballot.enabled = false;
 		pWritableExtns->vk_EXT_shader_subgroup_vote.enabled = false;
 	}
-	// macOS capture/replay still rejects valid shader forms, topologies and draw modes.
-	// Metal barycentric support alone is not the complete Vulkan feature contract.
-	if (MVK_MACOS || !_metalFeatures.shaderBarycentricCoordinates) {
-		pWritableExtns->vk_KHR_fragment_shader_barycentric.enabled = false;
-		pWritableExtns->vk_NV_fragment_shader_barycentric.enabled = false;
-	}
+	// Closed on every platform until Vulkan rendering qualifies it on devices: capture/replay still rejects valid
+	// shader forms, topologies and draw modes, native vertex_value (Apple10) has not rendered through Vulkan, and
+	// Metal barycentric support alone is not the complete Vulkan feature contract. Tests open it through an adapter.
+	pWritableExtns->vk_KHR_fragment_shader_barycentric.enabled = false;
+	pWritableExtns->vk_NV_fragment_shader_barycentric.enabled = false;
 	// The first mesh path (mesh and fragment stages, direct draws, no mesh-stage resources) is exposed only
 	// to the test device adapter.
 	pWritableExtns->vk_EXT_mesh_shader.enabled = false;
