@@ -2480,9 +2480,10 @@ MVK_PUBLIC_VULKAN_SYMBOL VkResult vkGetSemaphoreCounterValue(
 	uint64_t*									pValue) {
 
 	MVKTraceVulkanCallStart();
-	// During a device loss, Metal waits are released early: the counter no longer reflects completed work.
+	// During a device loss, the release of Metal waits may raise the counter past work that never ran, while
+	// submissions may still be reading their command buffers: report the loss once it is published.
 	MVKDevice* mvkDev = MVKDevice::getMVKDevice(device);
-	VkResult rslt = mvkDev->isLosing() ? VK_ERROR_DEVICE_LOST : mvkDev->getConfigurationResult();
+	VkResult rslt = mvkDev->isLosing() ? mvkDev->getHostWaitResult(true, UINT64_MAX) : mvkDev->getConfigurationResult();
 	if (rslt == VK_SUCCESS) {
 		auto* mvkSem4 = (MVKTimelineSemaphore*)semaphore;
 		*pValue = mvkSem4->getCounterValue();
