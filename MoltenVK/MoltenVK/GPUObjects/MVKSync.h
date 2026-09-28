@@ -207,9 +207,22 @@ public:
 	virtual bool isUsingCommandEncoding() = 0;
 
 	/**
+	 * Encodes the signal of a queue submission, and returns the token that the submission passes to
+	 * completeSubmissionSignal() once its Metal work has completed. Unless overridden, this is encodeSignal(),
+	 * then encodeSignal(nil, value) on completion.
+	 */
+	virtual uint64_t encodeSubmissionSignal(id<MTLCommandBuffer> mtlCmdBuff, uint64_t value) {
+		encodeSignal(mtlCmdBuff, value);
+		return value;
+	}
+
+	/** Completes a signal encoded by encodeSubmissionSignal(), with the token it returned. */
+	virtual void completeSubmissionSignal(uint64_t token) { encodeSignal(nil, token); }
+
+	/**
 	 * Reserves the value that a later encodeReservedWait() waits for, for a semaphore that otherwise assigns it
-	 * while encoding. A submission whose encoding is deferred reserves its waits and signals (see deferSignal())
-	 * when it is submitted, so that they pair with other submissions exactly as if it were encoded then.
+	 * while encoding. A submission whose encoding is deferred reserves its waits when it is submitted, so that
+	 * they pair with other submissions exactly as if it were encoded then.
 	 * Returns zero for semaphores that do not assign values while encoding.
 	 */
 	virtual uint64_t reserveWait() { return 0; }
@@ -272,6 +285,8 @@ class MVKSemaphoreMTLEvent : public MVKSemaphore {
 public:
 	void encodeWait(id<MTLCommandBuffer> mtlCmdBuff, uint64_t value) override;
 	void encodeSignal(id<MTLCommandBuffer> mtlCmdBuff, uint64_t value) override;
+	uint64_t encodeSubmissionSignal(id<MTLCommandBuffer> mtlCmdBuff, uint64_t value) override;
+	void completeSubmissionSignal(uint64_t token) override;
 	uint64_t deferSignal() override;
 	void encodeDeferredSignal(id<MTLCommandBuffer> mtlCmdBuff, uint64_t deferToken) override;
 	bool isUsingCommandEncoding() override { return true; }
@@ -287,10 +302,16 @@ public:
 	~MVKSemaphoreMTLEvent() override;
 
 protected:
-	id<MTLEvent> _mtlEvent;
+	id<MTLSharedEvent> _mtlEvent;
 	std::atomic<uint64_t> _mtlEventValue;
 	std::atomic<uint64_t> _maxEncodedWaitValue{0};
 	std::atomic<bool> _isLossReleased{false};
+	std::mutex _signalLock;
+	uint64_t _lastDeferredSignalValue = 0;
+	uint64_t _metalSignalValue = 0;			// The one pending signal encoded in Metal, or zero.
+	uint32_t _pendingSubmissionSignals = 0;
+	bool _isMetalSignalPreempted = false;
+	bool _isImported = false;
 };
 
 

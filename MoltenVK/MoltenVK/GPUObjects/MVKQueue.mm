@@ -110,7 +110,7 @@ VkResult MVKQueue::submit(MVKQueueSubmission* qSubmit) {
 		// is idle, execute in order on a worker, and report execution errors to host waits instead of vkQueueSubmit().
 		if ( !_workerQueue ) { _workerQueue = dispatch_queue_create((getName() + "-Worker").c_str(), DISPATCH_QUEUE_SERIAL); }	// retained
 		execQueue = _workerQueue;
-		// Synchronous submits assign the values of semaphores encoded by Metal here, in the order of submission.
+		// Synchronous submits assign the values of binary semaphore waits encoded by Metal here, in submission order.
 		qSubmit->reserveSemaphores();
 	}
 	if (execQueue) {
@@ -412,16 +412,16 @@ void MVKSemaphoreSubmitInfo::encodeWait(id<MTLCommandBuffer> mtlCmdBuff) {
 	}
 }
 
+// Encodes the signal while encoding the submission, and keeps what completeSignal() needs once it has completed.
 void MVKSemaphoreSubmitInfo::encodeSignal(id<MTLCommandBuffer> mtlCmdBuff) {
-	if ( !_semaphore ) { return; }
-	if (_isReserved) {
-		_semaphore->encodeDeferredSignal(mtlCmdBuff, _reservation);
-	} else {
-		_semaphore->encodeSignal(mtlCmdBuff, value);
-	}
+	if (_semaphore) { _reservation = _semaphore->encodeSubmissionSignal(mtlCmdBuff, value); }
 }
 
-// Binary Metal event semaphores assign their values while encoding; timeline values come from the application.
+void MVKSemaphoreSubmitInfo::completeSignal() {
+	if (_semaphore) { _semaphore->completeSubmissionSignal(_reservation); }
+}
+
+// Binary Metal event semaphores assign the values of their waits while encoding; timeline values come from the application.
 bool MVKSemaphoreSubmitInfo::isReservable() {
 	return _semaphore && _semaphore->getSemaphoreType() == VK_SEMAPHORE_TYPE_BINARY && _semaphore->isUsingCommandEncoding();
 }
@@ -429,13 +429,6 @@ bool MVKSemaphoreSubmitInfo::isReservable() {
 void MVKSemaphoreSubmitInfo::reserveWait() {
 	if (isReservable()) {
 		_reservation = _semaphore->reserveWait();
-		_isReserved = true;
-	}
-}
-
-void MVKSemaphoreSubmitInfo::reserveSignal() {
-	if (isReservable()) {
-		_reservation = _semaphore->deferSignal();
 		_isReserved = true;
 	}
 }
@@ -565,7 +558,6 @@ VkResult MVKQueueCommandBufferSubmission::execute() {
 
 void MVKQueueCommandBufferSubmission::reserveSemaphores() {
 	for (auto& ws : _waitSemaphores) { ws.reserveWait(); }
-	for (auto& ss : _signalSemaphores) { ss.reserveSignal(); }
 }
 
 // Waits in slices: once the device is being lost, the committed work may wait on a signal that never comes.
@@ -694,7 +686,7 @@ void MVKQueueCommandBufferSubmission::finish() {
 	// During a device loss, nothing is reported complete: host waits report the loss once it is published.
 	if ( !getDevice()->isLosing() ) {
 		// If using inline semaphore signaling, do so now.
-		for (auto& ss : _signalSemaphores) { ss.encodeSignal(nil); }
+		for (auto& ss : _signalSemaphores) { ss.completeSignal(); }
 
 		// If a fence exists, signal it.
 		if (_fence) { _fence->signal(); }

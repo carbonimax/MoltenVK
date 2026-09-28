@@ -147,21 +147,53 @@ bool MVKSemaphoreMTLEvent::releaseWaitsAfterLoss(id<MTLCommandBuffer> mtlCmdBuff
 	if ( !value ) { return true; }
 	if (mtlCmdBuff) {
 		[mtlCmdBuff encodeSignalEvent: _mtlEvent value: value];
-		return true;
+	} else if (_mtlEvent.signaledValue < value) {
+		_mtlEvent.signaledValue = value;
 	}
-	if ([_mtlEvent conformsToProtocol: @protocol(MTLSharedEvent)]) {
-		auto* sharedEvent = (id<MTLSharedEvent>)_mtlEvent;
-		if (sharedEvent.signaledValue < value) { sharedEvent.signaledValue = value; }
-		return true;
-	}
-	return false;
+	return true;
 }
 
+// Queue submissions signal through encodeSubmissionSignal(), and swapchains through deferSignal().
 void MVKSemaphoreMTLEvent::encodeSignal(id<MTLCommandBuffer> mtlCmdBuff, uint64_t) {
 	if (mtlCmdBuff) { [mtlCmdBuff encodeSignalEvent: _mtlEvent value: _mtlEventValue]; }
 }
 
+// A binary semaphore pairs each wait with the signal that executes before it, which is not always the one submitted
+// first: a signal submitted earlier on another queue may wait for work that a later signal releases (B/A/C/D in
+// MoltenVK/Tests/PerVertexBinarySemaphoreOrderTests.mm). Waits take their value in submission order. A signal takes
+// the value after the one its semaphore holds when it executes. It is encoded in Metal only while no other signal of
+// this semaphore is pending, so that none can execute before it; that one may still be preempted by a later signal,
+// see completeSubmissionSignal(). Any other signal sets the value from the host once its submission completes, after
+// its work and before its fence. An imported event may be signalled outside Vulkan: its signals always wait for
+// completion. A swapchain signal (deferSignal()) cannot overlap them, because acquisition requires a semaphore with
+// no pending operation; its value is accounted for all the same.
+uint64_t MVKSemaphoreMTLEvent::encodeSubmissionSignal(id<MTLCommandBuffer> mtlCmdBuff, uint64_t) {
+	lock_guard<mutex> lock(_signalLock);
+	if (_pendingSubmissionSignals++ || _isImported || !mtlCmdBuff) { return 0; }
+	_metalSignalValue = std::max(_mtlEvent.signaledValue, _lastDeferredSignalValue) + 1;
+	_isMetalSignalPreempted = false;
+	[mtlCmdBuff encodeSignalEvent: _mtlEvent value: _metalSignalValue];
+	return _metalSignalValue;
+}
+
+// The signal encoded in Metal is complete unless a signal set from the host took its value first: its own Metal
+// signal did nothing, and it then takes the next value like any other signal. That other signal had executed before
+// it, as a binary semaphore must be unsignaled when a signal executes.
+void MVKSemaphoreMTLEvent::completeSubmissionSignal(uint64_t token) {
+	lock_guard<mutex> lock(_signalLock);
+	_pendingSubmissionSignals--;
+	if (token) {
+		_metalSignalValue = 0;
+		if ( !_isMetalSignalPreempted ) { return; }
+	}
+	uint64_t value = _mtlEvent.signaledValue + 1;
+	if (value == _metalSignalValue) { _isMetalSignalPreempted = true; }
+	_mtlEvent.signaledValue = value;
+}
+
 uint64_t MVKSemaphoreMTLEvent::deferSignal() {
+	lock_guard<mutex> lock(_signalLock);
+	_lastDeferredSignalValue = _mtlEventValue;
 	return _mtlEventValue;
 }
 
@@ -173,18 +205,10 @@ MVKSemaphoreMTLEvent::MVKSemaphoreMTLEvent(MVKDevice* device,
 										   const VkSemaphoreCreateInfo* pCreateInfo,
 										   const VkExportMetalObjectCreateInfoEXT* pExportInfo,
 										   const VkImportMetalSharedEventInfoEXT* pImportInfo) : MVKSemaphore(device, pCreateInfo) {
-	// In order of preference, import a MTLSharedEvent,
-	// create a MTLSharedEvent, or create a MTLEvent.
-	if (pImportInfo && pImportInfo->mtlSharedEvent) {
-		_mtlEvent = [pImportInfo->mtlSharedEvent retain];		// retained
-		_mtlEventValue = pImportInfo->mtlSharedEvent.signaledValue + 1;
-	} else if (pExportInfo && pExportInfo->exportObjectType == VK_EXPORT_METAL_OBJECT_TYPE_METAL_SHARED_EVENT_BIT_EXT) {
-		_mtlEvent = [getMTLDevice() newSharedEvent];	//retained
-		_mtlEventValue = ((id<MTLSharedEvent>)_mtlEvent).signaledValue + 1;
-	} else {
-		_mtlEvent = [getMTLDevice() newEvent];			//retained
-		_mtlEventValue = 1;
-	}
+	// Import a MTLSharedEvent, or create one: signals set from the host need a shared event.
+	_isImported = pImportInfo && pImportInfo->mtlSharedEvent;
+	_mtlEvent = _isImported ? [pImportInfo->mtlSharedEvent retain] : [getMTLDevice() newSharedEvent];	// retained
+	_mtlEventValue = _mtlEvent.signaledValue + 1;
 }
 
 MVKSemaphoreMTLEvent::~MVKSemaphoreMTLEvent() {
