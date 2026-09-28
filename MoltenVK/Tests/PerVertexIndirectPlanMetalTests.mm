@@ -1,0 +1,90 @@
+// Copyright 2026 Jean-Philippe Meunier
+// SPDX-License-Identifier: Apache-2.0
+// Runs phase 0 of the production Metal helper and checks the single-draw plan snapshot.
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
+#include <array>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+static void require(bool ok, const char* message) {
+    if (!ok) { std::fprintf(stderr, "FAIL: %s\n", message); std::exit(1); }
+}
+
+int main(int argc, char** argv) {
+    @autoreleasepool {
+        require(argc == 2, "usage: pervertex-indirect-plan-metal factory.metal");
+        NSError* error = nil;
+        NSString* source = [NSString stringWithContentsOfFile:[NSString stringWithUTF8String:argv[1]] encoding:NSUTF8StringEncoding error:&error];
+        require(source != nil, "read factory.metal");
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        require(device != nil, "Metal device");
+        MTLCompileOptions* options = [MTLCompileOptions new];
+        options.languageVersion = MTLLanguageVersion2_4;
+        id<MTLLibrary> library = [device newLibraryWithSource:source options:options error:&error];
+        require(library != nil, error ? error.localizedDescription.UTF8String : "Metal library");
+        id<MTLFunction> function = [library newFunctionWithName:@"perVertexIndirect"];
+        require(function != nil, "perVertexIndirect function");
+        id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:function error:&error];
+        require(pipeline != nil, error ? error.localizedDescription.UTF8String : "Metal pipeline");
+        auto run = [&](std::array<uint32_t, 5> command, uint32_t indexBytes, uint32_t views, uint32_t capacity, bool counted, uint32_t count, bool resumeAfterMutation = false) {
+            id<MTLBuffer> args = [device newBufferWithLength:32 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> counts = [device newBufferWithLength:4 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> plan = [device newBufferWithLength:1024 options:MTLResourceStorageModeShared];
+            require(args && counts && plan, "Metal buffers");
+            std::memset(args.contents, 0, args.length);
+            std::memcpy(args.contents, command.data(), command.size() * sizeof(uint32_t));
+            std::memcpy(counts.contents, &count, sizeof(count));
+            std::memset(plan.contents, 0, plan.length);
+            uint32_t params[18] = {1, 32, indexBytes, UINT32_MAX, 1, capacity, views, 3, 0, 0, uint32_t(counted), 0, 7, 5, 3, 0, 0, 0};
+            id<MTLCommandQueue> queue = [device newCommandQueue];
+            auto dispatch = [&](uint32_t phase) {
+                params[15] = phase;
+                id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
+                id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+                [encoder setComputePipelineState:pipeline];
+                [encoder setBuffer:args offset:0 atIndex:0];
+                [encoder setBuffer:counts offset:0 atIndex:1];
+                [encoder setBuffer:plan offset:0 atIndex:2];
+                for (NSUInteger binding = 3; binding <= 7; ++binding) { [encoder setBuffer:plan offset:0 atIndex:binding]; }
+                [encoder setBytes:params length:sizeof(params) atIndex:8];
+                [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                [encoder endEncoding];
+                [commandBuffer commit];
+                [commandBuffer waitUntilCompleted];
+                require(commandBuffer.status == MTLCommandBufferStatusCompleted, commandBuffer.error ? commandBuffer.error.localizedDescription.UTF8String : "Metal dispatch");
+            };
+            dispatch(0);
+            if (resumeAfterMutation) {
+                std::array<uint32_t, 5> changed = {9, 1, 0, 0, 0};
+                std::memcpy(args.contents, changed.data(), changed.size() * sizeof(uint32_t));
+                if (counted) { uint32_t changedCount = count ? 0 : 1; std::memcpy(counts.contents, &changedCount, sizeof(changedCount)); }
+                dispatch(1);
+            }
+            std::array<uint32_t, 256> result;
+            std::memcpy(result.data(), plan.contents, plan.length);
+            return result;
+        };
+        auto small = run({6, 2, 4, 7, 0}, 0, 1, 5, false, 0);
+        require(small[0] == 1 && small[48] == 6 && small[49] == 2 && small[50] == 4 && small[51] == 7 && small[53] == 12 && small[54] == 0 && small[55] == 1, "single draw beyond old capacity");
+        auto resumed = run({6, 2, 4, 7, 0}, 0, 1, 12, false, 0, true);
+        require(resumed[4] == 6 && resumed[5] == 2 && resumed[6] == 4 && resumed[7] == 7, "phase 1 consumes GPU snapshot after source mutation");
+        auto zero = run({6, 2, 4, 7, 0}, 0, 1, 5, true, 0, true);
+        require(zero[0] == 0 && zero[55] == 0 && zero[53] == 0 && zero[4] == 0, "Count zero remains skipped after mutation");
+        auto admittedCount = run({6, 2, 4, 7, 0}, 0, 1, 12, true, 1, true);
+        require(admittedCount[55] == 1 && admittedCount[4] == 6 && admittedCount[5] == 2 && admittedCount[6] == 4, "admitted Count remains enabled after mutation");
+        auto indexed = run({6, 2, 3, uint32_t(-4), 7}, 2, 1, 12, false, 0, true);
+        require(indexed[0] == 0 && indexed[50] == 3 && indexed[51] == uint32_t(-4) && indexed[52] == 7 && indexed[53] == 12, "indexed argument snapshot");
+        require(indexed[6] == uint32_t(-4) && indexed[7] == 7 && indexed[35] == 3, "indexed phase 1 uses the snapshot");
+        auto wide = run({UINT32_MAX, 2, 0, 0, 0}, 0, 1, UINT32_MAX, false, 0);
+        require(wide[53] == UINT32_MAX - 1 && wide[54] == 1, "exact high word");
+        auto carry = run({UINT32_MAX, 2, 0, 0, 0}, 0, 2, UINT32_MAX, false, 0);
+        require(carry[53] == UINT32_MAX - 3 && carry[54] == 3, "low-limb carry reaches the high word");
+        auto overflow = run({UINT32_MAX, UINT32_MAX, 0, 0, 0}, 0, 32, UINT32_MAX, false, 0);
+        require(overflow[53] == UINT32_MAX && overflow[54] == UINT32_MAX, "saturated record requirement");
+        std::puts("PASS: production Metal one-draw plan and resumed phase, Count zero, indexed arguments and 64-bit bounds");
+        return 0;
+    }
+}
