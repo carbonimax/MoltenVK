@@ -729,14 +729,14 @@ int main(int argc, char** argv) {
 			};
 			if (dependentFirst && dependentSubmission && split) {
 				waitDependent();
-				VkResult priorFence = vkGetFenceStatus(d.device, fence);
-				std::printf("draw fence when dependent returned=%d\n", priorFence);
-				if (r.dependentWait == VK_SUCCESS && priorFence != VK_SUCCESS) throw std::runtime_error("Dependent fence succeeded before prior draw fence");
+				// Across queues, C may complete before B's fence even when B succeeds.
+				std::printf("draw fence when dependent returned=%d\n", vkGetFenceStatus(d.device, fence));
 			}
 			r.wait = r.submit == VK_SUCCESS ? vkWaitForFences(d.device, 1, &fence, VK_TRUE, 20000000000ull) : r.submit;
 			if (dependentSubmission && split) {
 				if (!dependentFirst) waitDependent();
 				if (r.wait == VK_SUCCESS && (r.dependentWait != VK_SUCCESS || r.dependentMarkerValue != 0xA55A5AA5)) throw std::runtime_error("Dependent submission did not complete after the indirect draw");
+				if (r.wait == VK_ERROR_DEVICE_LOST && r.dependentWait != VK_ERROR_DEVICE_LOST) throw std::runtime_error("Dependent submission reported success or remained blocked after draw device loss");
 			}
 			if (waitIdleProbe && split) {
 				VkResult expectedIdle = r.wait == VK_SUCCESS ? VK_SUCCESS : VK_ERROR_DEVICE_LOST;
