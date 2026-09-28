@@ -113,6 +113,9 @@ int main(int argc, char** argv) {
 		const bool withTES = getenv("PERVERTEX_TEST_INCLUDE_TES") != nullptr;
 		const bool tesFirst = getenv("PERVERTEX_TEST_TES_FIRST") != nullptr;
 		const bool tessWrongPatch = getenv("PERVERTEX_TEST_TES_WRONG_PATCH") != nullptr;
+		// PERVERTEX_TEST_TES_LEVEL4 writes levels without a proven PerVertex topology: the TES draw, recorded first,
+		// must lose the device before the indirect draw.
+		const bool tessLevel4 = getenv("PERVERTEX_TEST_TES_LEVEL4") != nullptr;
 		const bool splitProducer = getenv("PERVERTEX_TEST_SPLIT_PRODUCER") != nullptr;
 		const bool lateSignal = getenv("PERVERTEX_TEST_LATE_SIGNAL") != nullptr;
 		const bool dependentSubmission = getenv("PERVERTEX_TEST_DEPENDENT_SUBMISSION") != nullptr;
@@ -170,6 +173,10 @@ int main(int argc, char** argv) {
 			else if (name != "decisive" && name != "repeat" && name != "restart" && !dynamicRestart) throw std::runtime_error("Unknown scenario");
 			// Only the second draw exceeds the parent's capacity of 11 records; both must render.
 			if (name == "overflow-second") { s.draws[0].instances = 1; }
+			if (tessLevel4) {
+				if (!withTES || !tesFirst) throw std::runtime_error("PERVERTEX_TEST_TES_LEVEL4 needs PERVERTEX_TEST_INCLUDE_TES and PERVERTEX_TEST_TES_FIRST");
+				s.expectLost = true;
+			}
 			return s;
 		};
 		std::vector<Scenario> submissions{scenarioFor(scenarioName)};
@@ -449,7 +456,7 @@ int main(int argc, char** argv) {
 		VkPipeline indirectPipeline = graphicsPipeline(indirectVertex);
 		VkPipeline tessPipeline = VK_NULL_HANDLE;
 		if (withTES) {
-			VkShaderModule tessVertex = module("tes-triangle.vert.spv"), tessControl = module("tes-triangle.tesc.spv"), tessEvaluation = module("tes-ordered.tese.spv"), tessFragment = module(tessWrongPatch ? "tes-wrong-patch.frag.spv" : "tes-ordered.frag.spv");
+			VkShaderModule tessVertex = module("tes-triangle.vert.spv"), tessControl = module(tessLevel4 ? "tes-level4.tesc.spv" : "tes-triangle.tesc.spv"), tessEvaluation = module("tes-ordered.tese.spv"), tessFragment = module(tessWrongPatch ? "tes-wrong-patch.frag.spv" : "tes-ordered.frag.spv");
 			VkPipelineShaderStageCreateInfo stages[4]{};
 			VkShaderStageFlagBits kinds[4] = {VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, VK_SHADER_STAGE_FRAGMENT_BIT};
 			VkShaderModule modules[4] = {tessVertex, tessControl, tessEvaluation, tessFragment};
@@ -610,7 +617,8 @@ int main(int argc, char** argv) {
 			prior.clearValue.color.float32[3] = 1.0f;
 			VkClearRect priorRect{{{0, 0}, {2, 2}}, 0, 1};
 			vkCmdClearAttachments(cb, 1, &prior, 1, &priorRect);
-			if (withTES && tesFirst) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, tessPipeline); vkCmdDraw(cb, 6, 1, 0, 0); }
+			// The direct reference omits a TES draw that must lose the device.
+			if (withTES && tesFirst && !(referenceRun && tessLevel4)) { vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, tessPipeline); vkCmdDraw(cb, 6, 1, 0, 0); }
 			vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, referenceRun ? referencePipeline : indirectPipeline);
 			vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsLayout, 0, 1, &sets[0], 0, nullptr);
 			if (indexed) vkCmdBindIndexBuffer(cb, work.buffer, kIndexOffset, indexType);
