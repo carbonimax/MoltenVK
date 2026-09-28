@@ -70,11 +70,17 @@ void MVKQueue::propagateDebugName() { setMetalObjectLabel(_mtlQueue, _debugName)
 
 // Execute the queue submission under an autoreleasepool to ensure transient Metal objects are autoreleased.
 // This is critical for apps that don't use standard OS autoreleasing runloop threading.
-// The device reports a loss to host waits only while no submission is encoding.
-static inline VkResult execute(MVKDevice* device, MVKQueueSubmission* qSubmit) {
-	device->beginEncoding();
+// The caller brackets it with beginEncoding() and endEncoding(): the device reports a loss to host waits,
+// and is destroyed, only while no submission is encoding.
+static inline VkResult execute(MVKQueueSubmission* qSubmit) {
 	VkResult rslt;
 	@autoreleasepool { rslt = qSubmit->execute(); }		// May destroy qSubmit.
+	return rslt;
+}
+
+static inline VkResult executeNow(MVKDevice* device, MVKQueueSubmission* qSubmit) {
+	device->beginEncoding();
+	VkResult rslt = execute(qSubmit);
 	device->endEncoding();
 	return rslt;
 }
@@ -100,7 +106,7 @@ VkResult MVKQueue::submit(MVKQueueSubmission* qSubmit) {
 	dispatch_queue_t execQueue = _execQueue;
 	// Synchronous submits run on the caller, unless this submission, or one still pending on the worker, must continue.
 	// Only this call, externally synchronized per queue, increments the job count: a zero read stays valid.
-	if ( !execQueue && !qSubmit->needsWorker() && !_execQueueJobCount ) { return execute(device, qSubmit); }
+	if ( !execQueue && !qSubmit->needsWorker() && !_execQueueJobCount ) { return executeNow(device, qSubmit); }
 
 	std::unique_lock lock(_execQueueMutex);
 	bool usesWorker = !execQueue && (qSubmit->needsWorker() || _execQueueJobCount);
@@ -116,16 +122,20 @@ VkResult MVKQueue::submit(MVKQueueSubmission* qSubmit) {
 	if (execQueue) {
 		_execQueueJobCount++;
 
+		// A dispatched submission uses this queue and the device until its block ends.
+		device->beginEncoding();
 		dispatch_async(execQueue, ^{
-			execute(device, qSubmit);
-
-			std::unique_lock execLock(_execQueueMutex);
-			if (!--_execQueueJobCount)
-				_execQueueConditionVariable.notify_all();
+			execute(qSubmit);
+			{
+				std::unique_lock execLock(_execQueueMutex);
+				if (!--_execQueueJobCount)
+					_execQueueConditionVariable.notify_all();
+			}
+			device->endEncoding();		// The last use of this queue and of the device.
 		} );
 	} else {
 		lock.unlock();
-		rslt = execute(device, qSubmit);
+		rslt = executeNow(device, qSubmit);
 	}
 	return rslt;
 }
@@ -191,7 +201,7 @@ VkResult MVKQueue::waitIdle(MVKCommandUse cmdUse) {
 	}
 	@autoreleasepool {
 		auto* mtlCmdBuff = getMTLCommandBuffer(cmdUse);
-		[mtlCmdBuff commit];
+		_device->commitMTLCommandBuffer(mtlCmdBuff);
 		[mtlCmdBuff waitUntilCompleted];
 	}
 	return _device->getHostWaitResult(true, UINT64_MAX);
@@ -212,7 +222,7 @@ id<MTLCommandBuffer> MVKQueue::getMTLCommandBuffer(MVKCommandUse cmdUse, bool re
 	addPerformanceInterval(getPerformanceStats().queue.retrieveMTLCommandBuffer, startTime);
 	NSString* mtlCmdBuffLabel = getMTLCommandBufferLabel(cmdUse);
 	setMetalObjectLabel(mtlCmdBuff, mtlCmdBuffLabel);
-	[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer> mtlCB) { handleMTLCommandBufferError(mtlCB); }];
+	_device->addMTLCommandBufferHandler(mtlCmdBuff, ^(id<MTLCommandBuffer> mtlCB) { handleMTLCommandBufferError(mtlCB); });
 
 	if ( !mtlCmdBuff ) { reportError(VK_ERROR_OUT_OF_POOL_MEMORY, "%s could not be acquired.", mtlCmdBuffLabel.UTF8String); }
 	return mtlCmdBuff;
@@ -569,7 +579,7 @@ id<MTLCommandBuffer> MVKQueueCommandBufferSubmission::continueOnNewMTLCommandBuf
 
 	// Registered after every handler added while encoding.
 	dispatch_semaphore_t completion = dispatch_semaphore_create(0);		// retained
-	[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer>) { dispatch_semaphore_signal(completion); }];
+	getDevice()->addMTLCommandBufferHandler(mtlCmdBuff, ^(id<MTLCommandBuffer>) { dispatch_semaphore_signal(completion); });
 	commitActiveMTLCommandBuffer();
 
 	bool isCompleted = false;
@@ -651,18 +661,16 @@ VkResult MVKQueueCommandBufferSubmission::commitActiveMTLCommandBuffer(bool sign
 		getDevice()->markLost();
 	}
 
-	// Before the handler that may signal the fence, after which the application may destroy the device.
-	if (mtlCmdBuff) { getDevice()->trackCommittedMTLCommandBuffer(mtlCmdBuff); }
-
 	uint64_t startTime = getPerformanceTimestamp();
-	[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer> mtlCB) {
+	MVKDevice* device = getDevice();
+	device->addMTLCommandBufferHandler(mtlCmdBuff, ^(id<MTLCommandBuffer> mtlCB) {
 		addPerformanceInterval(getPerformanceStats().queue.mtlCommandBufferExecution, startTime);
 		if (signalCompletion) { this->finish(); }	// Must be the last thing the completetion callback does.
-	}];
+	});
 
 	// Retrieve the result before committing MTLCommandBuffer, because finish() will destroy this instance.
 	VkResult rslt = mtlCmdBuff ? getConfigurationResult() : VK_ERROR_OUT_OF_POOL_MEMORY;
-	[mtlCmdBuff commit];
+	device->commitMTLCommandBuffer(mtlCmdBuff);
 	[mtlCmdBuff release];		// retained
 
 	// If we need to signal completion, but an error occurred and the MTLCommandBuffer
@@ -882,8 +890,8 @@ VkResult MVKQueuePresentSurfaceSubmission::execute() {
 	// Retrieve the result first, because finish() will destroy this instance.
 	VkResult rslt = getConfigurationResult();
 	if (mtlCmdBuff) {
-		[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer> mtlCB) { this->finish(); }];
-		[mtlCmdBuff commit];
+		getDevice()->addMTLCommandBufferHandler(mtlCmdBuff, ^(id<MTLCommandBuffer> mtlCB) { this->finish(); });
+		getDevice()->commitMTLCommandBuffer(mtlCmdBuff);
 	} else {
 		finish();
 	}

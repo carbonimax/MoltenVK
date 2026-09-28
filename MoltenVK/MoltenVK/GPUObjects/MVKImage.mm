@@ -447,9 +447,9 @@ void MVKImagePlane::pullFromDeviceOnCompletion(MVKCommandEncoder* cmdEncoder,
 											   MVKImageSubresource& subresource,
 											   const MVKMappedMemoryRange& mappedRange) {
 
-	[cmdEncoder->_mtlCmdBuffer addCompletedHandler: ^(id<MTLCommandBuffer> mcb) {
+	cmdEncoder->getDevice()->addMTLCommandBufferHandler(cmdEncoder->_mtlCmdBuffer, ^(id<MTLCommandBuffer> mcb) {
 		getMTLTextureContent(subresource, mappedRange.offset, mappedRange.size);
-	}];
+	});
 }
 
 MVKImagePlane::MVKImagePlane(MVKImage* image, uint8_t planeIndex) {
@@ -816,7 +816,7 @@ VkResult MVKImage::copyImageToMemory(const VkCopyImageToMemoryInfo* pCopyImageTo
 			}
 
 			[mtlBlitEnc endEncoding];
-			[mtlCmdBuff commit];
+			getDevice()->commitMTLCommandBuffer(mtlCmdBuff);
 			[mtlCmdBuff waitUntilCompleted];
 		}
 	}
@@ -1614,7 +1614,7 @@ VkResult MVKPresentableSwapchainImage::acquireAndSignalWhenAvailable(MVKSemaphor
 			}
 			signal(signaler.semaphore, signaler.semaphoreSignalToken, mtlCmdBuff);
 			signal(signaler.fence);
-			[mtlCmdBuff commit];
+			_device->commitMTLCommandBuffer(mtlCmdBuff);
 		}
 
 		_preSignaler = signaler;
@@ -1671,7 +1671,7 @@ VkResult MVKPresentableSwapchainImage::presentCAMetalDrawable(id<MTLCommandBuffe
 	// Attach present handler before presenting to avoid race condition.
 	id<CAMetalDrawable> mtlDrwbl = getCAMetalDrawable();
 	MVKSwapchainSignaler signaler = getPresentationSignaler();
-	[mtlCmdBuff addScheduledHandler: ^(id<MTLCommandBuffer> mcb) {
+	getDevice()->addMTLCommandBufferHandler(mtlCmdBuff, ^(id<MTLCommandBuffer> mcb) {
 
 		addPresentedHandler(mtlDrwbl, presentInfo, signaler);
 
@@ -1685,7 +1685,7 @@ VkResult MVKPresentableSwapchainImage::presentCAMetalDrawable(id<MTLCommandBuffe
 		} else {
 			[mtlDrwbl present];
 		}
-	}];
+	}, true);
 
 	// Ensure this image, the drawable, and the present fence are not destroyed while
 	// awaiting MTLCommandBuffer completion. We retain the drawable separately because
@@ -1697,13 +1697,13 @@ VkResult MVKPresentableSwapchainImage::presentCAMetalDrawable(id<MTLCommandBuffe
 	[mtlDrwbl retain];
 	auto* fence = presentInfo.fence;
 	if (fence) { fence->retain(); }
-	[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer> mcb) {
+	getDevice()->addMTLCommandBufferHandler(mtlCmdBuff, ^(id<MTLCommandBuffer> mcb) {
 		signal(fence);
 		if (fence) { fence->release(); }
 		[mtlDrwbl release];
 		release();
 		if (_swapchain) { _swapchain->notifyPresentComplete(presentInfo); }
-	}];
+	});
 
 	signal(signaler.semaphore, signaler.semaphoreSignalToken, mtlCmdBuff);
 

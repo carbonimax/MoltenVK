@@ -403,7 +403,7 @@ void MVKCommandBuffer::clearPrefilledMTLCommandBuffer() {
 	// a prefilled Metal command buffer that the app did not intend to submit, potentially
 	// causing unexpected side effects. But unfortunately there is nothing else we can do.
 	if (_prefilledMTLCmdBuffer && _prefilledMTLCmdBuffer.status == MTLCommandBufferStatusNotEnqueued) {
-		[_prefilledMTLCmdBuffer commit];
+		getDevice()->commitMTLCommandBuffer(_prefilledMTLCmdBuffer);
 	}
 
 	[_prefilledMTLCmdBuffer release];
@@ -838,9 +838,9 @@ void MVKCommandEncoder::keepPerVertexScratchResident() {
 	for (auto buffer : scratch->buffers) { if (buffer) { device->makeResident(buffer); } }
 	// This also protects buffers encoded with unretained Metal command buffers and
 	// prefills that outlive their Vulkan command buffer's recorded command list.
-	[_mtlCmdBuffer addCompletedHandler:^(id<MTLCommandBuffer>) {
+	device->addMTLCommandBufferHandler(_mtlCmdBuffer, ^(id<MTLCommandBuffer>) {
 		for (auto buffer : scratch->buffers) { if (buffer) { device->removeResidency(buffer); } }
-	}];
+	});
 }
 
 void MVKCommandEncoder::beginRendering(MVKCommand* rendCmd, const VkRenderingInfo* pRenderingInfo) {
@@ -1560,7 +1560,7 @@ void MVKCommandEncoder::setComputeBytes(id<MTLComputeCommandEncoder> mtlEncoder,
 // Return the MTLBuffer allocation to the pool once the command buffer is done with it
 const MVKMTLBufferAllocation* MVKCommandEncoder::getTempMTLBuffer(NSUInteger length, bool isPrivate, bool isDedicated) {
     MVKMTLBufferAllocation* mtlBuffAlloc = getCommandEncodingPool()->acquireMTLBufferAllocation(length, isPrivate, isDedicated);
-    [_mtlCmdBuffer addCompletedHandler: ^(id<MTLCommandBuffer> mcb) { mtlBuffAlloc->returnToPool(); }];
+    getDevice()->addMTLCommandBufferHandler(_mtlCmdBuffer, ^(id<MTLCommandBuffer> mcb) { mtlBuffAlloc->returnToPool(); });
     return mtlBuffAlloc;
 }
 
@@ -1678,7 +1678,7 @@ id<MTLFence> MVKCommandEncoder::getStageCountersMTLFence() {
 		// Create MTLFence as local ref and pass to completion handler
 		// block to release once MTLCommandBuffer no longer needs it.
 		id<MTLFence> mtlFence = [getMTLDevice() newFence];
-		[_mtlCmdBuffer addCompletedHandler: ^(id<MTLCommandBuffer> mcb) { [mtlFence release]; }];
+		getDevice()->addMTLCommandBufferHandler(_mtlCmdBuffer, ^(id<MTLCommandBuffer> mcb) { [mtlFence release]; });
 
 		_stageCountersMTLFence = mtlFence;		// retained
 	}
@@ -1710,12 +1710,12 @@ void MVKCommandEncoder::finishQueries() {
         delete pAQs;
         return;
     }
-    [_mtlCmdBuffer addCompletedHandler: ^(id<MTLCommandBuffer> mtlCmdBuff) {
+    getDevice()->addMTLCommandBufferHandler(_mtlCmdBuffer, ^(id<MTLCommandBuffer> mtlCmdBuff) {
         for (auto& qryPair : *pAQs) {
             qryPair.first->finishQueries(qryPair.second.contents());
         }
         delete pAQs;
-    }];
+    });
 }
 
 
