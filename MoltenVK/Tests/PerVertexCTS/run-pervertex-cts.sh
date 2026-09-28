@@ -9,6 +9,8 @@
 # MTL_DEBUG_LAYER=1 and MTL_SHADER_VALIDATION=1.
 # Output: results.csv (case,status,message), summary.txt, per-status case lists, crashes.txt, runs/ (case list, qpa and log of
 # each deqp-vk process), INPUTS.sha256 and ENVIRONMENT.txt.
+# PERVERTEX_CTS_DIRECT=1 gives deqp-vk the library itself, without the shim: for a public build, whose extension gates
+# stay closed, such as the synchronization cases that do not depend on the test adapters.
 # Usage: run-pervertex-cts.sh <directory of deqp-vk> <libMoltenVK test build> <case list> <output> <validated|plain> [chunk size]
 set -euo pipefail
 test_dir=$(cd "$(dirname "$0")" && pwd)
@@ -23,7 +25,9 @@ chunk=${6:-500}
 mkdir -p "$output/runs"
 shim=$output/libpervertex-cts-shim.dylib
 xcrun clang -dynamiclib -O2 -Wall -Wextra -Werror -I"$root/External/Vulkan-Headers/include" "$test_dir/AdapterShim.c" -o "$shim"
-{ sw_vers; uname -m; date -u; echo "mode=$mode chunk=$chunk"; echo "moltenvk_checkout=$(git -C "$root" rev-parse HEAD)"; cat "$(dirname "$library")/../../../PROVENANCE.txt" 2>/dev/null || true; } > "$output/ENVIRONMENT.txt"
+vulkan_library=$shim
+[[ -z ${PERVERTEX_CTS_DIRECT:-} ]] || vulkan_library=$library
+{ sw_vers; uname -m; date -u; echo "mode=$mode chunk=$chunk vulkan_library=$([[ -z ${PERVERTEX_CTS_DIRECT:-} ]] && echo shim || echo direct)"; echo "moltenvk_checkout=$(git -C "$root" rev-parse HEAD)"; cat "$(dirname "$library")/../../../PROVENANCE.txt" 2>/dev/null || true; } > "$output/ENVIRONMENT.txt"
 shasum -a 256 "$cts/deqp-vk" "$library" "$caselist" "$shim" > "$output/INPUTS.sha256"
 validation=()
 [[ $mode == plain ]] || validation=(MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1)
@@ -41,7 +45,7 @@ while [[ -s $pending ]]; do
 	rc=0
 	(cd "$cts" && env -u DYLD_LIBRARY_PATH -u DYLD_INSERT_LIBRARIES PERVERTEX_CTS_MOLTENVK="$library" \
 		MVK_CONFIG_LOG_LEVEL=1 MVK_CONFIG_RESUME_LOST_DEVICE=1 MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1 MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE=2 \
-		${validation[@]+"${validation[@]}"} gtimeout -k 10 1800 ./deqp-vk --deqp-vk-library-path="$shim" --deqp-archive-dir="$cts" \
+		${validation[@]+"${validation[@]}"} gtimeout -k 10 1800 ./deqp-vk --deqp-vk-library-path="$vulkan_library" --deqp-archive-dir="$cts" \
 		--deqp-log-filename="$name.qpa" --deqp-log-images=disable --deqp-log-shader-sources=disable --deqp-shadercache=disable \
 		--deqp-log-decompiled-spirv=disable --deqp-caselist-file="$name.txt") > "$name.log" 2>&1 || rc=$?
 	python3 "$test_dir/parse-qpa.py" "$name.qpa" > "$name.csv" 2>/dev/null || true
