@@ -24,7 +24,7 @@
 //   | pervertex-consistency | form-uint | form-swapped | form-ivec2 | form-vec3 | form-uvec3 | form-components
 //   | form-fewer | form-scalar | form-array1 | form-array2 | form-half | form-int16 | form-uint16 | form-mixed
 //   | form-grid | resource-bda | resource-bda-other | resource-unresident | model-check | reject-task | reject-descriptor | reject-per-primitive | reject-pervertex-block
-//   | reject-pervertex-matrix | reject-specialization | reject-indirect | reject-draw-id | reject-draw-id-uint
+//   | reject-pervertex-matrix | reject-specialization | reject-indirect | reject-grid-limit | reject-draw-id | reject-draw-id-uint
 //   | reject-buffer-address | no-adapter | public-device-gate
 // The refusal scenarios only create pipelines: nothing they build is ever submitted.
 #define VK_ENABLE_BETA_EXTENSIONS 1
@@ -552,6 +552,7 @@ int main(int argc, char** argv) {
 			{"grid", "grid.mesh.spv", "interp.frag.spv", Interpolated, false, None, false},
 			{"twice", "grid.mesh.spv", "interp.frag.spv", Interpolated, false, None, false},
 			{"reject-indirect", "mesh.mesh.spv", "interp.frag.spv", Interpolated, false, None, false},
+			{"reject-grid-limit", "mesh.mesh.spv", "interp.frag.spv", Interpolated, false, None, false},
 			{"pervertex", "mesh.mesh.spv", "pervertex.frag.spv", Ordered, false, Swapped, false},
 			{"pervertex-swapped", "mesh.mesh.spv", "pervertex-swapped.frag.spv", Swapped, false, Ordered, false},
 			{"pervertex-permuted", "permuted.mesh.spv", "pervertex.frag.spv", Ordered, true, Ordered, false},
@@ -563,7 +564,7 @@ int main(int argc, char** argv) {
 		const Render* render = nullptr;
 		for (const auto& candidate : renders) if (scenario == candidate.name) render = &candidate;
 		if (!render && !exact) throw std::runtime_error("Unknown scenario");
-		const bool grid = scenario == "grid" || (form && form->grid), twice = scenario == "twice", indirect = scenario == "reject-indirect";
+		const bool grid = scenario == "grid" || (form && form->grid), twice = scenario == "twice", indirect = scenario == "reject-indirect", gridLimit = scenario == "reject-grid-limit";
 		VkPipeline pipeline = VK_NULL_HANDLE;
 		if (resource) check(createPipeline("forms-resource.mesh.spv", false, resourceLayout, pipeline, "resource.frag.spv"), "Create mesh pipeline");
 		else check(createPipeline(form ? form->mesh : render->mesh, false, emptyLayout, pipeline, form ? form->fragment : render->fragment), "Create mesh pipeline");
@@ -648,6 +649,9 @@ int main(int argc, char** argv) {
 		}
 		if (indirect) drawMeshTasksIndirect(command, readback, 0, 1, sizeof(VkDrawMeshTasksIndirectCommandEXT));
 		else if (twice) { drawMeshTasks(command, 1, 1, 1); drawMeshTasks(command, 2, 1, 1); }  // The second draw repaints group 0.
+		// 2^22 workgroups, Vulkan's minimum maxMeshWorkGroupTotalCount: above every grid limit Metal documents (at most
+		// 4,194,303 threadgroups), where Metal draws nothing and reports no error. It must be refused, never omitted.
+		else if (gridLimit) drawMeshTasks(command, 2048, 2048, 1);
 		else drawMeshTasks(command, grid ? 2 : 1, 1, 1);
 		vkCmdEndRenderPass(command);
 		VkBufferImageCopy copy{};
@@ -655,9 +659,9 @@ int main(int argc, char** argv) {
 		copy.imageExtent = {kSize, kSize, 1};
 		vkCmdCopyImageToBuffer(command, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback, 1, &copy);
 		VkResult ended = vkEndCommandBuffer(command);
-		if (indirect) {
+		if (indirect || gridLimit) {
 			bool pass = ended == VK_ERROR_FEATURE_NOT_PRESENT;
-			std::printf("MESH_DRAW %s reject-indirect: vkEndCommandBuffer=%d expected=%d, nothing submitted\n", pass ? "PASS" : "FAIL", ended, VK_ERROR_FEATURE_NOT_PRESENT);
+			std::printf("MESH_DRAW %s %s: vkEndCommandBuffer=%d expected=%d, nothing submitted\n", pass ? "PASS" : "FAIL", scenario.c_str(), ended, VK_ERROR_FEATURE_NOT_PRESENT);
 			return pass ? 0 : 2;
 		}
 		check(ended, "End command buffer");
