@@ -1,7 +1,8 @@
 // Copyright 2026 Jean-Philippe Meunier
 // SPDX-License-Identifier: Apache-2.0
 // Regression oracles for a legal two-queue binary semaphore order and reuse after an external Metal signal.
-// Import an MTLSharedEvent so a failed Metal wait can be released during teardown.
+// Import an MTLSharedEvent so a failed Metal wait can be released during teardown. PERVERTEX_BINARY_NO_IMPORT=1 keeps
+// the semaphore MoltenVK's own, for semaphore styles that refuse an imported event (CPU callbacks).
 #import <Metal/Metal.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_metal.h>
@@ -120,7 +121,8 @@ int main(int argc, char** argv) {
     VkImportMetalSharedEventInfoEXT imported{VK_STRUCTURE_TYPE_IMPORT_METAL_SHARED_EVENT_INFO_EXT};
     imported.mtlSharedEvent = sharedEvent;
     VkSemaphoreCreateInfo binaryInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-    binaryInfo.pNext = &imported;
+    const bool noImport = getenv("PERVERTEX_BINARY_NO_IMPORT") != nullptr;
+    if (!noImport) binaryInfo.pNext = &imported;
     VkSemaphoreTypeCreateInfo timelineType{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
     timelineType.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
     VkSemaphoreCreateInfo timelineInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
