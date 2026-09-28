@@ -1087,9 +1087,11 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	uint32_t scanSteps = restart ? mvkPerVertexIndirectRestartScanSteps(scratch->indirectCapacity) : 0;
 	NSUInteger gatheredOffset = restart ? NSUInteger(mvkPerVertexRestartIndexScratchSize(scratch->indirectCapacity)) : 0;
 	if (restart && plan.length < 1024 + (scanSteps + 3) * 256) { reject(VK_ERROR_INITIALIZATION_FAILED, "restart planning scratch is too small."); return; }
+	uint32_t snapshotWords = drawCount == 1 ? 48 : 256 + (restart ? (scanSteps + 3) * 64 : 0);
+	if (drawCount > 1 && plan.length < uint64_t(snapshotWords) * sizeof(uint32_t) + uint64_t(drawCount) * 5 * sizeof(uint32_t)) { reject(VK_ERROR_INITIALIZATION_FAILED, "argument snapshot scratch is too small."); return; }
 	NSUInteger captureWidth = captureState ? std::max<NSUInteger>(std::min(captureState.threadExecutionWidth, captureState.maxTotalThreadsPerThreadgroup), 1) : 1;
-	uint32_t params[18] = {drawCount, stride, indexSize, uint32_t(indexCapacity), uint32_t(indexCapacity >> 32), scratch->indirectCapacity, viewCount, uint32_t(topology),
-		uint32_t(cmdEncoder->getVkGraphics().getProvokingVertexMode()), uint32_t(scratch->buffers[4] != nil), uint32_t(countBuffer != nil), 0, uint32_t(width), uint32_t(width), uint32_t(captureWidth), 0, uint32_t(restart), scanSteps};
+	uint32_t params[19] = {drawCount, stride, indexSize, uint32_t(indexCapacity), uint32_t(indexCapacity >> 32), scratch->indirectCapacity, viewCount, uint32_t(topology),
+		uint32_t(cmdEncoder->getVkGraphics().getProvokingVertexMode()), uint32_t(scratch->buffers[4] != nil), uint32_t(countBuffer != nil), 0, uint32_t(width), uint32_t(width), uint32_t(captureWidth), 0, uint32_t(restart), scanSteps, snapshotWords};
 	id<MTLBuffer> captured = scratch->buffers[0];
 	id<MTLBuffer> occurrences = scratch->buffers[2];
 	id<MTLBuffer> primitiveIndices = scratch->buffers[3];
@@ -1315,7 +1317,7 @@ VkResult MVKCmdDrawIndirect::setContent(MVKCommandBuffer* cmdBuff,
 	}
 
 	// Arguments stay on the GPU; only a bounded capture capacity is reserved here.
-	return drawCount ? cmdBuff->recordPerVertexIndirectDraw(false) : VK_SUCCESS;
+	return drawCount ? cmdBuff->recordPerVertexIndirectDraw(false, drawCount) : VK_SUCCESS;
 }
 
 VkResult MVKCmdDrawIndirect::setContent(MVKCommandBuffer* cmdBuff,
@@ -1710,7 +1712,7 @@ VkResult MVKCmdDrawIndexedIndirect::setContent(MVKCommandBuffer* cmdBuff,
 								 drawCount,
 								 stride);
 	// Arguments stay on the GPU; only a bounded capture capacity is reserved here.
-	return result == VK_SUCCESS && drawCount ? cmdBuff->recordPerVertexIndirectDraw(true) : result;
+	return result == VK_SUCCESS && drawCount ? cmdBuff->recordPerVertexIndirectDraw(true, drawCount) : result;
 }
 
 VkResult MVKCmdDrawIndexedIndirect::setContent(MVKCommandBuffer* cmdBuff,
