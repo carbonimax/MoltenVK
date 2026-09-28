@@ -315,8 +315,7 @@ int binaryGeneration(Context& c) {
 	vkDestroyCommandPool(c.device, pool, nullptr);
 	c.destroy(marker);
 	vkDestroySemaphore(c.device, binary, nullptr);
-	[external release];
-	[externalQueue release];
+	[externalQueue release];	// the command buffer is autoreleased
 	[externalMarker release];
 	[event release];
 	return !released && completedC && fenceResult == VK_ERROR_DEVICE_LOST ? 0 : 1;
