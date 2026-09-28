@@ -5,7 +5,10 @@
 # Each mode runs in synchronous and asynchronous queue submission, several times, one run at a time under gtimeout,
 # with Metal API and shader validation. The executable loads the library through @executable_path/lib, so the same
 # binary runs against another library for before/after comparisons.
-# "before" expects each mode to show its defect (exit 1), "after" expects each to pass (exit 0).
+# "before" expects each mode to show its defect (exit 1), "after" expects each to pass (exit 0). The teardown modes may
+# also crash before (134, 139): a handler then touches the destroyed device. teardown-nil is a control, green on both
+# sides. teardown-multi runs with deferred prefill, for several Metal command buffers per submission. The "before"
+# library differs by mode: see the report.
 # Usage: run-pervertex-loss-tests.sh <libMoltenVK test build> <output directory> <before|after> [repeats [modes...]]
 set -euo pipefail
 test_dir=$(cd "$(dirname "$0")" && pwd)
@@ -15,7 +18,7 @@ output=$(mkdir -p "$2" && cd "$2" && pwd)
 side=${3:?before or after}
 repeats=${4:-3}
 modes=("${@:5}")
-(( ${#modes[@]} )) || modes=(counter-race binary-generation destroy-after-loss event-wait)
+(( ${#modes[@]} )) || modes=(counter-race binary-generation destroy-after-loss event-wait teardown teardown-multi teardown-nil teardown-nil-transient)
 [[ $side == before || $side == after ]] || { echo 'side must be before or after'; exit 64; }
 # The runner runs again as a child whose output tee records, so that the log is complete when this parent hashes it.
 if [[ -z ${PERVERTEX_RUNNER_CHILD:-} ]]; then
@@ -31,20 +34,25 @@ xcrun clang++ -arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-fiel
 shasum -a 256 "$library" "$output/bin/pervertex-loss" "$test_dir/PerVertexLossTests.mm" > "$output/INPUTS.sha256"
 echo 'case,mode,run,expected,actual,verdict' > "$output/results.csv"
 failures=0
-expected=$([[ $side == before ]] && echo 1 || echo 0)
 for name in "${modes[@]}"; do
+	case $side:$name in
+		before:teardown | before:teardown-multi) expected='1|134|139' ;;
+		before:teardown-nil | after:*) expected=0 ;;
+		before:*) expected=1 ;;
+	esac
+	prefill=$([[ $name == teardown-multi ]] && echo 1 || echo 0)
 	for mode in sync async; do
 		for run in $(seq 1 "$repeats"); do
 			log=$output/runs/$name-$mode-$run.log rc=0
 			env -u DYLD_LIBRARY_PATH -u DYLD_INSERT_LIBRARIES MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MVK_CONFIG_LOG_LEVEL=2 \
-				MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=$([[ $mode == sync ]] && echo 1 || echo 0) \
+				MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=$([[ $mode == sync ]] && echo 1 || echo 0) MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=$prefill \
 				gtimeout -k 2 40 "$output/bin/pervertex-loss" "$name" > "$log" 2>&1 || rc=$?
 			verdict=PASS
-			[[ $rc == "$expected" ]] || verdict=FAIL
+			[[ "|$expected|" == *"|$rc|"* ]] || verdict=FAIL
 			grep -q 'Metal API Validation Enabled' "$log" || verdict=FAIL
 			[[ $verdict == PASS ]] || failures=$((failures + 1))
 			echo "$name,$mode,$run,$expected,$rc,$verdict" >> "$output/results.csv"
-			printf '%-20s %-5s %s exit=%s %s | %s\n' "$name" "$mode" "$run" "$rc" "$verdict" "$(grep -E '^(COUNTER_RACE|BINARY_GENERATION|DESTROY_AFTER_LOSS|EVENT_WAIT)' "$log" | head -1)"
+			printf '%-20s %-5s %s exit=%s %s | %s\n' "$name" "$mode" "$run" "$rc" "$verdict" "$(grep -E '^(COUNTER_RACE|BINARY_GENERATION|DESTROY_AFTER_LOSS|EVENT_WAIT|TEARDOWN)|^submit=' "$log" | tr '\n' ' ' | cut -c1-200)"
 		done
 	done
 done

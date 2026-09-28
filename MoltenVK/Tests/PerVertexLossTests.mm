@@ -17,6 +17,19 @@
 //   report the loss while the event is still unset, and vkGetEventStatus must never report the event set by the
 //   loss. Exit 0 when both hold, 1 when the wait times out or the event is reported set; the host then sets the
 //   event, as the application would, so that the lost submission can end.
+// teardown, teardown-multi, teardown-nil: every completion and scheduled handler that MoltenVK adds to a Metal command
+//   buffer is delayed (PERVERTEX_LOSS_HANDLER_DELAY_US, 50 ms by default), which widens the window between the first
+//   and the last handler of a command buffer. When the host wait reports the loss, the test counts the handlers of
+//   committed command buffers that have not finished, then destroys every object and the device at once, and counts
+//   the handlers that start after vkDestroyDevice() returned. Exit 0 when the loss is reported and both counts are
+//   zero, 1 otherwise (a crash in a late handler also shows the defect).
+//   - teardown: C waits a binary semaphore that only the loss rescue releases;
+//   - teardown-multi: also C2 on the other queue, a fence-only submission, two command buffers in C (several Metal
+//     command buffers under MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=1), and a recorded command buffer never submitted,
+//     freed after the loss (its prefilled Metal command buffer is committed then);
+//   - teardown-nil: Metal returns no command buffer while C is submitted, which must lose the device;
+//   - teardown-nil-transient: Metal returns no command buffer once, then does again: C's commands, encoded without a
+//     Metal command buffer, never run, so the loss must be reported all the same (marker_C shows whether C ran).
 // Exit 2 for a setup failure, 3 when the device lacks a capability.
 #import <Metal/Metal.h>
 #include <objc/runtime.h>
@@ -419,16 +432,171 @@ int eventWait(Context& c) {
 	return reported && !setSeen && fenceBeforeLoss == VK_NOT_READY ? 0 : 1;
 }
 
+// teardown: handler bookkeeping, through the command buffer and queue classes that MoltenVK receives from Metal.
+std::atomic<int> gHandlersCommitted{0}, gHandlersStarted{0}, gHandlersFinished{0}, gHandlersLate{0}, gFailCommandBuffers{0};
+std::atomic<bool> gDeviceDestroyed{false};
+useconds_t gHandlerDelayUs = 0;
+IMP gAddCompletedHandler = nullptr, gAddScheduledHandler = nullptr, gCommit = nullptr, gCommandBuffer = nullptr;
+char gHandlerCountKey;
+
+MTLCommandBufferHandler delayedHandler(id commandBuffer, MTLCommandBufferHandler block) {
+	NSNumber* count = objc_getAssociatedObject(commandBuffer, &gHandlerCountKey);
+	objc_setAssociatedObject(commandBuffer, &gHandlerCountKey, @(count.intValue + 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	return [[^(id<MTLCommandBuffer> mtlCmdBuff) {
+		gHandlersStarted++;
+		if (gDeviceDestroyed) { gHandlersLate++; }
+		if (gHandlerDelayUs) { usleep(gHandlerDelayUs); }
+		block(mtlCmdBuff);
+		gHandlersFinished++;
+	} copy] autorelease];
+}
+
+void addCompletedHandlerDelayed(id self, SEL command, MTLCommandBufferHandler block) {
+	reinterpret_cast<void (*)(id, SEL, MTLCommandBufferHandler)>(gAddCompletedHandler)(self, command, delayedHandler(self, block));
+}
+
+void addScheduledHandlerDelayed(id self, SEL command, MTLCommandBufferHandler block) {
+	reinterpret_cast<void (*)(id, SEL, MTLCommandBufferHandler)>(gAddScheduledHandler)(self, command, delayedHandler(self, block));
+}
+
+void commitCounted(id self, SEL command) {
+	gHandlersCommitted += [objc_getAssociatedObject(self, &gHandlerCountKey) intValue];
+	reinterpret_cast<void (*)(id, SEL)>(gCommit)(self, command);
+}
+
+id commandBufferOrNil(id self, SEL command, id descriptor) {
+	int remaining = gFailCommandBuffers.load();
+	while (remaining > 0 && !gFailCommandBuffers.compare_exchange_weak(remaining, remaining - 1)) {}
+	if (remaining > 0) { return nil; }
+	return reinterpret_cast<id (*)(id, SEL, id)>(gCommandBuffer)(self, command, descriptor);
+}
+
+IMP replace(Class cls, SEL selector, IMP imp) {
+	Method method = class_getInstanceMethod(cls, selector);
+	IMP original = method_getImplementation(method);
+	class_replaceMethod(cls, selector, imp, method_getTypeEncoding(method));
+	return original;
+}
+
+void installHandlerHooks(Context& c) {
+	VkExportMetalCommandQueueInfoEXT queueInfo{VK_STRUCTURE_TYPE_EXPORT_METAL_COMMAND_QUEUE_INFO_EXT};
+	queueInfo.queue = c.qb;
+	VkExportMetalObjectsInfoEXT exportInfo{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT};
+	exportInfo.pNext = &queueInfo;
+	vkExportMetalObjectsEXT(c.device, &exportInfo);
+	if (!queueInfo.mtlCommandQueue) { std::fprintf(stderr, "No exported MTLCommandQueue\n"); std::exit(3); }
+	MTLCommandBufferDescriptor* descriptor = [MTLCommandBufferDescriptor new];
+	id<MTLCommandBuffer> probe = [queueInfo.mtlCommandQueue commandBufferWithDescriptor: descriptor];
+	[descriptor release];
+	Class bufferClass = object_getClass(probe), queueClass = object_getClass(queueInfo.mtlCommandQueue);
+	std::printf("command_buffer_class=%s queue_class=%s\n", class_getName(bufferClass), class_getName(queueClass));
+	gAddCompletedHandler = replace(bufferClass, @selector(addCompletedHandler:), reinterpret_cast<IMP>(addCompletedHandlerDelayed));
+	gAddScheduledHandler = replace(bufferClass, @selector(addScheduledHandler:), reinterpret_cast<IMP>(addScheduledHandlerDelayed));
+	gCommit = replace(bufferClass, @selector(commit), reinterpret_cast<IMP>(commitCounted));
+	gCommandBuffer = replace(queueClass, @selector(commandBufferWithDescriptor:), reinterpret_cast<IMP>(commandBufferOrNil));
+}
+
+int teardown(Context& c, const std::string& variant) {
+	bool multi = variant == "teardown-multi", nilPath = variant == "teardown-nil" || variant == "teardown-nil-transient";
+	VkResult submitResult = VK_SUCCESS;
+	installHandlerHooks(c);
+	const char* delay = getenv("PERVERTEX_LOSS_HANDLER_DELAY_US");
+	gHandlerDelayUs = delay ? useconds_t(std::atoi(delay)) : 50000;
+	VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+	VkSemaphore s1, s2;
+	check(vkCreateSemaphore(c.device, &semaphoreInfo, nullptr, &s1), "vkCreateSemaphore");
+	check(vkCreateSemaphore(c.device, &semaphoreInfo, nullptr, &s2), "vkCreateSemaphore");
+	Buffer marker = c.buffer(64, true);
+	VkCommandPool poolB = commandPool(c), poolA = VK_NULL_HANDLE;
+	VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+	poolInfo.queueFamilyIndex = c.familyA;
+	check(vkCreateCommandPool(c.device, &poolInfo, nullptr, &poolA), "vkCreateCommandPool A");
+	auto record = [&](VkCommandPool pool, uint32_t offset) {
+		VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+		allocation.commandPool = pool;
+		allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		allocation.commandBufferCount = 1;
+		VkCommandBuffer commands;
+		check(vkAllocateCommandBuffers(c.device, &allocation, &commands), "vkAllocateCommandBuffers");
+		VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+		check(vkBeginCommandBuffer(commands, &begin), "vkBeginCommandBuffer");
+		vkCmdFillBuffer(commands, marker.buffer, offset, 4, kMarker);
+		check(vkEndCommandBuffer(commands), "vkEndCommandBuffer");
+		return commands;
+	};
+	auto submit = [&](VkQueue queue, VkSemaphore wait, std::vector<VkCommandBuffer> commands) {
+		VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+		VkFence fence;
+		check(vkCreateFence(c.device, &fenceInfo, nullptr, &fence), "vkCreateFence");
+		VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+		VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+		info.waitSemaphoreCount = wait ? 1 : 0;
+		info.pWaitSemaphores = &wait;
+		info.pWaitDstStageMask = &stage;
+		info.commandBufferCount = uint32_t(commands.size());
+		info.pCommandBuffers = commands.data();
+		VkResult result = vkQueueSubmit(queue, commands.empty() && !wait ? 0 : 1, &info, fence);
+		// Synchronous submits return the error of a missing Metal command buffer.
+		if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST && !nilPath) { check(result, "vkQueueSubmit"); }
+		if (submitResult == VK_SUCCESS) { submitResult = result; }
+		return fence;
+	};
+	std::vector<VkFence> fences;
+	if (nilPath) { gFailCommandBuffers = variant == "teardown-nil" ? 1000 : 1; }
+	std::vector<VkCommandBuffer> c1 = {record(poolB, 0)};
+	if (multi) { c1.push_back(record(poolB, 4)); }
+	fences.push_back(submit(c.qb, nilPath ? VK_NULL_HANDLE : s1, c1));
+	if (multi) {
+		fences.push_back(submit(c.qa, s2, {record(poolA, 8)}));
+		fences.push_back(submit(c.qa, VK_NULL_HANDLE, {}));
+		record(poolB, 12);	// never submitted: freed with its pool after the loss
+	}
+	sleepMs(100);
+	if (!nilPath) { c.markLost(c.device); }
+	VkResult result = vkWaitForFences(c.device, uint32_t(fences.size()), fences.data(), VK_TRUE, 10000000000ull);
+	gFailCommandBuffers = 0;
+	usleep(5000);
+	int committed = gHandlersCommitted, finished = gHandlersFinished, started = gHandlersStarted;
+	int unfinished = committed - finished;
+	// Printed before the teardown, which a pending handler may crash.
+	std::printf("submit=%d wait=%d marker_C=%08x committed_handlers=%d started=%d finished=%d unfinished_at_report=%d\n",
+				int(submitResult), int(result), marker.mapped[0], committed, started, finished, unfinished);
+	std::fflush(stdout);
+	for (auto fence : fences) { vkDestroyFence(c.device, fence, nullptr); }
+	vkDestroySemaphore(c.device, s1, nullptr);
+	vkDestroySemaphore(c.device, s2, nullptr);
+	c.destroy(marker);
+	vkDestroyCommandPool(c.device, poolA, nullptr);
+	vkDestroyCommandPool(c.device, poolB, nullptr);
+	vkDestroyDevice(c.device, nullptr);
+	gDeviceDestroyed = true;
+	sleepMs(int(gHandlerDelayUs / 1000) * 8 + 200);
+	vkDestroyInstance(c.instance, nullptr);
+	int late = gHandlersLate;
+	std::printf("late_after_destroy=%d committed_after_report=%d\n", late, int(gHandlersCommitted) - committed);
+	bool pass = result == VK_ERROR_DEVICE_LOST && unfinished == 0 && late == 0;
+	std::printf("TEARDOWN %s: %s\n", pass ? "PASS" : "FAIL",
+				result != VK_ERROR_DEVICE_LOST ? "loss not reported" : unfinished ? "handlers still pending when the loss was reported"
+				: late ? "handlers started after vkDestroyDevice returned" : "no handler outlived the report or the device");
+	return pass ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
 	std::string mode = argc == 2 ? argv[1] : "";
-	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss" && mode != "event-wait") {
-		std::fprintf(stderr, "usage: %s counter-race|binary-generation|destroy-after-loss|event-wait\n", argv[0]);
+	bool isTeardown = mode == "teardown" || mode == "teardown-multi" || mode == "teardown-nil" || mode == "teardown-nil-transient";
+	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss" && mode != "event-wait" && !isTeardown) {
+		std::fprintf(stderr, "usage: %s counter-race|binary-generation|destroy-after-loss|event-wait|teardown|teardown-multi|teardown-nil|teardown-nil-transient\n", argv[0]);
 		return 64;
 	}
 	@autoreleasepool {
 		Context c = createContext();
+		if (isTeardown) {	// destroys the device and the instance itself
+			int rc = teardown(c, mode);
+			std::fflush(stdout);
+			return rc;
+		}
 		int rc = mode == "counter-race" ? counterRace(c) : mode == "binary-generation" ? binaryGeneration(c)
 			: mode == "event-wait" ? eventWait(c) : destroyAfterLoss(c);
 		std::fflush(stdout);
