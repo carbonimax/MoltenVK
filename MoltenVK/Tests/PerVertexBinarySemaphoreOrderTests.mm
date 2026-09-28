@@ -1,6 +1,6 @@
 // Copyright 2026 Jean-Philippe Meunier
 // SPDX-License-Identifier: Apache-2.0
-// Regression oracle for a legal two-queue binary semaphore execution order.
+// Regression oracles for a legal two-queue binary semaphore order and reuse after an external Metal signal.
 // Import an MTLSharedEvent so a failed Metal wait can be released during teardown.
 #import <Metal/Metal.h>
 #include <vulkan/vulkan.h>
@@ -32,7 +32,12 @@ static VkResult submit(VkQueue queue, std::vector<VkSemaphore> waits, std::vecto
     return vkQueueSubmit(queue, 1, &info, fence);
 }
 
-int main() {
+int main(int argc, char** argv) {
+    const bool externalReuse = argc == 2 && std::strcmp(argv[1], "--imported-reuse") == 0;
+    if (argc > 2 || (argc == 2 && !externalReuse)) {
+        std::fprintf(stderr, "usage: %s [--imported-reuse]\n", argv[0]);
+        return 64;
+    }
     const char* extension = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
     uint32_t extensionCount = 0;
     check(vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr), "instance extensions(count)");
@@ -111,6 +116,7 @@ int main() {
     if (!metalInfo.mtlDevice) { std::fprintf(stderr, "No exported MTLDevice\n"); return 3; }
     id<MTLSharedEvent> sharedEvent = [metalInfo.mtlDevice newSharedEvent];
     if (!sharedEvent) { std::fprintf(stderr, "MTLSharedEvent unavailable\n"); return 3; }
+    if (externalReuse) sharedEvent.signaledValue = 40;
     VkImportMetalSharedEventInfoEXT imported{VK_STRUCTURE_TYPE_IMPORT_METAL_SHARED_EVENT_INFO_EXT};
     imported.mtlSharedEvent = sharedEvent;
     VkSemaphoreCreateInfo binaryInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -128,6 +134,45 @@ int main() {
     check(vkCreateFence(device, &fenceInfo, nullptr, &fb), "fence B");
     check(vkCreateFence(device, &fenceInfo, nullptr, &fc), "fence C");
     check(vkCreateFence(device, &fenceInfo, nullptr, &fd), "fence D");
+
+    if (externalReuse) {
+        // The imported event starts at 40. Metal satisfies the first Vulkan wait at 41;
+        // a later Vulkan signal must satisfy a second wait on the same binary semaphore.
+        sharedEvent.signaledValue = 41;
+        check(submit(qa, {s}, {0}, {}, {}, fc), "submit external wait");
+        VkResult first = vkWaitForFences(device, 1, &fc, VK_TRUE, 2000000000ull);
+        if (first != VK_SUCCESS) {
+            sharedEvent.signaledValue = 1024; // Teardown only: release a stuck native wait.
+            vkWaitForFences(device, 1, &fc, VK_TRUE, 1000000000ull);
+            std::fprintf(stderr, "external wait failed: %d\n", int(first));
+            return 1;
+        }
+        check(submit(qa, {}, {}, {s}, {0}, fb), "submit Vulkan signal");
+        VkResult signalDone = vkWaitForFences(device, 1, &fb, VK_TRUE, 2000000000ull);
+        if (signalDone != VK_SUCCESS) { std::fprintf(stderr, "Vulkan signal failed: %d\n", int(signalDone)); return 1; }
+        check(submit(qa, {s}, {0}, {}, {}, fd), "submit Vulkan reuse wait");
+        VkResult second = vkWaitForFences(device, 1, &fd, VK_TRUE, 500000000ull);
+        bool rescued = second != VK_SUCCESS;
+        if (rescued) {
+            sharedEvent.signaledValue = 1024; // Teardown only; rescue is a test failure.
+            second = vkWaitForFences(device, 1, &fd, VK_TRUE, 2000000000ull);
+        }
+        std::printf("external_wait=%d signal=%d reuse_wait=%d rescued=%d metal_value=%llu\n",
+                    int(first), int(signalDone), int(second), int(rescued), (unsigned long long)sharedEvent.signaledValue);
+        std::fflush(stdout);
+        if (second != VK_SUCCESS) return 1; // Avoid an unbounded device-idle wait.
+        check(vkDeviceWaitIdle(device), "vkDeviceWaitIdle");
+        vkDestroyFence(device, fd, nullptr);
+        vkDestroyFence(device, fc, nullptr);
+        vkDestroyFence(device, fb, nullptr);
+        vkDestroySemaphore(device, gate, nullptr);
+        vkDestroySemaphore(device, t, nullptr);
+        vkDestroySemaphore(device, s, nullptr);
+        vkDestroyDevice(device, nullptr);
+        [sharedEvent release];
+        vkDestroyInstance(instance, nullptr);
+        return rescued ? 1 : 0;
+    }
 
     // Host order B,A,C,D. GPU order must be A,C,B,D. B stays behind the host gate
     // while D is checked: A's signal must not satisfy D's second wait on S.
