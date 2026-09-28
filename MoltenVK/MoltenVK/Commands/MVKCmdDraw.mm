@@ -326,7 +326,16 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 		metalState._exists.vertex().descriptorSetData.reset();
 		return;
 	}
-	if (!indexBinding) { [encoder memoryBarrierWithScope: MTLBarrierScopeBuffers afterStages: MTLRenderStageVertex beforeStages: MTLRenderStageVertex | MTLRenderStageFragment]; }
+	if (!indexBinding) {
+		// The replay reads what the capture wrote: separate them by a render pass boundary. A vertex-to-vertex memory
+		// barrier inside the pass left the capture's records invisible to the replay on iPhone GPUs (A17 Pro, A20 Pro),
+		// which then drew nothing, while it worked on an M4.
+		cmdEncoder->encodeStoreActions(true);
+		cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass);
+		cmdEncoder->finalizeDrawState(kMVKGraphicsStageRasterization);
+		if (!pipeline->hasValidMTLPipelineStates()) { return; }
+		encoder = cmdEncoder->_mtlRenderEncoder;
+	}
 	auto* pairs = (uint32_t*)occurrences.contents;
 	auto* indices = (uint32_t*)primitiveIndices.contents;
 	auto* corners = (uint32_t*)scratch->buffers[4].contents;
@@ -1248,7 +1257,12 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 			if (pipeline->needsDrawIdBuffer()) { metalState.bindVertexBytes(encoder, &draw, sizeof(draw), pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::DrawId]); }
 			MTLPrimitiveType captureType = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ? MTLPrimitiveTypeTriangle : MTLPrimitiveTypePoint;
 			[encoder drawPrimitives: captureType indirectBuffer: plan indirectBufferOffset: 16];
-			[encoder memoryBarrierWithScope: MTLBarrierScopeBuffers afterStages: MTLRenderStageVertex beforeStages: MTLRenderStageVertex | MTLRenderStageFragment];
+			// A render pass boundary, not an in-pass barrier, orders the capture before the replay (see the direct draw).
+			cmdEncoder->encodeStoreActions(true);
+			cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass);
+			cmdEncoder->finalizeDrawState(kMVKGraphicsStageRasterization);
+			if (!pipeline->hasValidMTLPipelineStates()) { return; }
+			encoder = cmdEncoder->_mtlRenderEncoder;
 		}
 		[encoder setRenderPipelineState: pipeline->getMainPipelineState()];
 		metalState.bindVertexBuffer(encoder, captured, 0, replay.vertex_buffer_index);
