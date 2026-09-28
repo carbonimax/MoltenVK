@@ -724,6 +724,14 @@ public:
 	void beginEncoding();
 	void endEncoding();
 
+	/**
+	 * Counts a queue submission's Metal command buffer until it completes. Call just before committing it, and before
+	 * adding the completion handler that may signal a fence. A device loss is reported to host waits only once these
+	 * have completed: MoltenVK does not retain the application resources they use, which the application may destroy
+	 * as soon as a host wait reports the loss, while the loss rescue can still release their Metal waits.
+	 */
+	void trackCommittedMTLCommandBuffer(id<MTLCommandBuffer> mtlCmdBuff);
+
 	/** Registers a semaphore whose encoded Metal waits must be released if this device is lost. */
 	void addLossReleasedSemaphore(MVKSemaphore* sem4);
 
@@ -1154,6 +1162,7 @@ protected:
 	std::condition_variable _lossCondition;
 	dispatch_queue_t _lossPublisher = nullptr;
 	std::atomic<uint32_t> _activeEncodings{0};
+	std::atomic<uint32_t> _committedMTLCommandBuffers{0};
 	bool _isLossPublished = false;
 	std::atomic<bool> _losing{false};
 	std::atomic<bool> _markPhysicalDeviceLost{false};

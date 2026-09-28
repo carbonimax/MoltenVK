@@ -659,6 +659,9 @@ VkResult MVKQueueCommandBufferSubmission::commitActiveMTLCommandBuffer(bool sign
 		getDevice()->markLost();
 	}
 
+	// Before the handler that may signal the fence, after which the application may destroy the device.
+	if (mtlCmdBuff) { getDevice()->trackCommittedMTLCommandBuffer(mtlCmdBuff); }
+
 	uint64_t startTime = getPerformanceTimestamp();
 	[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer> mtlCB) {
 		addPerformanceInterval(getPerformanceStats().queue.mtlCommandBufferExecution, startTime);

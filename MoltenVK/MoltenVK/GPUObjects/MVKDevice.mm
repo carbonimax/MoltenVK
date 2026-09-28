@@ -3989,6 +3989,11 @@ void MVKDevice::publishLoss() {
 		_lossCondition.wait(lock, [this]{ return !_activeEncodings; });
 	}
 	releaseSemaphoreWaitsAfterLoss();
+	// Work released above, or committed before the loss, may still use application resources.
+	{
+		unique_lock<mutex> lock(_lossLock);
+		_lossCondition.wait(lock, [this]{ return !_committedMTLCommandBuffers; });
+	}
 	{
 		lock_guard<mutex> lock(_sem4Lock);
 		setConfigurationResult(VK_ERROR_DEVICE_LOST);
@@ -4052,6 +4057,16 @@ void MVKDevice::endEncoding() {
 		lock_guard<mutex> lock(_lossLock);
 		_lossCondition.notify_all();
 	}
+}
+
+void MVKDevice::trackCommittedMTLCommandBuffer(id<MTLCommandBuffer> mtlCmdBuff) {
+	_committedMTLCommandBuffers++;
+	[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer>) {
+		if (--_committedMTLCommandBuffers == 0 && _losing.load()) {
+			lock_guard<mutex> lock(_lossLock);
+			_lossCondition.notify_all();
+		}
+	}];
 }
 
 void MVKDevice::addLossReleasedSemaphore(MVKSemaphore* sem4) {
