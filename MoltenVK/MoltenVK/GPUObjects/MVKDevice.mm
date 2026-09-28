@@ -3963,7 +3963,7 @@ VkResult MVKDevice::waitIdle() {
 // command buffers it covers (Vulkan "Lost Device"), and a submission still encoding may be reading them.
 VkResult MVKDevice::markLost(bool alsoMarkPhysicalDevice) {
 	if (alsoMarkPhysicalDevice) { _markPhysicalDeviceLost.store(true, std::memory_order_release); }
-	if (_losing.exchange(true, std::memory_order_acq_rel)) {
+	if (_losing.exchange(true)) {
 		if (alsoMarkPhysicalDevice && getConfigurationResult() != VK_SUCCESS) { _physicalDevice->setConfigurationResult(VK_ERROR_DEVICE_LOST); }
 		return VK_ERROR_DEVICE_LOST;
 	}
@@ -4043,18 +4043,17 @@ VkResult MVKDevice::getHostWaitResult(bool isFinished, uint64_t timeout) {
 	return isFinished ? VK_SUCCESS : VK_TIMEOUT;
 }
 
+// Lock-free outside a loss. The count and _losing are sequentially consistent, so either the last encoding sees the
+// loss and notifies under the lock, or publishLoss() sees no encoding left.
 void MVKDevice::beginEncoding() {
-	lock_guard<mutex> lock(_lossLock);
 	_activeEncodings++;
 }
 
 void MVKDevice::endEncoding() {
-	bool isIdle;
-	{
+	if (--_activeEncodings == 0 && _losing.load()) {
 		lock_guard<mutex> lock(_lossLock);
-		isIdle = !--_activeEncodings;
+		_lossCondition.notify_all();
 	}
-	if (isIdle) { _lossCondition.notify_all(); }
 }
 
 void MVKDevice::addLossReleasedSemaphore(MVKSemaphore* sem4) {

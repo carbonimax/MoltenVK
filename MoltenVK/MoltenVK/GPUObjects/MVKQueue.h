@@ -155,7 +155,7 @@ protected:
 	std::atomic<uint32_t> _pendingRetirements{0};
 	std::mutex _execQueueMutex;
 	std::condition_variable _execQueueConditionVariable;
-	uint32_t _execQueueJobCount = 0;
+	std::atomic<uint32_t> _execQueueJobCount{0};
 	id<MTLCommandQueue> _mtlQueue = nil;
 	NSString* _mtlCmdBuffLabelBeginCommandBuffer = nil;
 	NSString* _mtlCmdBuffLabelQueueSubmit = nil;

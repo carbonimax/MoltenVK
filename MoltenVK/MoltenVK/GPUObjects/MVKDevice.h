@@ -1153,7 +1153,7 @@ protected:
 	std::mutex _lossLock;
 	std::condition_variable _lossCondition;
 	dispatch_queue_t _lossPublisher = nullptr;
-	uint32_t _activeEncodings = 0;
+	std::atomic<uint32_t> _activeEncodings{0};
 	bool _isLossPublished = false;
 	std::atomic<bool> _losing{false};
 	std::atomic<bool> _markPhysicalDeviceLost{false};
