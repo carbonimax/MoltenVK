@@ -6,8 +6,9 @@
 # with Metal API and shader validation. The executable loads the library through @executable_path/lib, so the same
 # binary runs against another library for before/after comparisons.
 # "before" expects each mode to show its defect (exit 1), "after" expects each to pass (exit 0). The teardown modes may
-# also crash before (134, 139): a handler then touches the destroyed device. teardown-nil is a control, green on both
-# sides. teardown-multi runs with deferred prefill, for several Metal command buffers per submission. The "before"
+# also crash before (134, 139): a handler then touches the destroyed device. So may the prefill-abandon and metal-error
+# modes: a handler then touches a destroyed pool or queue submission. teardown-nil is a control, green on both sides.
+# teardown-multi, prefill-abandon-* and metal-error-multi run with deferred prefill. The "before"
 # library differs by mode: see the report. external-queue-wait reproduces an open blocker: no library passes it. Its
 # verdict is BLOCKER, never PASS, when it shows the outcome documented for the side (before: C runs after the loss is
 # reported; after: the loss is not reported within 2 s), and the summary names it.
@@ -20,7 +21,9 @@ output=$(mkdir -p "$2" && cd "$2" && pwd)
 side=${3:?before or after}
 repeats=${4:-3}
 modes=("${@:5}")
-(( ${#modes[@]} )) || modes=(counter-race binary-generation destroy-after-loss event-wait teardown teardown-multi teardown-nil teardown-nil-transient external-queue-wait)
+(( ${#modes[@]} )) || modes=(counter-race binary-generation destroy-after-loss event-wait teardown teardown-multi teardown-nil teardown-nil-transient
+	prefill-abandon-reset prefill-abandon-free prefill-abandon-pool prefill-abandon-reset-lost prefill-abandon-free-lost prefill-abandon-pool-lost
+	metal-error metal-error-multi external-queue-wait)
 [[ $side == before || $side == after ]] || { echo 'side must be before or after'; exit 64; }
 # The runner runs again as a child whose output tee records, so that the log is complete when this parent hashes it.
 if [[ -z ${PERVERTEX_RUNNER_CHILD:-} ]]; then
@@ -39,11 +42,12 @@ failures=0
 blockers=()
 for name in "${modes[@]}"; do
 	case $side:$name in
-		before:teardown | before:teardown-multi) expected='1|134|139' ;;
+		before:teardown | before:teardown-multi | before:prefill-abandon-* | before:metal-error*) expected='1|134|139' ;;
 		before:teardown-nil | after:*) expected=0 ;;
 		before:*) expected=1 ;;
 	esac
-	prefill=$([[ $name == teardown-multi ]] && echo 1 || echo 0)
+	prefill=0
+	[[ $name == teardown-multi || $name == prefill-abandon-* || $name == metal-error-multi ]] && prefill=1
 	for mode in sync async; do
 		for run in $(seq 1 "$repeats"); do
 			log=$output/runs/$name-$mode-$run.log rc=0
@@ -61,7 +65,7 @@ for name in "${modes[@]}"; do
 			[[ $verdict == BLOCKER ]] && blockers+=("$name-$mode-$run")
 			[[ $verdict == PASS || $verdict == BLOCKER ]] || failures=$((failures + 1))
 			echo "$name,$mode,$run,$expected,$rc,$verdict" >> "$output/results.csv"
-			printf '%-20s %-5s %s exit=%s %s | %s\n' "$name" "$mode" "$run" "$rc" "$verdict" "$(grep -E '^(COUNTER_RACE|BINARY_GENERATION|DESTROY_AFTER_LOSS|EVENT_WAIT|TEARDOWN|EXTERNAL_QUEUE_WAIT)|^submit=|^C_before_loss' "$log" | tr '\n' ' ' | cut -c1-200)"
+			printf '%-20s %-5s %s exit=%s %s | %s\n' "$name" "$mode" "$run" "$rc" "$verdict" "$(grep -E '^(COUNTER_RACE|BINARY_GENERATION|DESTROY_AFTER_LOSS|EVENT_WAIT|TEARDOWN|EXTERNAL_QUEUE_WAIT|PREFILL_ABANDON|METAL_ERROR)|^submit=|^C_before_loss|^cleanup=|^wait=' "$log" | tr '\n' ' ' | cut -c1-200)"
 		done
 	done
 done
