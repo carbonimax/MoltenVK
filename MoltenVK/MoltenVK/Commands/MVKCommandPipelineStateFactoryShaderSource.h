@@ -645,13 +645,14 @@ kernel void perVertexRestart(const device uint8_t* source [[buffer(0)]], device 
 // Plan words: 0 status (1 capacity, 2 index range), 4 capture draw, 8 capture dispatch,
 // 12 stage-in region, 20 replay draw, 24 table dispatch, 28 gather dispatch, 32 table params,
 // 36 restart dispatch, 40 restart expansion dispatch, 48-52 one-draw argument snapshot,
-// 53-54 saturated 64-bit physical record requirement, 55 snapshot-valid flag,
+// 53-54 saturated 64-bit physical record requirement, 55 snapshot-valid flag, 56 frozen Count,
 // 64 replay constants (byte 256), 128 capture params (byte 512),
 // then perVertexRestart parameters every 64 words from byte 1024.
 kernel void perVertexIndirect(const device uint8_t* args [[buffer(0)]], const device uint* count [[buffer(1)]], device uint* w [[buffer(2)]], const device uint8_t* source [[buffer(3)]], device uint* gathered [[buffer(4)]], device uint* pairs [[buffer(5)]], device uint* triplets [[buffer(6)]], device uint* corners [[buffer(7)]], constant uint* p [[buffer(8)]], uint i [[thread_position_in_grid]]) {
-    uint draws = p[0] == 1 && p[15] == 1 ? w[55] : (p[10] ? min(p[0], count[0]) : p[0]);
+    uint draws = p[15] == 0 ? (p[10] ? min(p[0], count[0]) : p[0]) : w[56];
     uint topology = p[7], rasterVertices = topology == 0 ? 1 : topology <= 2 ? 2 : 3;
     if (p[15] == 0) {
+        if (i == 0) { w[56] = draws; }
         if (i >= draws) { return; }
         const device uint* a = reinterpret_cast<const device uint*>(args + ulong(i) * p[1]);
         if (p[0] == 1) {
