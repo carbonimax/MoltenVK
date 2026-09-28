@@ -1060,8 +1060,12 @@ static const MVKMTLBufferAllocation* encodeIndirectCountConversion(
 // inside a render encoder, so each draw ends the render encoder around its compute planning and the next draw
 // reuses the hazard-tracked scratch only after Metal orders the previous replay.
 static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline, id<MTLBuffer> indirectBuffer, VkDeviceSize indirectOffset, uint32_t stride, uint32_t drawCount, id<MTLBuffer> countBuffer, VkDeviceSize countOffset, const MVKIndexMTLBufferBinding* indexBinding) {
+	// Encoding runs after vkQueueSubmit() returned: a command that cannot be encoded also loses the device, so that
+	// the submission never completes without it.
 	auto reject = [&](VkResult result, const char* message) {
 		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(result, "Portable PerVertexKHR indirect %s", message));
+		cmdEncoder->getDevice()->markLost();
+		cmdEncoder->stopEncoding();
 	};
 	auto lose = [&](const char* reason) {
 		cmdEncoder->reportError(VK_ERROR_DEVICE_LOST, "Portable PerVertexKHR indirect command was not executed: %s.", reason);
