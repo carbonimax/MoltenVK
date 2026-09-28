@@ -53,13 +53,16 @@ echo 'case,expected_exit,actual_exit,verdict' > "$output/results.csv"
 validation=(MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1)
 common=(MVK_CONFIG_LOG_LEVEL=2 PERVERTEX_TEST_SPLIT_PRODUCER=1 PERVERTEX_TEST_LATE_SIGNAL=1 PERVERTEX_TEST_DEPENDENT_SUBMISSION=1 PERVERTEX_TEST_WAIT_IDLE=1)
 # run <name> <expected before> <expected after> <validated 0|1> <environment...> -- <driver|binary-order> <arguments...>
+# An expected exit written "defect:N" is a known, unfixed defect: exit N gives the verdict KNOWN_DEFECT, never PASS.
+known_defects=()
 run() {
 	local name=$1 before=$2 after=$3 validated=$4; shift 4
 	local vars=()
 	while [[ $1 != -- ]]; do vars+=("$1"); shift; done
 	shift
 	local program=$1; shift
-	local expected=${!mode} log=$output/runs/$name.log rc=0
+	local expected=${!mode} log=$output/runs/$name.log rc=0 known=
+	if [[ $expected == defect:* ]]; then known=1; expected=${expected#defect:}; fi
 	[[ $validated == 1 ]] && vars+=("${validation[@]}")
 	(cd "$output/runs" && gtimeout -k 2 40 env DYLD_PRINT_LIBRARIES=1 "${vars[@]}" "$output/bin/$program" "$@") > "$log" 2>&1 || rc=$?
 	local verdict=PASS
@@ -73,10 +76,11 @@ run() {
 		grep -q 'Metal GPU Validation Enabled' "$log" || verdict=FAIL
 		if grep -qiE 'Shader Validation|GPU Address Sanitizer|validation error|Execution of the command buffer was aborted' "$log"; then verdict=FAIL; fi
 	fi
+	if [[ $verdict == PASS && -n $known ]]; then verdict=KNOWN_DEFECT; known_defects+=("$name"); fi
 	echo "$name,$expected,$rc,$verdict" >> "$output/results.csv"
 	printf '%-44s expected=%s exit=%s %s\n' "$name" "$expected" "$rc" "$verdict"
 	grep -E '^submission=.*indirect|^dependent |^queue idle|^C=|^D_|^B_|^rescued|^external|^ERROR' "$log" | sed 's/^/    /' || true
-	if [[ $verdict != PASS ]]; then echo "STOP: inspect $log before any further GPU work"; exit 1; fi
+	if [[ $verdict != PASS && $verdict != KNOWN_DEFECT ]]; then echo "STOP: inspect $log before any further GPU work"; exit 1; fi
 }
 sync=(MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=1 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0)
 async=(MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0)
@@ -143,7 +147,11 @@ run no-wait-timeline-huge-sync "0|1" 0 1 "${sync[@]}" "${common[@]}" "${same[@]}
 run index-oob-sync 0 0 1 "${sync[@]}" "${common[@]}" "${same[@]}" -- pervertex-indirect-gpu "$output/shaders" indexed u32 index-oob compute index-oob
 # 5. Binary semaphore oracles, unchanged scenarios (asynchronous submits, no Metal validation, as archived):
 #    B/A/C/D is a preexisting pairing defect and must keep its outcome; imported reuse must stay green.
-run binary-bacd 1 1 0 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 -- pervertex-binary-order
+# B/A/C/D: legal order A, C, B, D. Metal event semaphores assign one generation per wait in submission order, but every
+# pending signal targets the current one, so B's signal cannot reach D's wait: a known defect of MoltenVK, not fixed.
+run binary-bacd defect:1 defect:1 0 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 -- pervertex-binary-order
+# CPU callback semaphores signal on completion, in execution order, and pair it correctly (no imported event there).
+run binary-bacd-callback 0 0 0 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE=3 PERVERTEX_BINARY_NO_IMPORT=1 -- pervertex-binary-order
 run binary-imported-reuse 0 0 0 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 -- pervertex-binary-order --imported-reuse
 # 5b. A fragment reading PerVertexKHR inputs and BaryCoordKHR together: before SPIRV-Cross 6af5a67f its pipeline
 #     failed to compile (a false collision of the barycentric private Location with a builtin input mapping).
@@ -173,4 +181,4 @@ for ((i = 1; i <= repeats; ++i)); do
 	run no-wait-timeline-huge-sync-r$i "0|1" 0 1 "${sync[@]}" "${common[@]}" "${same[@]}" PERVERTEX_TEST_DEPENDENT_NO_WAIT=1 -- pervertex-indirect-gpu "$output/shaders" draw u32 huge compute no-wait-huge-sync-r$i
 done
 shasum -a 256 "$output"/runs/* "$output/results.csv" > "$output/EVIDENCE.sha256"
-echo "PERVERTEX_CONTINUATION $mode PASS: $(($(wc -l < "$output/results.csv") - 1)) cases"
+echo "PERVERTEX_CONTINUATION $mode PASS: $(($(wc -l < "$output/results.csv") - 1)) cases, ${#known_defects[@]} known defect(s) not fixed: ${known_defects[*]+${known_defects[*]}}"
