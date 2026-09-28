@@ -8,7 +8,9 @@
 # "before" expects each mode to show its defect (exit 1), "after" expects each to pass (exit 0). The teardown modes may
 # also crash before (134, 139): a handler then touches the destroyed device. teardown-nil is a control, green on both
 # sides. teardown-multi runs with deferred prefill, for several Metal command buffers per submission. The "before"
-# library differs by mode: see the report.
+# library differs by mode: see the report. external-queue-wait reproduces an open blocker: no library passes it. Its
+# verdict is BLOCKER, never PASS, when it shows the outcome documented for the side (before: C runs after the loss is
+# reported; after: the loss is not reported within 2 s), and the summary names it.
 # Usage: run-pervertex-loss-tests.sh <libMoltenVK test build> <output directory> <before|after> [repeats [modes...]]
 set -euo pipefail
 test_dir=$(cd "$(dirname "$0")" && pwd)
@@ -18,7 +20,7 @@ output=$(mkdir -p "$2" && cd "$2" && pwd)
 side=${3:?before or after}
 repeats=${4:-3}
 modes=("${@:5}")
-(( ${#modes[@]} )) || modes=(counter-race binary-generation destroy-after-loss event-wait teardown teardown-multi teardown-nil teardown-nil-transient)
+(( ${#modes[@]} )) || modes=(counter-race binary-generation destroy-after-loss event-wait teardown teardown-multi teardown-nil teardown-nil-transient external-queue-wait)
 [[ $side == before || $side == after ]] || { echo 'side must be before or after'; exit 64; }
 # The runner runs again as a child whose output tee records, so that the log is complete when this parent hashes it.
 if [[ -z ${PERVERTEX_RUNNER_CHILD:-} ]]; then
@@ -34,6 +36,7 @@ xcrun clang++ -arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-fiel
 shasum -a 256 "$library" "$output/bin/pervertex-loss" "$test_dir/PerVertexLossTests.mm" > "$output/INPUTS.sha256"
 echo 'case,mode,run,expected,actual,verdict' > "$output/results.csv"
 failures=0
+blockers=()
 for name in "${modes[@]}"; do
 	case $side:$name in
 		before:teardown | before:teardown-multi) expected='1|134|139' ;;
@@ -49,12 +52,19 @@ for name in "${modes[@]}"; do
 				gtimeout -k 2 40 "$output/bin/pervertex-loss" "$name" > "$log" 2>&1 || rc=$?
 			verdict=PASS
 			[[ "|$expected|" == *"|$rc|"* ]] || verdict=FAIL
+			if [[ $name == external-queue-wait ]]; then
+				blocker=$([[ $side == before ]] && echo RAN_AFTER_REPORT || echo LOSS_NOT_REPORTED)
+				verdict=FAIL
+				[[ $rc == 1 ]] && grep -q "^EXTERNAL_QUEUE_WAIT $blocker" "$log" && verdict=BLOCKER
+			fi
 			grep -q 'Metal API Validation Enabled' "$log" || verdict=FAIL
-			[[ $verdict == PASS ]] || failures=$((failures + 1))
+			[[ $verdict == BLOCKER ]] && blockers+=("$name-$mode-$run")
+			[[ $verdict == PASS || $verdict == BLOCKER ]] || failures=$((failures + 1))
 			echo "$name,$mode,$run,$expected,$rc,$verdict" >> "$output/results.csv"
-			printf '%-20s %-5s %s exit=%s %s | %s\n' "$name" "$mode" "$run" "$rc" "$verdict" "$(grep -E '^(COUNTER_RACE|BINARY_GENERATION|DESTROY_AFTER_LOSS|EVENT_WAIT|TEARDOWN)|^submit=' "$log" | tr '\n' ' ' | cut -c1-200)"
+			printf '%-20s %-5s %s exit=%s %s | %s\n' "$name" "$mode" "$run" "$rc" "$verdict" "$(grep -E '^(COUNTER_RACE|BINARY_GENERATION|DESTROY_AFTER_LOSS|EVENT_WAIT|TEARDOWN|EXTERNAL_QUEUE_WAIT)|^submit=|^C_before_loss' "$log" | tr '\n' ' ' | cut -c1-200)"
 		done
 	done
 done
-echo "LOSS ORACLES $side: $failures unexpected"
+if (( ${#blockers[@]} )); then echo "BLOCKER reproduced, not passed: ${blockers[*]}"; fi
+echo "LOSS ORACLES $side: $failures unexpected, ${#blockers[@]} blocker run(s)"
 exit $(( failures ? 1 : 0 ))
