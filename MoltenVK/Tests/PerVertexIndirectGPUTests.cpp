@@ -117,10 +117,13 @@ int main(int argc, char** argv) {
 		const bool lateSignal = getenv("PERVERTEX_TEST_LATE_SIGNAL") != nullptr;
 		const bool dependentSubmission = getenv("PERVERTEX_TEST_DEPENDENT_SUBMISSION") != nullptr;
 		const bool dependentSameQueue = getenv("PERVERTEX_TEST_DEPENDENT_SAME_QUEUE") != nullptr;
+		// Opt in to ordinary same-queue C behind deferred B, without a semaphore dependency.
+		const bool dependentNoWait = getenv("PERVERTEX_TEST_DEPENDENT_NO_WAIT") != nullptr;
 		const bool waitIdleProbe = getenv("PERVERTEX_TEST_WAIT_IDLE") != nullptr;
 		const bool dependentFirst = getenv("PERVERTEX_TEST_DEPENDENT_FIRST") != nullptr;
 		if (dependentSubmission && (!splitProducer || !lateSignal)) throw std::runtime_error("dependent submission requires split producer and late signal");
 		if (dependentSameQueue && !dependentSubmission) throw std::runtime_error("same-queue dependent submission requires dependent submission");
+		if (dependentNoWait && (!dependentSubmission || !dependentSameQueue)) throw std::runtime_error("dependent no-wait requires dependent submission and same queue");
 		if (dependentFirst && !dependentSubmission) throw std::runtime_error("dependent-first wait requires dependent submission");
 		const bool indexed = form == "indexed" || form == "indexed-count";
 		const bool counted = form == "draw-count" || form == "indexed-count";
@@ -647,7 +650,10 @@ int main(int argc, char** argv) {
 		VkSemaphore hostGate = VK_NULL_HANDLE;
 		VkSemaphore dependentSignal = VK_NULL_HANDLE;
 		if (dependentSubmission) {
+			VkSemaphoreTypeCreateInfo typeInfo{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+			typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
 			VkSemaphoreCreateInfo signalInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+			if (dependentNoWait) signalInfo.pNext = &typeInfo;
 			check(vkCreateSemaphore(d.device, &signalInfo, nullptr, &dependentSignal), "Create dependent semaphore");
 		}
 		if (splitProducer) {
@@ -660,7 +666,7 @@ int main(int argc, char** argv) {
 				check(vkCreateSemaphore(d.device, &semaphoreInfo, nullptr, &hostGate), "Create host gate");
 			}
 		}
-		struct Result { VkResult submit, wait, dependentSubmit = VK_NOT_READY, dependentBeforeSignal = VK_NOT_READY, dependentWait = VK_NOT_READY; std::vector<uint8_t> image; std::vector<std::array<uint32_t, 4>> records; uint32_t invocations; bool produced; uint32_t dependentMarkerValue = 0; };
+		struct Result { VkResult submit, wait, dependentSubmit = VK_NOT_READY, dependentBeforeSignal = VK_NOT_READY, dependentWait = VK_NOT_READY, dependentTimelineWait = VK_NOT_READY; std::vector<uint8_t> image; std::vector<std::array<uint32_t, 4>> records; uint32_t invocations; bool produced; uint32_t dependentMarkerValue = 0; };
 		auto run = [&](VkCommandBuffer cb, bool split = false) {
 			// Host zeros: a CPU read of arguments, Count or indices while encoding would see an empty draw.
 			memset(work.data, 0, kWorkSize);
@@ -671,7 +677,7 @@ int main(int argc, char** argv) {
 			VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
 			submit.commandBufferCount = 1;
 			submit.pCommandBuffers = &cb;
-			if (dependentSubmission && split) { submit.signalSemaphoreCount = 1; submit.pSignalSemaphores = &dependentSignal; }
+			if (dependentSubmission && !dependentNoWait && split) { submit.signalSemaphoreCount = 1; submit.pSignalSemaphores = &dependentSignal; }
 			Result r{};
 			VkResult producerSubmit = VK_SUCCESS;
 			VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
@@ -703,11 +709,20 @@ int main(int argc, char** argv) {
 			if (dependentSubmission && split && r.submit == VK_SUCCESS) {
 				VkPipelineStageFlags dependentStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
 				VkSubmitInfo dependent{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-				dependent.waitSemaphoreCount = 1;
+				dependent.waitSemaphoreCount = dependentNoWait ? 0 : 1;
 				dependent.pWaitSemaphores = &dependentSignal;
 				dependent.pWaitDstStageMask = &dependentStage;
 				dependent.commandBufferCount = 1;
 				dependent.pCommandBuffers = &dependentCommands;
+				uint64_t dependentValue = 1;
+				VkTimelineSemaphoreSubmitInfo timelineSubmit{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+				if (dependentNoWait) {
+					timelineSubmit.signalSemaphoreValueCount = 1;
+					timelineSubmit.pSignalSemaphoreValues = &dependentValue;
+					dependent.pNext = &timelineSubmit;
+					dependent.signalSemaphoreCount = 1;
+					dependent.pSignalSemaphores = &dependentSignal;
+				}
 				r.dependentSubmit = vkQueueSubmit(dependentSameQueue ? d.queue : d.producerQueue, 1, &dependent, dependentFence);
 				r.dependentBeforeSignal = vkGetFenceStatus(d.device, dependentFence);
 				std::printf("dependent queue=%s submit=%d fence before host signal=%d\n", dependentSameQueue ? "draw" : "producer", r.dependentSubmit, r.dependentBeforeSignal);
@@ -722,6 +737,16 @@ int main(int argc, char** argv) {
 				signal.value = 1;
 				check(vkSignalSemaphore(d.device, &signal), "Host signal timeline");
 			}
+			if (dependentNoWait && split && r.dependentSubmit == VK_SUCCESS) {
+				// Observe the Metal timeline signal before CPU fence retirement can hide overtaking.
+				uint64_t dependentValue = 1;
+				VkSemaphoreWaitInfo timelineWait{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+				timelineWait.semaphoreCount = 1;
+				timelineWait.pSemaphores = &dependentSignal;
+				timelineWait.pValues = &dependentValue;
+				r.dependentTimelineWait = vkWaitSemaphores(d.device, &timelineWait, 5000000000ull);
+				std::printf("dependent timeline wait before draw fence=%d\n", r.dependentTimelineWait);
+			}
 			auto waitDependent = [&] {
 				r.dependentWait = r.dependentSubmit == VK_SUCCESS ? vkWaitForFences(d.device, 1, &dependentFence, VK_TRUE, 5000000000ull) : r.dependentSubmit;
 				memcpy(&r.dependentMarkerValue, dependentMarker.data, sizeof(uint32_t));
@@ -734,6 +759,8 @@ int main(int argc, char** argv) {
 			}
 			r.wait = r.submit == VK_SUCCESS ? vkWaitForFences(d.device, 1, &fence, VK_TRUE, 20000000000ull) : r.submit;
 			if (dependentSubmission && split) {
+				if (dependentNoWait && r.wait == VK_ERROR_DEVICE_LOST && r.dependentTimelineWait == VK_SUCCESS) throw std::runtime_error("Ordinary same-queue successor timeline reported success before draw device loss");
+				if (dependentNoWait && r.wait == VK_SUCCESS) check(r.dependentTimelineWait, "Ordinary same-queue successor timeline wait");
 				if (!dependentFirst) waitDependent();
 				if (r.wait == VK_SUCCESS && (r.dependentWait != VK_SUCCESS || r.dependentMarkerValue != 0xA55A5AA5)) throw std::runtime_error("Dependent submission did not complete after the indirect draw");
 				if (r.wait == VK_ERROR_DEVICE_LOST && r.dependentWait != VK_ERROR_DEVICE_LOST) throw std::runtime_error("Dependent submission reported success or remained blocked after draw device loss");
