@@ -125,7 +125,7 @@ struct MVKPerVertexScratch {
 	// Admission failures ORed by the GPU into the plan buffer; read only after the work completed.
 	uint32_t getIndirectStatus() const { return indirectCapacity && buffers[12] ? *(volatile const uint32_t*)buffers[12].contents : 0; }
 
-	// Nonzero when the GPU refused a TES draw whose levels have no proven topology. Read after completion.
+	// Nonzero when the GPU refused a TES draw whose levels have no proven topology. Read once the encoder waited.
 	uint32_t getTessEvalStatus() const { return !indirectCapacity && buffers[12] ? *(volatile const uint32_t*)buffers[12].contents : 0; }
 };
 

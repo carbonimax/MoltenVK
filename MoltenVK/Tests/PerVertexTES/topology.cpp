@@ -853,7 +853,9 @@ int main(int argc, char** argv) {
 			uint32_t pixels = 0;
 			for (uint32_t i = 0; i < kWidth * kHeight; ++i) pixels += covered(lost.rgba, i);
 			verdict(lost.submit == VK_SUCCESS && lost.wait == VK_ERROR_DEVICE_LOST, "submission accepted, fence reports VK_ERROR_DEVICE_LOST");
-			verdict(pixels == 0 && prior(lost.rgba), "no pixel of the refused draw, earlier attachment write preserved");
+			// Mapped memory is undefined after a device loss (Vulkan, Lost Device), and the runtime stops the command
+			// buffer at the refused draw, before the readback: no pixel of the draw may appear, nothing else is required.
+			verdict(pixels == 0, "no pixel of the refused draw");
 			std::printf("TES_TOPOLOGY %s %s %s\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), winding.c_str());
 			return pass ? 0 : 2;
 		}
