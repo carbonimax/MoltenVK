@@ -13,6 +13,10 @@
 // destroy-after-loss: C reads an application buffer with long GPU copies. When the host wait reports the loss, the
 //   test destroys that buffer at once. Exit 0 when C either completed before the report or never ran, 1 when C had
 //   started and not finished when the loss was reported.
+// event-wait: C waits a VkEvent that the host sets only after submission, which Vulkan allows. A host wait must
+//   report the loss while the event is still unset, and vkGetEventStatus must never report the event set by the
+//   loss. Exit 0 when both hold, 1 when the wait times out or the event is reported set; the host then sets the
+//   event, as the application would, so that the lost submission can end.
 // Exit 2 for a setup failure, 3 when the device lacks a capability.
 #import <Metal/Metal.h>
 #include <objc/runtime.h>
@@ -167,7 +171,7 @@ VkSemaphore importedSemaphore(Context& c, id<MTLSharedEvent> event, bool timelin
 	return semaphore;
 }
 
-// A submission on queue B that waits the semaphore (at waitValue for a timeline), then records its commands.
+// A submission on queue B that waits the semaphore, if any (at waitValue for a timeline), then records its commands.
 template <typename Record>
 VkFence submitWaiting(Context& c, VkCommandPool pool, VkSemaphore semaphore, uint64_t waitValue, Record record) {
 	VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -185,11 +189,11 @@ VkFence submitWaiting(Context& c, VkCommandPool pool, VkSemaphore semaphore, uin
 	check(vkCreateFence(c.device, &fenceInfo, nullptr, &fence), "vkCreateFence");
 	VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
 	VkTimelineSemaphoreSubmitInfo values{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
-	values.waitSemaphoreValueCount = 1;
+	values.waitSemaphoreValueCount = semaphore ? 1 : 0;
 	values.pWaitSemaphoreValues = &waitValue;
 	VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
 	submit.pNext = &values;
-	submit.waitSemaphoreCount = 1;
+	submit.waitSemaphoreCount = semaphore ? 1 : 0;
 	submit.pWaitSemaphores = &semaphore;
 	submit.pWaitDstStageMask = &stage;
 	submit.commandBufferCount = 1;
@@ -369,17 +373,64 @@ int destroyAfterLoss(Context& c) {
 	return !inFlightAtReport && fenceResult == VK_ERROR_DEVICE_LOST ? 0 : 1;
 }
 
+int eventWait(Context& c) {
+	VkEventCreateInfo eventInfo{VK_STRUCTURE_TYPE_EVENT_CREATE_INFO};
+	VkEvent event;
+	check(vkCreateEvent(c.device, &eventInfo, nullptr, &event), "vkCreateEvent");
+	Buffer marker = c.buffer(64, true);
+	VkCommandPool pool = commandPool(c);
+	VkFence fence = submitWaiting(c, pool, VK_NULL_HANDLE, 0, [&](VkCommandBuffer cb) {
+		vkCmdWaitEvents(cb, 1, &event, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, nullptr, 0, nullptr, 0, nullptr);
+		vkCmdFillBuffer(cb, marker.buffer, 0, 4, kMarker);
+	});
+	sleepMs(100);
+	VkResult fenceBeforeLoss = vkGetFenceStatus(c.device, fence);
+	// Reads the event status until the loss is reported, or until the first host wait returns.
+	std::atomic<bool> stop{false};
+	int setSeen = 0, reads = 0;
+	VkResult lastStatus = VK_EVENT_RESET;
+	std::thread poller([&] {
+		while (!stop && lastStatus != VK_ERROR_DEVICE_LOST) {
+			lastStatus = vkGetEventStatus(c.device, event);
+			setSeen += lastStatus == VK_EVENT_SET;
+			++reads;
+		}
+	});
+	sleepMs(10);
+	c.markLost(c.device);
+	auto start = std::chrono::steady_clock::now();
+	VkResult lossResult = vkWaitForFences(c.device, 1, &fence, VK_TRUE, 3000000000ull);
+	double waitMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+	uint32_t markerAtReport = marker.mapped[0];
+	stop = true;
+	poller.join();
+	vkSetEvent(c.device, event);
+	VkResult lateResult = vkWaitForFences(c.device, 1, &fence, VK_TRUE, 5000000000ull);
+	std::printf("fence_before_loss=%d wait_after_loss=%d in %.0f ms marker_C_at_report=%08x status_reads=%d set_seen=%d last_status=%d wait_after_set=%d\n",
+				int(fenceBeforeLoss), int(lossResult), waitMs, markerAtReport, reads, setSeen, int(lastStatus), int(lateResult));
+	bool reported = lossResult == VK_ERROR_DEVICE_LOST;
+	std::printf("EVENT_WAIT %s: %s, %s\n", reported && !setSeen ? "PASS" : "FAIL",
+				reported ? "loss reported while the event was unset" : "loss not reported while the event was unset",
+				setSeen ? "event reported set by the loss" : "event never reported set");
+	vkDestroyFence(c.device, fence, nullptr);
+	vkDestroyCommandPool(c.device, pool, nullptr);
+	c.destroy(marker);
+	vkDestroyEvent(c.device, event, nullptr);
+	return reported && !setSeen && fenceBeforeLoss == VK_NOT_READY ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
 	std::string mode = argc == 2 ? argv[1] : "";
-	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss") {
-		std::fprintf(stderr, "usage: %s counter-race|binary-generation|destroy-after-loss\n", argv[0]);
+	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss" && mode != "event-wait") {
+		std::fprintf(stderr, "usage: %s counter-race|binary-generation|destroy-after-loss|event-wait\n", argv[0]);
 		return 64;
 	}
 	@autoreleasepool {
 		Context c = createContext();
-		int rc = mode == "counter-race" ? counterRace(c) : mode == "binary-generation" ? binaryGeneration(c) : destroyAfterLoss(c);
+		int rc = mode == "counter-race" ? counterRace(c) : mode == "binary-generation" ? binaryGeneration(c)
+			: mode == "event-wait" ? eventWait(c) : destroyAfterLoss(c);
 		std::fflush(stdout);
 		// The device is lost: destroying it is still valid, idle waits would only report the loss.
 		vkDestroyDevice(c.device, nullptr);

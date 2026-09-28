@@ -5,7 +5,8 @@
 # Each mode runs in synchronous and asynchronous queue submission, several times, one run at a time under gtimeout,
 # with Metal API and shader validation. The executable loads the library through @executable_path/lib, so the same
 # binary runs against another library for before/after comparisons.
-# Usage: run-pervertex-loss-tests.sh <libMoltenVK test build> <output directory> <before|after> [repeats]
+# "before" expects each mode to show its defect (exit 1), "after" expects each to pass (exit 0).
+# Usage: run-pervertex-loss-tests.sh <libMoltenVK test build> <output directory> <before|after> [repeats [modes...]]
 set -euo pipefail
 test_dir=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$test_dir/../.." && pwd)
@@ -13,6 +14,8 @@ library=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 output=$(mkdir -p "$2" && cd "$2" && pwd)
 side=${3:?before or after}
 repeats=${4:-3}
+modes=("${@:5}")
+(( ${#modes[@]} )) || modes=(counter-race binary-generation destroy-after-loss event-wait)
 [[ $side == before || $side == after ]] || { echo 'side must be before or after'; exit 64; }
 mkdir -p "$output/bin/lib" "$output/runs"
 exec > >(tee "$output/loss.log") 2>&1
@@ -22,9 +25,8 @@ xcrun clang++ -arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-fiel
 shasum -a 256 "$library" "$output/bin/pervertex-loss" "$test_dir/PerVertexLossTests.mm" > "$output/INPUTS.sha256"
 echo 'case,mode,run,expected,actual,verdict' > "$output/results.csv"
 failures=0
-# Before: each mode shows its defect (exit 1). After: each passes (exit 0).
 expected=$([[ $side == before ]] && echo 1 || echo 0)
-for name in counter-race binary-generation destroy-after-loss; do
+for name in "${modes[@]}"; do
 	for mode in sync async; do
 		for run in $(seq 1 "$repeats"); do
 			log=$output/runs/$name-$mode-$run.log rc=0
@@ -36,7 +38,7 @@ for name in counter-race binary-generation destroy-after-loss; do
 			grep -q 'Metal API Validation Enabled' "$log" || verdict=FAIL
 			[[ $verdict == PASS ]] || failures=$((failures + 1))
 			echo "$name,$mode,$run,$expected,$rc,$verdict" >> "$output/results.csv"
-			printf '%-20s %-5s %s exit=%s %s | %s\n' "$name" "$mode" "$run" "$rc" "$verdict" "$(grep -E '^(COUNTER_RACE|BINARY_GENERATION|DESTROY_AFTER_LOSS)' "$log" | head -1)"
+			printf '%-20s %-5s %s exit=%s %s | %s\n' "$name" "$mode" "$run" "$rc" "$verdict" "$(grep -E '^(COUNTER_RACE|BINARY_GENERATION|DESTROY_AFTER_LOSS|EVENT_WAIT)' "$log" | head -1)"
 		done
 	done
 done
