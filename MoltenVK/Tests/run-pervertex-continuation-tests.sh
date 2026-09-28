@@ -2,10 +2,12 @@
 # Copyright (c) 2026 Jean-Philippe Meunier
 # SPDX-License-Identifier: Apache-2.0
 # Short, sequential M4 oracles for PerVertexKHR indirect continuation and queue publication, under Metal API and GPU
-# validation (the binary semaphore oracles run without it, as recorded). Each executable loads the library through
+# validation. Each executable loads the library through
 # @executable_path/lib, so the same binaries can be rerun against another library for before/after comparisons.
-# Usage: run-pervertex-continuation-tests.sh <libMoltenVK.dylib> <output directory> <before|after> [repeats] [tes]
-# "tes" runs the PerVertex TES cases instead, which need a library built with the test-only TES admission.
+# Usage: run-pervertex-continuation-tests.sh <libMoltenVK.dylib> <output directory> <before|after> [repeats] [tes|loss|binary]
+# "tes" runs the PerVertex TES cases instead, which need a library built with the test-only TES admission; "loss" the
+# real device loss cases; "binary" only the binary semaphore oracles, whose "before" is the Metal event pairing
+# before execution-order signals (81bf3bb3 and earlier).
 # "before" records the expected outcomes of the parent runtime (legal draws beyond the private capacity lose the
 # device, dependent work reports success after that loss); "after" requires the continuation outcomes. An expected
 # value may list alternatives ("1|2"): in the parent runtime the loss is published by a completion handler that races
@@ -22,7 +24,7 @@ output=$(mkdir -p "$2" && cd "$2" && pwd)
 mode=$3
 repeats=${4:-0}
 suite=${5:-indirect}
-[[ $suite == indirect || $suite == tes || $suite == loss ]] || { echo "suite must be indirect, tes or loss"; exit 64; }
+[[ $suite == indirect || $suite == tes || $suite == loss || $suite == binary ]] || { echo "suite must be indirect, tes, loss or binary"; exit 64; }
 [[ $mode == before || $mode == after ]] || { echo "mode must be before or after"; exit 64; }
 mkdir -p "$output/shaders" "$output/runs" "$output/bin/lib"
 exec > >(tee "$output/oracles.log") 2>&1
@@ -87,6 +89,29 @@ async=(MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 MVK_CONFIG_PREFILL_METAL_COMMAND_B
 same=(PERVERTEX_TEST_DEPENDENT_SAME_QUEUE=1)
 # Loss suite: a real device loss (a huge indirect draw) whose Metal wait release must neither let a dependent submission
 # run after its fence reported the loss, nor release an external Metal client of the next binary semaphore generation.
+# 5. Binary semaphore oracles. B/A/C/D: legal order A, C, B, D. Before, a Metal event
+#    semaphore gave each signal the generation current when it was encoded, so B's signal could not reach D's wait and
+#    the oracle needed its teardown rescue (rescued=1). After, a signal takes its value in execution order.
+#    With an imported event, every signal is set from the host on completion. With MoltenVK's own event, B is encoded
+#    in Metal (no other signal pending) and A, set from the host first, preempts it (see completeSubmissionSignal()).
+#    Asynchronous and synchronous submits; imported reuse must stay green in both.
+# CPU callback semaphores signal on completion, in execution order, and pair it correctly (no imported event there).
+binary_cases() {
+	local r=${1:-}
+	run binary-bacd$r 1 0 1 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 -- pervertex-binary-order
+	run binary-bacd-sync$r 1 0 1 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=1 -- pervertex-binary-order
+	run binary-bacd-preempted$r 1 0 1 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 PERVERTEX_BINARY_NO_IMPORT=1 -- pervertex-binary-order
+	run binary-bacd-preempted-sync$r 1 0 1 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=1 PERVERTEX_BINARY_NO_IMPORT=1 -- pervertex-binary-order
+	run binary-bacd-callback$r 0 0 1 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE=3 PERVERTEX_BINARY_NO_IMPORT=1 -- pervertex-binary-order
+	run binary-imported-reuse$r 0 0 1 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 -- pervertex-binary-order --imported-reuse
+	run binary-imported-reuse-sync$r 0 0 1 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=1 -- pervertex-binary-order --imported-reuse
+}
+if [[ $suite == binary ]]; then
+	for ((i = 0; i <= repeats; ++i)); do binary_cases "-r$i"; done
+	shasum -a 256 "$output"/runs/* "$output/results.csv" > "$output/EVIDENCE.sha256"
+	echo "PERVERTEX_CONTINUATION $mode binary PASS: $(($(wc -l < "$output/results.csv") - 1)) cases"
+	exit 0
+fi
 # Same-queue synchronous submission reserves the dependent wait at vkQueueSubmit and never encodes it.
 if [[ $suite == loss ]]; then
 	longdep=(PERVERTEX_TEST_DEPENDENT_FIRST=1 PERVERTEX_TEST_LONG_DEPENDENT=1)
@@ -145,14 +170,7 @@ run no-wait-timeline-huge "0|1" 0 1 "${async[@]}" "${common[@]}" "${same[@]}" PE
 run no-wait-timeline-huge-sync "0|1" 0 1 "${sync[@]}" "${common[@]}" "${same[@]}" PERVERTEX_TEST_DEPENDENT_NO_WAIT=1 -- pervertex-indirect-gpu "$output/shaders" draw u32 huge compute no-wait-huge-sync
 # 4. Deferred failure from the GPU index range check, same-queue C in synchronous mode.
 run index-oob-sync 0 0 1 "${sync[@]}" "${common[@]}" "${same[@]}" -- pervertex-indirect-gpu "$output/shaders" indexed u32 index-oob compute index-oob
-# 5. Binary semaphore oracles, unchanged scenarios (asynchronous submits, no Metal validation, as archived):
-#    B/A/C/D is a preexisting pairing defect and must keep its outcome; imported reuse must stay green.
-# B/A/C/D: legal order A, C, B, D. Metal event semaphores assign one generation per wait in submission order, but every
-# pending signal targets the current one, so B's signal cannot reach D's wait: a known defect of MoltenVK, not fixed.
-run binary-bacd defect:1 defect:1 0 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 -- pervertex-binary-order
-# CPU callback semaphores signal on completion, in execution order, and pair it correctly (no imported event there).
-run binary-bacd-callback 0 0 0 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE=3 PERVERTEX_BINARY_NO_IMPORT=1 -- pervertex-binary-order
-run binary-imported-reuse 0 0 0 MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 -- pervertex-binary-order --imported-reuse
+binary_cases
 # 5b. A fragment reading PerVertexKHR inputs and BaryCoordKHR together: before SPIRV-Cross 6af5a67f its pipeline
 #     failed to compile (a false collision of the barycentric private Location with a builtin input mapping).
 run portable-bary-single-sync 1 0 1 "${sync[@]}" "${common[@]}" "${same[@]}" PERVERTEX_TEST_PORTABLE=1 -- pervertex-indirect-gpu "$output/shaders" draw u32 single compute portable-bary

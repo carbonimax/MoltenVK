@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Regression oracles for a legal two-queue binary semaphore order and reuse after an external Metal signal.
 // Import an MTLSharedEvent so a failed Metal wait can be released during teardown. PERVERTEX_BINARY_NO_IMPORT=1 keeps
-// the semaphore MoltenVK's own, for semaphore styles that refuse an imported event (CPU callbacks).
+// the semaphore MoltenVK's own: for semaphore styles that refuse an imported event (CPU callbacks), and for Metal event
+// semaphores whose signals MoltenVK alone sets. There, a MoltenVK test build's mvkTestMarkDeviceLost() releases a
+// failed Metal wait during teardown, through the device loss rescue.
 #import <Metal/Metal.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_metal.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 #include <vector>
 
 static void check(VkResult result, const char* step) {
@@ -131,6 +134,12 @@ int main(int argc, char** argv) {
     check(vkCreateSemaphore(device, &binaryInfo, nullptr, &s), "binary semaphore");
     check(vkCreateSemaphore(device, &timelineInfo, nullptr, &t), "timeline T");
     check(vkCreateSemaphore(device, &timelineInfo, nullptr, &gate), "timeline gate");
+    // Teardown only: releases a Metal wait left blocked by a failed pairing. A rescue is a test failure.
+    auto rescue = [&] {
+        if (!noImport) { sharedEvent.signaledValue = 1024; return; }
+        auto markLost = reinterpret_cast<void (*)(VkDevice)>(dlsym(RTLD_DEFAULT, "mvkTestMarkDeviceLost"));
+        if (markLost) markLost(device);
+    };
     VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     VkFence fb, fc, fd;
     check(vkCreateFence(device, &fenceInfo, nullptr, &fb), "fence B");
@@ -185,7 +194,7 @@ int main(int argc, char** argv) {
     VkResult c = vkWaitForFences(device, 1, &fc, VK_TRUE, 2000000000ull);
     bool rescuedC = c != VK_SUCCESS;
     if (rescuedC) {
-        sharedEvent.signaledValue = 1024;
+        rescue();
         c = vkWaitForFences(device, 1, &fc, VK_TRUE, 1000000000ull);
         if (c != VK_SUCCESS) { std::fprintf(stderr, "C remains blocked after rescue: %d\n", int(c)); return 1; }
     }
@@ -201,7 +210,7 @@ int main(int argc, char** argv) {
     bool rescued = d != VK_SUCCESS;
     if (rescued) {
         // Teardown only: release a stuck native Metal wait before it hits the GPU watchdog.
-        sharedEvent.signaledValue = 1024;
+        rescue();
         d = vkWaitForFences(device, 1, &fd, VK_TRUE, 2000000000ull);
     }
     std::printf("B=%d D_after_B=%d rescued=%d\n", int(b), int(d), int(rescued));
