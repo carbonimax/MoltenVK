@@ -97,8 +97,12 @@ VkResult MVKQueue::submit(MVKQueueSubmission* qSubmit) {
 	// The submissions will ensure a misconfiguration will be safe to execute.
 	VkResult rslt = qSubmit->getConfigurationResult();
 	MVKDevice* device = _device;
-	std::unique_lock lock(_execQueueMutex);
 	dispatch_queue_t execQueue = _execQueue;
+	// Synchronous submits run on the caller, unless this submission, or one still pending on the worker, must continue.
+	// Only this call, externally synchronized per queue, increments the job count: a zero read stays valid.
+	if ( !execQueue && !qSubmit->needsWorker() && !_execQueueJobCount ) { return execute(device, qSubmit); }
+
+	std::unique_lock lock(_execQueueMutex);
 	bool usesWorker = !execQueue && (qSubmit->needsWorker() || _execQueueJobCount);
 	if (usesWorker) {
 		// With synchronous submits, a submission that waits for its own Metal work would block the caller, which may
