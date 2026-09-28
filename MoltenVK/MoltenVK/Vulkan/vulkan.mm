@@ -2481,13 +2481,14 @@ MVK_PUBLIC_VULKAN_SYMBOL VkResult vkGetSemaphoreCounterValue(
 
 	MVKTraceVulkanCallStart();
 	// During a device loss, the release of Metal waits may raise the counter past work that never ran, while
-	// submissions may still be reading their command buffers: report the loss once it is published.
+	// submissions may still be reading their command buffers: report the loss once it is published. The counter is
+	// read before the loss is checked, and the fence orders the two reads: a value raised by that release was written
+	// after the loss began, so the check that follows sees the loss.
 	MVKDevice* mvkDev = MVKDevice::getMVKDevice(device);
+	uint64_t value = ((MVKTimelineSemaphore*)semaphore)->getCounterValue();
+	std::atomic_thread_fence(std::memory_order_seq_cst);
 	VkResult rslt = mvkDev->isLosing() ? mvkDev->getHostWaitResult(true, UINT64_MAX) : mvkDev->getConfigurationResult();
-	if (rslt == VK_SUCCESS) {
-		auto* mvkSem4 = (MVKTimelineSemaphore*)semaphore;
-		*pValue = mvkSem4->getCounterValue();
-	}
+	if (rslt == VK_SUCCESS) { *pValue = value; }
 	MVKTraceVulkanCallEnd();
 	return rslt;
 }
