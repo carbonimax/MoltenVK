@@ -194,8 +194,6 @@ VkResult MVKQueue::waitIdle(MVKCommandUse cmdUse) {
 		[mtlCmdBuff commit];
 		[mtlCmdBuff waitUntilCompleted];
 	}
-	// The Metal sentinel does not wait for the ordered CPU retirement tasks.
-	dispatch_group_wait(_completionGroup, DISPATCH_TIME_FOREVER);
 	return _device->getHostWaitResult(true, UINT64_MAX);
 }
 
@@ -324,9 +322,7 @@ MVKQueue::MVKQueue(MVKDevice* device, MVKQueueFamily* queueFamily, uint32_t inde
 	_priority = priority;
 	_globalPriority = globalPriority;
 
-	_completionGroup = dispatch_group_create();
 	initName();
-	_retirementQueue = dispatch_queue_create((getName() + "-Retirement").c_str(), DISPATCH_QUEUE_SERIAL);
 	initExecQueue();
 	initMTLCommandQueue();
 }
@@ -379,8 +375,6 @@ void MVKQueue::initMTLCommandQueue() {
 
 MVKQueue::~MVKQueue() {
 	destroyExecQueue();
-	dispatch_release(_completionGroup);
-	dispatch_release(_retirementQueue);
 	_submissionCaptureScope->destroy();
 	_device->removeResidencySet(_mtlQueue);
 
@@ -666,47 +660,20 @@ VkResult MVKQueueCommandBufferSubmission::commitActiveMTLCommandBuffer(bool sign
 	}
 
 	uint64_t startTime = getPerformanceTimestamp();
-	// Encoding/commit is serial per VkQueue (external synchronization or _execQueue).
-	// A successor, even ordinary, cannot publish its fence before a pending status check.
-	_needsOrderedRetirement |= _queue->_pendingRetirements.load(std::memory_order_acquire) != 0;
-	bool orderedRetirement = _needsOrderedRetirement;
+	[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer> mtlCB) {
+		addPerformanceInterval(getPerformanceStats().queue.mtlCommandBufferExecution, startTime);
+		if (signalCompletion) { this->finish(); }	// Must be the last thing the completetion callback does.
+	}];
+
+	// Retrieve the result before committing MTLCommandBuffer, because finish() will destroy this instance.
 	VkResult rslt = mtlCmdBuff ? getConfigurationResult() : VK_ERROR_OUT_OF_POOL_MEMORY;
-	if (orderedRetirement) {
-		MVKQueue* queue = _queue;
-		MVKDevice* device = getDevice();
-		dispatch_group_t completionGroup = queue->_completionGroup;
-		queue->retain();
-		device->retain();
-		dispatch_retain(completionGroup);
-		queue->_pendingRetirements.fetch_add(1, std::memory_order_relaxed);
-		dispatch_group_enter(completionGroup);
-		[mtlCmdBuff commit];
-		// Enqueue here, in commit order, never from an unordered Metal callback.
-		// Transfer the active buffer's retain to this task, including prefilled buffers.
-		dispatch_async(queue->_retirementQueue, ^{ @autoreleasepool {
-			// Apple: waits for GPU execution "and all of its completion handlers".
-			// https://developer.apple.com/documentation/metal/mtlcommandbuffer/waituntilcompleted().md
-			[mtlCmdBuff waitUntilCompleted];
-			if (mtlCmdBuff) { addPerformanceInterval(getPerformanceStats().queue.mtlCommandBufferExecution, startTime); }
-			[mtlCmdBuff release];
-			// A nil final buffer still follows every earlier retirement on this queue.
-			if (signalCompletion) { finish(); } // Last access to this submission.
-			queue->_pendingRetirements.fetch_sub(1, std::memory_order_release);
-			queue->release();
-			device->release();
-			dispatch_group_leave(completionGroup);
-			dispatch_release(completionGroup);
-		} });
-	} else {
-		// No outstanding retirement: retain the ordinary inline completion path.
-		[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer> mtlCB) {
-			addPerformanceInterval(getPerformanceStats().queue.mtlCommandBufferExecution, startTime);
-			if (signalCompletion) { finish(); } // Last access to this submission.
-		}];
-		[mtlCmdBuff commit];
-		[mtlCmdBuff release];
-		if (signalCompletion && !mtlCmdBuff) { finish(); }
-	}
+	[mtlCmdBuff commit];
+	[mtlCmdBuff release];		// retained
+
+	// If we need to signal completion, but an error occurred and the MTLCommandBuffer
+	// was not created, call the finish() function directly.
+	if (signalCompletion && !mtlCmdBuff) { finish(); }
+
 	return rslt;
 }
 
@@ -716,9 +683,6 @@ VkResult MVKQueueCommandBufferSubmission::commitActiveMTLCommandBuffer(bool sign
 // this may occur if a GPU semaphore here triggers another submission that triggers a fence,
 // and the app immediately destroys objects. Rare, but it has been encountered.
 void MVKQueueCommandBufferSubmission::finish() {
-
-	// Before any fence signals, a refused TES draw loses the device.
-	reportPerVertexTessFailures();
 
 	// Performed here instead of as part of execute() for rare case where app destroys queue
 	// immediately after a waitIdle() is cleared by fence below, taking the capture scope with it.
@@ -822,27 +786,11 @@ VkResult MVKQueueFullCommandBufferSubmission<N>::reservePerVertexScratch(std::un
 		VkResult result = cbInfo.commandBuffer->reservePerVertexScratch(cbInfo.perVertexScratch, prefilledExecutions);
 		if (result != VK_SUCCESS) { return result; }
 		for (auto& scratch : cbInfo.perVertexScratch) {
-			// TES inspects its GPU status in finish(). Indirect draws decide a loss while encoding, before any
-			// successor is committed, so their completion needs no ordering.
-			if (scratch->tessTopologyPipeline) { _needsOrderedRetirement = true; }
-			if (scratch->indirectCapacity) { _needsContinuation = true; }
+			// Indirect plans and TES topologies are checked on the GPU while encoding, which waits for them.
+			if (scratch->indirectCapacity || scratch->tessTopologyPipeline) { _needsContinuation = true; }
 		}
 	}
 	return VK_SUCCESS;
-}
-
-// All Metal command buffers of this submission completed, so the GPU statuses are final. Checked here rather
-// than in a completed handler of the draw, since Metal does not document the order of completed handlers.
-template <size_t N>
-void MVKQueueFullCommandBufferSubmission<N>::reportPerVertexTessFailures() {
-	for (auto& cbInfo : _cmdBuffers) {
-		for (auto& scratch : cbInfo.perVertexScratch) {
-			if (!scratch->getTessEvalStatus()) { continue; }
-			reportError(VK_ERROR_DEVICE_LOST, "PerVertex TES draw was not rendered: a patch has tessellation levels without a proven topology.");
-			getDevice()->markLost();
-			return;
-		}
-	}
 }
 
 template <size_t N>

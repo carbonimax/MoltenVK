@@ -360,11 +360,21 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 // MVKPipeline.mm). VS and TCS run in compute as for ordinary tessellation, the TCS writing float32 levels.
 // A GPU pass classifies each patch from those levels and lays out its proven Metal topology as ordered
 // corner records; TES runs in compute over those records and the replay draws them. The CPU never reads
-// or infers a level. Levels without a proven topology refuse the whole draw on the GPU, and the
-// submission reports the device lost; VS/TCS effects of that draw have already executed by then.
+// or infers a level. The encoder waits for the classification: levels without a proven topology lose the
+// device before any later command or signal of the submission is encoded. VS/TCS effects of that draw have
+// already executed by then.
 static void encodePerVertexTessEval(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline, uint32_t vertexCount) {
+	auto lose = [&](const char* reason) {
+		cmdEncoder->reportError(VK_ERROR_DEVICE_LOST, "PerVertex TES draw was not rendered: %s.", reason);
+		cmdEncoder->getDevice()->markLost();
+		cmdEncoder->stopEncoding();
+	};
+	// Encoding runs after vkQueueSubmit() returned: a draw that cannot be encoded also loses the device, so that
+	// the submission never completes without it.
 	auto reject = [&](VkResult result, const char* message) {
 		cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(result, "PerVertex TES %s", message));
+		cmdEncoder->getDevice()->markLost();
+		cmdEncoder->stopEncoding();
 	};
 	if (const char* error = cmdEncoder->getIndexedPerVertexAttachmentError()) { reject(VK_ERROR_FEATURE_NOT_PRESENT, error); return; }
 	uint32_t patches = vertexCount / 3;
@@ -416,6 +426,12 @@ static void encodePerVertexTessEval(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 		[compute memoryBarrierWithScope:MTLBarrierScopeBuffers];
 	}
 	computeState._exists.descriptorSetData.reset();
+	if ( !cmdEncoder->awaitEncodedWork() ) {
+		if ( !cmdEncoder->getDevice()->isLosing() ) { lose("its topology pass did not complete"); }
+		return;
+	}
+	if (scratch->getTessEvalStatus()) { lose("a patch has tessellation levels without a proven topology"); return; }
+	compute = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
 	// TES reads the record count the generator wrote; surplus threads of the maximum grid return at once.
 	cmdEncoder->getState().prepareTessEvalDispatch(compute, *cmdEncoder);
 	const auto& tes = pipeline->getImplicitBuffers(kMVKShaderStageTessEval).ids;
@@ -518,7 +534,12 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
 
 	auto* pipeline = cmdEncoder->getGraphicsPipeline();
 	if (pipeline->usesPerVertexTessEval()) {
-		if (_instanceCount != 1 || _firstVertex || _firstInstance || _drawIndex) { cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "PerVertex TES draw requires one instance, zero first vertex/instance and DrawID.")); return; }
+		if (_instanceCount != 1 || _firstVertex || _firstInstance || _drawIndex) {
+			cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "PerVertex TES draw requires one instance, zero first vertex/instance and DrawID."));
+			cmdEncoder->getDevice()->markLost();
+			cmdEncoder->stopEncoding();
+			return;
+		}
 		encodePerVertexTessEval(cmdEncoder, pipeline, _vertexCount);
 		return;
 	}

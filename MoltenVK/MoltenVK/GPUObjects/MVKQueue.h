@@ -150,9 +150,6 @@ protected:
 	std::string _name;
 	dispatch_queue_t _execQueue;
 	dispatch_queue_t _workerQueue = nullptr;
-	dispatch_group_t _completionGroup;
-	dispatch_queue_t _retirementQueue;
-	std::atomic<uint32_t> _pendingRetirements{0};
 	std::mutex _execQueueMutex;
 	std::condition_variable _execQueueConditionVariable;
 	std::atomic<uint32_t> _execQueueJobCount{0};
@@ -297,12 +294,8 @@ protected:
 	VkResult commitActiveMTLCommandBuffer(bool signalCompletion = false);
 	void finish() override;
 	virtual void submitCommandBuffers() {}
-	virtual void reportPerVertexTessFailures() {}
 
-	// Set by scratch preflight or by following an outstanding retirement on this queue.
-	// Once selected, all remaining commits of this submission use ordered retirement.
-	bool _needsOrderedRetirement = false;
-	// Set by scratch preflight: encoding waits on the GPU for a PerVertexKHR indirect plan.
+	// Set by scratch preflight: encoding waits on the GPU for a PerVertexKHR indirect plan or TES topology.
 	bool _needsContinuation = false;
 	MVKCommandEncodingContext _encodingContext;
 	MVKSmallVector<MVKSemaphoreSubmitInfo> _signalSemaphores;
@@ -322,7 +315,6 @@ class MVKQueueFullCommandBufferSubmission : public MVKQueueCommandBufferSubmissi
 
 public:
 	VkResult reservePerVertexScratch(std::unordered_set<MVKCommandBuffer*>& prefilledExecutions) override;
-	void reportPerVertexTessFailures() override;
 	MVKQueueFullCommandBufferSubmission(MVKQueue* queue, 
 										const VkSubmitInfo2* pSubmit,
 										VkFence fence,
