@@ -16,11 +16,17 @@ root=$(cd "$test_dir/../.." && pwd)
 library=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 output=$(mkdir -p "$2" && cd "$2" && pwd)
 side=${3:?reference, before or after}
+# The runner runs again as a child whose output tee records, so that the log is complete when this parent hashes it.
+if [[ -z ${PERVERTEX_RUNNER_CHILD:-} ]]; then
+	rc=0
+	PERVERTEX_RUNNER_CHILD=1 bash "$0" "$@" 2>&1 | tee "$output/split.log" || rc=$?
+	(cd "$output" && shasum -a 256 results.csv split.log runs/*.log > EVIDENCE.sha256)
+	exit "$rc"
+fi
 shift 3
 variants=("$@")
 [[ ${#variants[@]} -gt 0 ]] || variants=(memoryless-depth memoryless-stencil msaa msaa-memoryless indirect-count-0 indirect-count-1)
 mkdir -p "$output/bin/lib" "$output/runs" "$output/shaders"
-exec > >(tee "$output/split.log") 2>&1
 ln -sf "$library" "$output/bin/lib/libMoltenVK.1.dylib"
 for stage in vert frag; do
 	glslangValidator -V --target-env vulkan1.1 "$test_dir/pervertex-split.$stage" -o "$output/shaders/split.$stage.spv" > /dev/null
@@ -51,6 +57,5 @@ for variant in "${variants[@]}"; do
 	echo "$variant,$expected,$rc,$verdict" >> "$output/results.csv"
 	printf '%-20s expected=%-8s exit=%-4s %s | %s\n' "$variant" "$expected" "$rc" "$verdict" "$(grep -E '^SPLIT_ATTACHMENT|failed assertion|^submit=' "$log" | tr '\n' ' ' | cut -c1-160)"
 done
-(cd "$output" && shasum -a 256 results.csv split.log runs/*.log > EVIDENCE.sha256)
 echo "SPLIT ATTACHMENTS $side: $failures unexpected"
 exit $(( failures ? 1 : 0 ))

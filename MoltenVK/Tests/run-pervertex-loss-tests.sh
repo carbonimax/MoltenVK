@@ -17,8 +17,14 @@ repeats=${4:-3}
 modes=("${@:5}")
 (( ${#modes[@]} )) || modes=(counter-race binary-generation destroy-after-loss event-wait)
 [[ $side == before || $side == after ]] || { echo 'side must be before or after'; exit 64; }
+# The runner runs again as a child whose output tee records, so that the log is complete when this parent hashes it.
+if [[ -z ${PERVERTEX_RUNNER_CHILD:-} ]]; then
+	rc=0
+	PERVERTEX_RUNNER_CHILD=1 bash "$0" "$@" 2>&1 | tee "$output/loss.log" || rc=$?
+	(cd "$output" && shasum -a 256 results.csv loss.log runs/*.log > EVIDENCE.sha256)
+	exit "$rc"
+fi
 mkdir -p "$output/bin/lib" "$output/runs"
-exec > >(tee "$output/loss.log") 2>&1
 ln -sf "$library" "$output/bin/lib/libMoltenVK.1.dylib"
 xcrun clang++ -arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -I"$root/External/Vulkan-Headers/include" "$test_dir/PerVertexLossTests.mm" \
 	"$library" -Wl,-rpath,@executable_path/lib -framework Metal -framework Foundation -o "$output/bin/pervertex-loss"
@@ -42,6 +48,5 @@ for name in "${modes[@]}"; do
 		done
 	done
 done
-(cd "$output" && shasum -a 256 results.csv loss.log runs/*.log > EVIDENCE.sha256)
 echo "LOSS ORACLES $side: $failures unexpected"
 exit $(( failures ? 1 : 0 ))
