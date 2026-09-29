@@ -163,7 +163,7 @@ La mutation montre ce qu'aurait fait un correctif qui retirerait seulement le co
 
 Note sur les empreintes des bibliothèques. Deux constructions Debug du même runtime n'ont pas le même sha256 quand leurs chemins de source diffèrent, par exemple l'arbre de travail et l'archive du runner. Chaque bibliothèque est donc désignée par son propre `PROVENANCE.txt`.
 
-## 10. Ce qui reste hors du contrat (à `547c3871`)
+## 10. Ce qui reste hors du contrat (à `547c3871` ; état courant au § 14)
 
 - **Pipeline.**
   - Les domaines quads et isolines, les espacements fractionnaires, le mode point et plus de 3 points de contrôle.
@@ -178,6 +178,105 @@ Note sur les empreintes des bibliothèques. Deux constructions Debug du même ru
 - **Niveaux.** Les niveaux non uniformes, au-dessus de 3, ou avec un niveau intérieur NaN : le device est perdu à la soumission.
 - **Non prouvé.**
   - Un module SPIR-V dont plusieurs points d'entrée ont le même modèle d'exécution. Les noms sont bien transmis, mais aucun oracle n'en construit un.
+  - La mesure du coût du dispatch supplémentaire.
+- **Autres GPU.** Seul un M4 Pro est prouvé. M1, M3 et Intel restent pour la fin.
+
+L'extension reste fermée par défaut et n'est pas prête pour upstream.
+
+## 11. Deux points d'entrée TCS dans un même module, en test seul (`e3bc0067`)
+
+Astra a validé les points d'entrée renommés dans leur portée testée. Elle a demandé de vérifier, en test seul, un module qui contient deux points d'entrée du même étage, dont un seul utilise un descripteur.
+
+**Le montage.**
+- `spirv-link` réunit dans un seul module TCS deux points d'entrée : `tescDescriptor`, qui lit un uniform buffer, puis `tescMain`, qui n'en lit pas.
+- `tescDescriptor` vient en premier. C'est là que tomberait une réflexion qui ignore `pName`, puisque SPIRV-Cross choisit par défaut le premier point d'entrée.
+- `entry-shared-module` choisit `tescMain` : l'image doit concorder avec le pipeline ordinaire et être égale à celle des shaders nommés `main`.
+- `reject-descriptor-shared` choisit `tescDescriptor` : le pipeline doit être refusé.
+
+**Résultat : vert sans correctif**, sur le runtime de `547c3871` (`build/astra/tes-entry-shared-e3bc0067/`).
+- Pour les deux enroulements, `tescMain` rend sans aucun pixel en écart face au pipeline ordinaire.
+- `tescDescriptor` est refusé à cause de son descripteur.
+
+**Mutation `mutation-entry-default`.** Elle retire le `set_entry_point` de `mvkUsesResources()`, qui réfléchit alors le premier point d'entrée. `tescMain` est refusé à tort : sortie 1, « Create pipeline interp-named: -8 ».
+
+Runner TES complet à `e3bc0067` : **111/111 PASS**, `EVIDENCE.sha256` de 899 entrées (`build/astra/tes-runner-e3bc0067/`).
+
+## 12. Le cache de pipeline (oracle `a3b0e7f1` et `79ef3114`, correctif `b35f359e`)
+
+**Le mécanisme existant suffit.** Le cache de MoltenVK sérialise déjà ce dont la capture TES PerVertex a besoin :
+- les options `tessellation_factors_float32` et `tese_as_compute` ;
+- `exportCapturedVertexLayout` dans la configuration ;
+- `capturedVertexLayout` dans les résultats de conversion.
+
+Le rejeu reste compilé à chaque création, comme pour les autres pipelines PerVertexKHR portables. Le correctif retire seulement la garde (`MVKPipeline.mm:1416` à `547c3871`).
+
+**L'oracle `cache-reuse`**, qui demande la réponse de création de pipeline (`VK_EXT_pipeline_creation_feedback`) :
+- Le pipeline est d'abord créé dans un cache vide, qui doit se remplir.
+- Un second cache est créé à partir des données du premier, puis le pipeline est recréé à travers lui. Les quatre étages doivent signaler `VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT`, et le cache restauré ne doit gagner aucune entrée.
+- Les deux images doivent être égales à celle du pipeline créé sans cache, et concorder avec la couverture du TES ordinaire.
+- **Correction de l'oracle (`79ef3114`).** Le premier oracle comparait les octets du cache restauré. MoltenVK écrit ses entrées en parcourant un `std::unordered_map` (`MVKPipeline.h:587`), si bien que deux caches qui contiennent les mêmes entrées peuvent les sérialiser dans un ordre différent. L'oracle compare donc les tailles : toute conversion ajoutée ajoute une entrée.
+
+| Bibliothèque | `cache-reuse` ccw et cw |
+| --- | --- |
+| **Avant** : `lib-547c3871-tes` (`dc33a8dd…`). Son runtime est identique à `a3b0e7f1`. | Sortie 1 : le pipeline est refusé (« disables Vulkan pipeline caches »). |
+| **Après** : `lib-b35f359e-tes` (`d2b3ddc1…`) | **PASS**. Cache vide 40 octets, rempli 11 753 ; cache restauré 11 753 après réutilisation ; 0 étage touché sur le cache vide, 4 sur 4 sur le cache restauré ; images égales ; aucun écart de couverture. |
+| **Mutation** `mutation-cache-layout` : `capturedVertexLayout` effacé à la relecture du cache (`2d4c43a5…`) | Sortie 1 : le pipeline recréé à travers le cache restauré est refusé (« capture requires an exported output layout »). |
+
+- **La mutation montre que la mise en page capturée vient bien du cache** au moment de la réutilisation.
+- **Une mutation écartée.** Retirer ce champ de la sérialisation ne sert à rien : le validateur Cereal (`mvkValidateCeralArchiveDefinitions`) fait alors avorter `vkCreateInstance`, avant tout pipeline.
+- **Tests retirés avec le nouveau contrat** : `reject-cache` dans `topology.cpp` et dans le pilote.
+- **Régression.** Runner TES complet à `b35f359e` : **112/112 PASS**, `EVIDENCE.sha256` de 912 entrées (`build/astra/tes-runner-b35f359e/`).
+- **Preuves** : `build/astra/tes-cache-before-a3b0e7f1/`, `build/astra/tes-cache-after-b35f359e/`.
+
+**Hors du contrat.** Avec `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`, la création rend toujours `VK_PIPELINE_COMPILE_REQUIRED`, même quand tous les étages sont en cache, puisque le rejeu doit être compilé. C'est déjà le cas des autres pipelines PerVertexKHR portables. Ce n'est pas testé ici.
+
+## 13. Examen ciblé des exceptions de réflexion (portes TES et mesh)
+
+`MVKDevice::createPipelines()` ne capture aucune exception. J'ai relevé les appels de réflexion SPIRV-Cross des portes d'admission TES et mesh qui ne sont pas sous `try`, puis vérifié lesquels peuvent lever sur une entrée valide.
+
+| Appel non protégé | Ce qui le précède sur le même module | Conclusion |
+| --- | --- | --- |
+| `mvkUsesResources()` sur le TCS et le TES | `getTessReflectionData()` (sous `try`) a déjà analysé les deux modules et vérifié leurs points d'entrée. | Non reproduit. Il ne reste que `get_active_interface_variables()` et `get_shader_resources()`, pour lesquels aucune entrée valide qui lève n'a été trouvée. |
+| `mvkUsesResources()` sur le mesh | C'est la première analyse du module mesh. | Non reproduit. L'analyseur ne lève, sur un module valide, que pour des extensions que MoltenVK n'expose pas (encodages bfloat16 et FP8). |
+| `mvkMeshShaderIncompatibility()` | `mvkUsesResources()` sur le même module. | **Reproduit et corrigé** (voir ci-dessous). |
+| `getMeshPerVertexCornerLocations()` sur le fragment | `getFragmentShaderUsesPerVertexInput()` (sous `try`) a déjà analysé le module et vérifié son point d'entrée. | Non reproduit. |
+
+**Le chemin reproduit.**
+- `mvkMeshShaderIncompatibility()` lit la taille de groupe par `get_execution_mode_argument(LocalSize)`. Avec `LocalSizeId`, SPIRV-Cross lit l'opérande comme une constante simple (`get<SPIRConstant>`, `spirv_cross.cpp:2593`).
+- Un `OpSpecConstantOp` est pourtant un opérande valide, avec `maintenance4`. SPIRV-Cross lève alors « Bad cast », et l'exception sort de `vkCreateGraphicsPipelines()`.
+
+**L'oracle `reject-local-size-op` (`2391ced8`)** :
+- Le shader mesh des tests reçoit `LocalSizeId` depuis un `OpSpecConstantOp` qui vaut 2 × 2 par défaut. Le module est validé par `spirv-val`, cible vulkan1.3.
+- La création doit rendre un résultat Vulkan, pas lever d'exception.
+- Le même commit active `maintenance4` dans `mesh-draw`. `glslang` émet `LocalSizeId` pour tous les shaders mesh de ces tests quand il cible Vulkan 1.3, et Vulkan exige `maintenance4` pour cela. Avant ce commit, ces tests étaient donc hors de l'usage valide sur ce point.
+
+| Bibliothèque | `draw` (témoin, `maintenance4` activé) | `reject-local-size-op` |
+| --- | --- | --- |
+| **Avant** : `lib-b35f359e-tes` (`d2b3ddc1…`), runtime identique à `2391ced8` | PASS : 1 806 pixels vérifiés, aucun écart | **Sortie 1, « ERROR: Bad cast »** : l'exception `CompilerError` atteint l'application. |
+| **Après** : `lib-008fa845-tes` (`fb4d60d4…`) | PASS, mêmes résultats | PASS : `VK_ERROR_FEATURE_NOT_PRESENT`, avec la raison. |
+
+**Le correctif (`008fa845`) est local.** Seule la lecture de la taille de groupe passe sous `try` ; un `CompilerError` y devient un refus avec raison. Les autres appels du tableau, non reproduits, ne changent pas, comme demandé : pas de refonte générale.
+
+**Régressions.**
+- Runner mesh complet à `008fa845` (`run-pervertex-mesh-tests.sh`, bibliothèques dev et shipping) : **41/41 PASS** sous validation Metal. `EVIDENCE.sha256` compte 193 entrées (sha256 du manifeste `b182b603…`), dans `build/astra/mesh-runner-008fa845/`.
+- Le runner TES n'est pas relancé à `008fa845` : le seul changement de runtime depuis `b35f359e` est dans `mvkMeshShaderIncompatibility()`, que le chemin TES n'appelle pas.
+
+**Preuves** : `build/astra/mesh-local-size-before-2391ced8/`, `build/astra/mesh-local-size-after-008fa845/`.
+
+## 14. Ce qui reste hors du contrat (à `008fa845`)
+
+- **Pipeline.**
+  - Les domaines quads et isolines, les espacements fractionnaires, le mode point et plus de 3 points de contrôle.
+  - L'origine de domaine en bas à gauche.
+  - Les descripteurs et push constants du TCS ou du TES.
+  - La spécialisation, le `pNext` ou les `flags` d'étage, et tout état dynamique.
+  - Le multiview, le multi-échantillonnage et les diviseurs de sommets.
+  - `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` avec le cache.
+- **Dessins.** Les dessins indexés, indirects et indexés indirects ; plus d'une instance ; DrawID ≠ 0 (multi-draw).
+- **Niveaux.** Les niveaux non uniformes, au-dessus de 3, ou avec un niveau intérieur NaN : le device est perdu à la soumission.
+- **Mesh.** Un `LocalSizeId` qui n'est pas une constante simple est refusé, pas pris en charge.
+- **Non prouvé.**
+  - Un cache relu sur un autre device ou un autre processus : l'oracle réutilise le cache dans le même device.
   - La mesure du coût du dispatch supplémentaire.
 - **Autres GPU.** Seul un M4 Pro est prouvé. M1, M3 et Intel restent pour la fin.
 
