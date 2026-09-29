@@ -25,6 +25,7 @@ for name in triangle.vert triangle.tesc ordered.tese ordered.frag ordered-swappe
 compile topology.vert topology.vert.spv
 compile topology.vert drawid.vert.spv -DDRAWID
 compile topology.vert resources.vert.spv -DRESOURCES
+compile topology.vert first.vert.spv -DRESOURCES -DFIRST
 compile topology.tesc push.tesc.spv -DPUSH
 compile topology.tesc topology.tesc.spv
 compile topology.tesc descriptor.tesc.spv -DDESCRIPTOR
@@ -56,14 +57,14 @@ source_tree() {
 	git -C "$root" archive HEAD | tar -x -C "$destination"
 	for dependency in SPIRV-Cross SPIRV-Tools Volk Vulkan-Headers Vulkan-Tools cereal; do ln -s "$(cd "$root/External/$dependency" && pwd -P)" "$destination/External/$dependency"; done
 }
-library() { # name admission device [sed expression]
+library() { # name admission device [sed expression [source file, default the helper shader header]]
 	local name=$1 tree=$output/$1/src
 	source_tree "$tree"
 	if [[ -n ${4:-} ]]; then
-		local shader=$tree/MoltenVK/MoltenVK/Commands/MVKCommandPipelineStateFactoryShaderSource.h
-		cp "$shader" "$output/$name/original.h"
-		perl -pi -e "$4" "$shader"
-		diff "$output/$name/original.h" "$shader" > "$output/$name/mutation.diff" && { echo "Mutation $name did not apply"; exit 1; } || true
+		local source=$tree/MoltenVK/MoltenVK/Commands/${5:-MVKCommandPipelineStateFactoryShaderSource.h}
+		cp "$source" "$output/$name/original"
+		perl -pi -e "$4" "$source"
+		diff "$output/$name/original" "$source" > "$output/$name/mutation.diff" && { echo "Mutation $name did not apply"; exit 1; } || true
 	fi
 	bash "$tree/MoltenVK/Tests/PerVertexTES/build-library.sh" "$output/$name" "$2" "$3" > /dev/null
 	cat "$output/$name/PROVENANCE.txt"
@@ -79,6 +80,7 @@ library mutation-winding ON ON 's/uint slot = p\[2\] && corner \? 3 - corner : c
 library mutation-interior ON ON 's/14563 \* q/16384 * q/g'
 library mutation-offset ON ON 's/uint key = offsets\[i\] \+ triangle;/uint key = triangle;/'
 library mutation-helper-missing ON ON 's/kernel void tessLevelsToHalfFactors\(/kernel void tessLevelsToHalfFactorsUnavailable(/'
+library mutation-first-origin ON ON 's/MTLRegionMake2D\(firstVertex, firstInstance, vertexCount, 1\)/MTLRegionMake2D(0, 0, vertexCount, 1)/' MVKCmdDraw.mm
 
 cases=0
 check_log() { # log expected-exit actual-exit required...
@@ -109,13 +111,14 @@ pilot() { # library mode fragment [control]
 for winding in ccw cw; do
 	for scenario in f1 f2 f3 next mixed nan fraction cull drawid seam1 seam2 seam3; do topology dev "$scenario" "$winding" 0 "TES_TOPOLOGY PASS"; done
 	topology dev resources "$winding" 0 "TES_TOPOLOGY PASS" "VS storage counter: expected=9 ordinary=9 pervertex=9"
+	topology dev first "$winding" 0 "TES_TOPOLOGY PASS" "VS storage sums: expected vertex=33 instance=6; ordinary vertex=33 instance=6; pervertex vertex=33 instance=6"
 	for count in 1 2 4 5; do topology dev "vertices$count" "$winding" 0 "TES_TOPOLOGY PASS" "VS storage counter: expected=$count ordinary=$count pervertex=$count"; done
 	for scenario in level4 nonuniform inner-nan; do topology dev "$scenario" "$winding" 0 "TES_TOPOLOGY PASS" "PerVertex TES draw was not rendered"; done
 done
 PREFILL=1 topology dev mixed ccw 0 "TES_TOPOLOGY PASS"
 PREFILL=2 topology dev mixed cw 0 "TES_TOPOLOGY PASS"
 # 2. Deterministic refusals before submission; ordinary tessellation keeps these modes.
-for scenario in reject-quads reject-fractional reject-point-mode reject-lower-left reject-descriptor reject-push-constant reject-cache reject-first-vertex reject-instances; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
+for scenario in reject-quads reject-fractional reject-point-mode reject-lower-left reject-descriptor reject-push-constant reject-cache reject-instances; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
 for scenario in reject-indirect-tes reject-indexed-indirect-tes; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS" "vkEndCommandBuffer=-8"; done
 topology no-admission reject-no-admission ccw 0 "TES_TOPOLOGY PASS"
 topology shipping public-device-gate ccw 0 "TES_TOPOLOGY PASS"
@@ -144,7 +147,7 @@ pilot dev ordered ordered.frag
 pilot dev swapped ordered-swapped.frag
 pilot dev wrong-patch wrong-patch.frag
 pilot dev control control.frag
-for mode in ordered-compute reject-first-compute reject-first-instance-compute reject-cache reject-patch-size reject-specialization reject-instance reject-first reject-indexed; do pilot dev "$mode" ordered.frag; done
+for mode in ordered-compute reject-instance-compute reject-cache reject-patch-size reject-specialization reject-instance reject-indexed; do pilot dev "$mode" ordered.frag; done
 pilot no-admission reject-public ordered.frag
 pilot no-admission control control.frag
 # 4. Generator mutations must be caught: reversed winding, moved level-3 interior coordinates, patch offsets ignored.
@@ -152,6 +155,8 @@ topology mutation-winding cull ccw 2 "FAIL PerVertex replay matches ordinary TES
 topology mutation-winding f3 ccw 2 "FAIL ordered PerVertex values match the CPU model"
 topology mutation-interior f3 ccw 2 "FAIL PerVertex coordinates and positions bitwise equal to the hardware tessellator's"
 topology mutation-offset mixed ccw 2 "FAIL PerVertex replay matches ordinary TES coverage"
+# Stage-in origin ignored: the decoy vertices and instance 0 reach the VS, so the image and the VS sums differ.
+topology mutation-first-origin first ccw 2 "FAIL PerVertex replay matches ordinary TES coverage" "FAIL gl_VertexIndex and gl_InstanceIndex start at firstVertex"
 topology mutation-helper-missing ordinary-levels-direct ccw 1 "Could not find support compute shader function tessLevelsToHalfFactors" "ERROR: Create pipeline case0-levels: -3"
 # 5. The float32 level ABI is live in the PerVertex TCS and TES compute kernels.
 mkdir -p "$output/dump"
