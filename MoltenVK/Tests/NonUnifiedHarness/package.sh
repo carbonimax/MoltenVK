@@ -54,6 +54,8 @@ PY
 		(cd "$out" && { diff -u orig/MVKDevice.mm src/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm; diff -u orig/MVKImage.mm src/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm; }) > "$out/no-admission.patch" || true
 	fi
 	MVK_TEST_ARCH=x86_64 MACOSX_DEPLOYMENT_TARGET=11.0 bash "$tree/MoltenVK/Tests/PerVertexTES/build-library.sh" "$out" ON ON > /dev/null
+	# build-library.sh records the repository that contains the archive, not the archive: record the archived commit.
+	sed -i '' "1s/.*/moltenvk_archive=$2$([[ ${3:-} == mutate ]] && echo ' with no-admission.patch')/" "$out/PROVENANCE.txt"
 	local library=$out/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib
 	[[ $(lipo -archs "$library") == x86_64 ]]
 	[[ $(otool -D "$library" | tail -1) == @rpath/libMoltenVK.1.dylib ]]
