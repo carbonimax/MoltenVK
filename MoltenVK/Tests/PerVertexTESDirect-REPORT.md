@@ -445,7 +445,7 @@ Astra a demandé de tester l'origine de domaine en bas à gauche, pour les deux 
 - **Régression.** Runner TES complet à `866e813a` : **122/122 PASS**, `EVIDENCE.sha256` de 1 005 entrées (sha256 du manifeste `7132599d…`, dans `build/astra/tes-runner-866e813a/`).
 - **Preuves** : `build/astra/tes-lower-left-before-c8d41740/`, `build/astra/tes-lower-left-after-866e813a/`.
 
-## 22. Ce qui reste hors du contrat (à `866e813a`)
+## 22. Ce qui reste hors du contrat (à `866e813a` ; état courant au § 25)
 
 - **Pipeline.**
   - Les domaines quads et isolines, les espacements fractionnaires, le mode point et plus de 3 points de contrôle.
@@ -461,6 +461,80 @@ Astra a demandé de tester l'origine de domaine en bas à gauche, pour les deux 
 - **Mesh.** Un `LocalSizeId` dont un opérande est un `OpSpecConstantOp` est refusé, pas pris en charge.
 - **Non prouvé.**
   - L'origine `LOWER_LEFT` avec l'élimination des faces arrière, avec des patchs qui partagent une arête, ou avec les états dynamiques : l'oracle ne combine rien de tout cela.
+  - Un viewport dynamique qui ne couvre pas toute la hauteur, ou dont la profondeur n'est pas [0, 1].
+  - Un cache relu dans un autre device ou un autre processus.
+  - Les trois appels de réflexion non protégés du § 13, examinés par analyse seulement.
+  - La mesure du coût du dispatch supplémentaire.
+- **Autres GPU.** Seul un M4 Pro est prouvé. M1, M3 et Intel restent pour la fin.
+
+L'extension reste fermée par défaut et n'est pas prête pour upstream.
+
+## 23. `LOWER_LEFT` avec l'élimination des faces et les arêtes partagées, en test seul (`1248320c`)
+
+Astra a validé `LOWER_LEFT` sans élimination des faces. Elle a demandé de qualifier l'élimination des faces avant et arrière et les patchs à arête partagée, qui dépendent tous deux de l'ordre des triangles, en réutilisant les scénarios `cull` et `seam`.
+
+**Le montage.**
+- Les scénarios `cull` et `seam1` à `seam3` tournent aussi avec l'origine `LOWER_LEFT`, pour les deux enroulements.
+- `cull` contient à la fois des patchs tournés vers l'avant et un patch miroir.
+- Dans le contrôle des coordonnées, le patch attendu comme éliminé suit l'ordre inversé des triangles.
+
+**Vert sans correctif** sur le runtime de `866e813a`.
+- **`lower-left-cull`.** Il élimine 13 triangles en ccw et 19 en cw, soit l'inverse de `cull` en `UPPER_LEFT` (19 en ccw, 13 en cw). Aucune erreur du modèle CPU ; aucun écart face au pipeline ordinaire.
+- **`lower-left-seam1` à `seam3`.** Les arêtes partagées sont identiques au bit près (2, 3 et 4 sommets selon le niveau), en PerVertex comme sur le tessellateur matériel.
+
+Preuves : `build/astra/tes-lower-left-cull-seam-1248320c/`.
+
+## 24. DrawID non nul dans un dessin direct multiple (oracle `a7fe8a15`, correctif `d3b4457d`)
+
+Astra a demandé de commencer par un oracle à deux dessins avec des valeurs distinctes, puis de ne toucher que ce chemin si le refus était le seul obstacle.
+
+**L'état de départ.**
+- MoltenVK enregistre `vkCmdDrawMultiEXT` comme une suite de `MVKCmdDraw`, chacun avec son indice (`vulkan.mm:4354`).
+- La tessellation ordinaire lie ce DrawID.
+- Le chemin TES PerVertex le refusait à l'enregistrement et à l'encodage, et liait un DrawID fixé à 0 pour son VS en calcul.
+
+**L'oracle `drawid-multi`.**
+- Un seul `vkCmdDrawMultiEXT` dessine deux patchs dont les données portent toutes deux le niveau 2. Le VS (`drawid.vert.spv`) ajoute `gl_DrawID` aux niveaux, donc le second dessin tessèle au niveau 3.
+- **Référence exacte.** Chaque image (interpolée, ordinaire, ordonnée PerVertex) doit égaler, octet par octet, deux dessins ordinaires dont les données portent déjà les niveaux 2 et 3. Ces dessins recommencent `gl_PrimitiveID` de la même façon.
+- **Discrimination.** Chaque image doit différer de deux dessins ordinaires de données au niveau 2.
+- Le PerVertex doit aussi concorder avec la tessellation ordinaire sous le même multi-draw.
+
+**Le correctif.**
+- `encodePerVertexTessEval()` reçoit le `drawIndex` du dessin et le lie pour le VS, comme la tessellation ordinaire.
+- Les refus de DrawID ≠ 0 sont retirés. Une seule instance reste exigée.
+
+| Bibliothèque | `drawid-multi` ccw et cw |
+| --- | --- |
+| **Avant** : `lib-866e813a-tes` (`ee363ddd…`). Son runtime est identique à `a7fe8a15`. | Sortie 1 : refus à l'enregistrement (« requires DrawID 0 »). |
+| **Après** : `lib-d3b4457d-tes` (`48b77829…`) | **PASS**. Aucun écart face au pipeline ordinaire sur 3 136 pixels. Les trois images égalent les dessins de niveaux 2 et 3 et diffèrent de ceux de niveaux 2 et 2. |
+| **Mutation** `mutation-drawid-zero` : multi-draw admis, mais DrawID 0 lié (`c2ef294f…`) | Sortie 2. Les images PerVertex égalent celles de niveaux 2 et 2, et s'écartent du pipeline ordinaire, qui reste juste. |
+
+**La mutation montre** que retirer le refus ne suffisait pas : le point de liaison devait recevoir le vrai `drawIndex`.
+
+**Régression.** Runner TES complet à `d3b4457d` : **133/133 PASS**, `EVIDENCE.sha256` de 1 133 entrées (sha256 du manifeste `cc859851…`, dans `build/astra/tes-runner-d3b4457d/`). Ce runner couvre aussi `1248320c`.
+
+**Preuves** : `build/astra/tes-drawid-before-a7fe8a15/`, `build/astra/tes-drawid-after-d3b4457d/`.
+
+## 25. Ce qui reste hors du contrat (à `d3b4457d`)
+
+- **Pipeline.**
+  - Les domaines quads et isolines, les espacements fractionnaires, le mode point et plus de 3 points de contrôle.
+  - Les descripteurs et push constants du TCS ou du TES.
+  - La spécialisation, et le `pNext` ou les `flags` d'étage.
+  - Toute structure de la chaîne de l'état de tessellation autre que l'origine de domaine.
+  - Tout état dynamique autre que `VK_DYNAMIC_STATE_SCISSOR` et `VK_DYNAMIC_STATE_VIEWPORT`, y compris leurs variantes `WITH_COUNT`.
+  - Plus d'un viewport ou d'un ciseau.
+  - Le multiview, le multi-échantillonnage et les diviseurs de sommets.
+  - `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` avec le cache.
+- **Dessins.**
+  - Les dessins indexés, y compris `vkCmdDrawMultiIndexedEXT`.
+  - Les dessins indirects et indexés indirects.
+  - Plus d'une instance.
+- **Niveaux.** Les niveaux non uniformes, au-dessus de 3, ou avec un niveau intérieur NaN : le device est perdu à la soumission.
+- **Mesh.** Un `LocalSizeId` dont un opérande est un `OpSpecConstantOp` est refusé, pas pris en charge.
+- **Non prouvé.**
+  - Un multi-draw de plus de deux dessins, ou dont le stride n'est pas `sizeof(VkMultiDrawInfoEXT)`.
+  - `LOWER_LEFT` combinée aux états dynamiques.
   - Un viewport dynamique qui ne couvre pas toute la hauteur, ou dont la profondeur n'est pas [0, 1].
   - Un cache relu dans un autre device ou un autre processus.
   - Les trois appels de réflexion non protégés du § 13, examinés par analyse seulement.
