@@ -10,7 +10,7 @@ A PerVertexKHR pipeline with tessellation is admitted only for:
 - three input and output control points, and the default upper-left domain origin (no `VkPipelineTessellationDomainOriginStateCreateInfo`);
 - TCS and TES without descriptor resources or push constants, because the float32 TessLevel ABI excludes Metal argument buffers (VS and fragment resources are allowed and use the pipeline's own binding model);
 - vertex inputs without divisors, static state, a single view and a single sample;
-- no pipeline cache and no specialization;
+- no pipeline cache and no specialization; entry points may have any name;
 - direct non-indexed draws of one instance, with any `firstVertex` and `firstInstance`, and DrawID 0 (the VS reads a bound DrawID of 0).
 
 Any other pipeline mode returns `VK_ERROR_FEATURE_NOT_PRESENT` at `vkCreateGraphicsPipelines`. Any other draw fails at `vkEndCommandBuffer`, before submission.
@@ -69,6 +69,7 @@ Scenarios cover:
 - both windings;
 - seams: two patches of level 1, 2 or 3 sharing an edge, which is the `u = 0` edge of one and the `w = 0` edge of the other (rule 4);
 - draws of 1, 2, 4 and 5 vertices, counted by the VS storage counter;
+- every entry point renamed (`vertMain`, `tescMain`, `teseMain`, `fragMain`): the image matches the ordinary pipeline built from the same stages and equals the one of the shaders named `main`, and a TCS descriptor behind a renamed entry point is still refused;
 - `firstVertex` 3 and `firstInstance` 1: zeroed decoy vertices precede the data, and a per-instance attribute holds a decoy tag 6 for instance 0 and 7 for instance 1. The VS adds `gl_InstanceIndex - 1` and `tag - 7` to the levels, and its storage counter also sums `gl_VertexIndex` (33), `gl_InstanceIndex` (6), the tag (42), `gl_BaseVertex` (18) and `gl_BaseInstance` (6), on the ordinary and the PerVertex pipeline;
 - level 4, non-uniform levels and a NaN inner level, which must be refused with `VK_ERROR_DEVICE_LOST` and no pixel;
 - ordinary-only draws (`ordinary-levels-*`, also on the shipping library, through each draw command, as one draw and as two draws in one render pass) where levels that half would change must render, tessellate and reach the TES exactly like their Vulkan representative: `nextafter(1, +inf)` as 2, `nextafter(2, +inf)` as 3, `1e-30` as 1 on outer and inner levels, with `+inf`, `-0` and NaN as controls.
