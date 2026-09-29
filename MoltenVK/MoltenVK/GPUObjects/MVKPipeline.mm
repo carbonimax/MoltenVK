@@ -1265,9 +1265,15 @@ static std::string mvkMeshShaderIncompatibility(const std::vector<uint32_t>& spi
 		for (uint32_t i = 0; i < element.member_types.size(); i++) { perPrimitive |= reflect.has_member_decoration(element.self, i, spv::DecorationPerPrimitiveEXT); }
 		if (perPrimitive) { return "writes per-primitive outputs."; }
 	}
-	workgroupSize = MTLSizeMake(reflect.get_execution_mode_argument(spv::ExecutionModeLocalSize, 0),
-								reflect.get_execution_mode_argument(spv::ExecutionModeLocalSize, 1),
-								reflect.get_execution_mode_argument(spv::ExecutionModeLocalSize, 2));
+	// SPIRV-Cross reads a LocalSizeId operand as a plain constant and throws for a specialization constant operation,
+	// which Vulkan allows. Refuse it here: vkCreateGraphicsPipelines() must not let the exception through.
+	try {
+		workgroupSize = MTLSizeMake(reflect.get_execution_mode_argument(spv::ExecutionModeLocalSize, 0),
+									reflect.get_execution_mode_argument(spv::ExecutionModeLocalSize, 1),
+									reflect.get_execution_mode_argument(spv::ExecutionModeLocalSize, 2));
+	} catch (const CompilerError&) {
+		return "sizes its workgroup with a LocalSizeId operand that is not a plain constant, such as a specialization constant operation.";
+	}
 	return {};
 }
 
