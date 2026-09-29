@@ -22,6 +22,38 @@ Seuls R9 (`d24159ce`) et R8 (`67dd59d4`, complété en `1deebd18` et `d4110762`)
 
 **Révision 11.** La revue des questions R5 retient l'**option C** : R1 et R5 restent gelés jusqu'à leur intégration avec R6 ; leurs témoins de mécanisme en usage aujourd'hui invalide seront à rejouer sur la bibliothèque qui intègre R1, R5 et R6, où la séquence devient valide. Elle accepte O17 au niveau Metal (fait, §3.13), puis la reproduction du constat 3 et la correction de ce seul chemin de R3 : **reproduit et corrigé** (`275b5226`, `630b183e`, §0 octies). L'activation du reste de R3 reste soumise à ses propres oracles. La question 4 (critère d'O17) attend sa réponse. R6 reste fermé.
 
+**Révision 12.** La revue tranche la question 4 : **option b**, avec un oracle d'**ordre des événements** au niveau Vulkan, ni a ni c. `nextDrawable` doit être entré avant la perte et ne pas avoir rendu la main. Avant R10, un fil d'encodage y attend. Après R10, aucun fil d'encodage n'y attend, la perte est publiée avant le retour de `nextDrawable`, et le drawable tardif est rendu. R6 reste fermé jusqu'à ce rouge/vert. **Sur ce fondement, R10 est codé** (`a3f02d1c`) sous l'oracle `drawable-wait-loss` (`3319cdd6`, `815b2cbe`) : 6/6 rouges avant, 6/6 verts après (§0 nonies).
+
+## 0 nonies. O17 au niveau Vulkan et R10 (révision 12)
+
+**L'oracle** `drawable-wait-loss` (`3319cdd6`). Couche détachée de toute fenêtre, macOS 27.2 :
+1. un ancien swapchain présente deux images derrière du travail bloqué par l'application, et garde une troisième image acquise ;
+2. un swapchain de remplacement, de même taille, est créé pendant que ces présentations attendent ;
+3. le travail est libéré ;
+4. les trois images du remplacement sont effacées, ce qui prend et retient trois drawables ;
+5. l'effacement de l'image gardée demande un 4ᵉ drawable, qui attend environ 1 s ;
+6. le device est perdu 50 ms après l'entrée dans cet appel.
+
+Un swizzle chronomètre `nextDrawable` et note le fil appelant ; `mvkTestGetLossCounters` donne les encodages en cours. Où cette attente ne se produit pas, le mode sort en SKIP (`815b2cbe`).
+
+**Cause non attribuée.** Les présentations n'avaient pas commencé à la recréation (`mvkTestGetUnpresentedImageCount` à 0) : MoltenVK n'a donc forcé aucune fin, et l'attente n'est pas celle de la recette Metal du §3.13. Elle est reproduite, pas expliquée.
+
+**R10** (`a3f02d1c`). Chaque essai de `getCAMetalDrawable()` demande le drawable sur une file série de la surface : une par couche, partagée par un swapchain et son remplacement. L'encodage attend une notification, et vérifie toutes les millisecondes si la perte a commencé ; si oui, il abandonne la demande et continue sans drawable. Le drawable arrivé plus tard est relâché à la fin de la demande et retourne à la couche. La demande ne touche que la couche et un enregistrement partagé, ni l'image ni le device. Hors perte, le nombre d'essais et le délai de chacun sont ceux d'avant.
+
+**Le chemin sans drawable, vérifié avant R10.** R10 le rend accessible dès chaque perte, alors qu'il ne l'était qu'après `imageCount` délais d'expiration. Avec `PERVERTEX_DRAWABLE_NIL=1`, tous les appels rendent `nil` : MoltenVK signale `VK_ERROR_OUT_OF_POOL_MEMORY` après 3 essais, et l'effacement encodé sans texture ne plante pas et ne déclenche aucune erreur de validation Metal. Seul l'effacement a été vérifié ; une passe de rendu avec un attachement sans texture ne l'est pas. Pendant une perte, R10 ne signale pas cette erreur.
+
+| 6 exécutions par cas | Avant R10 (`630b183e`) | Après R10 (`a3f02d1c`) |
+| --- | --- | --- |
+| `nextDrawable` entré avant la perte, pas encore revenu | 6/6 | 6/6 |
+| encodage actif 20 ms après la perte | 6/6 | 0/6 |
+| `nextDrawable` appelé par le fil qui soumet (mode synchrone) | 3/3 | 0/3 |
+| perte publiée | après le retour de `nextDrawable` (3 à 4 ms après) | avant, 22 à 25 ms après la perte, environ 940 ms avant ce retour |
+| drawable tardif rendu à la couche | 0/6 | 6/6 |
+
+**Coût non mesuré.** Chaque demande de drawable passe maintenant par une file série et une attente notifiée. Aucun banc ne couvre la présentation.
+
+**Limites.** Seul macOS 27.2 est mesuré, sur couche détachée ; M1, M3, iOS et les autres versions restent pour la fin du parcours. R6 reste fermé : O17 vert n'est qu'une de ses conditions.
+
 ## 0 octies. R5 : questions à la revue avant toute implémentation
 
 **Fait 1 : R5 suppose R1.** Le retrait de R5 « passe en état de retrait (R1, point 1), puis vide la liste différée » (point 3), et le jeton de présentation est terminé par `MVKSwapchain::destroyNow()` (point 6), deux pièces de R1. R1 n'est pas codé ; l'ordre d'implémentation (§6) place R1 avant R5. Le GO limité ne couvre que R5 et R8.
@@ -511,6 +543,8 @@ La publication ordonnée de `c78c0289` est inchangée. Une soumission bloquée r
 
 ### R10. Drawables acquis hors de l'encodage
 
+**Implémenté** (`a3f02d1c`) sous O17, sur le fondement du verdict de la revue sur la question 4 (§0 nonies). Écart avec le texte ci-dessous : la file est portée par la surface, qui possède la couche, et non par un fil d'acquisition distinct.
+
 - `getCAMetalDrawable()` ne rappelle plus `nextDrawable` sur le fil d'encodage. Il le demande au **fil d'acquisition de drawables de la couche** du swapchain (un par `CAMetalLayer`, distinct des fils de command buffers de R2), et attend par tranches de 1 ms.
 - Si la perte commence, l'encodage sort sans drawable : la soumission est perdue, comme sur le chemin nil.
 - Un drawable obtenu après la sortie de l'encodage est relâché sans présentation ; il revient à la couche.
@@ -537,7 +571,7 @@ Chaque oracle doit échouer sur `7758838b` (ou avec la pièce correspondante ret
 | **O14** retrait exclusif | 200 itérations : `vkDestroyDevice` en course avec le dernier handler, retardé de 0 à 2 ms selon l'itération | crochet `mvkTestGetDeviceReapCount` : exactement un retrait par device ; aucun plantage |
 | **O15** présentation et retrait | swapchain `VK_EXT_metal_surface` sur une `CAMetalLayer` détachée (la sonde §3.13 montre qu'elle fournit des drawables et rappelle les handlers), puis dans une fenêtre ; présentations en attente derrière du travail bloqué, perte, `vkDestroySwapchainKHR` et `vkDestroyDevice` pendant le blocage, puis signal | le retrait se termine sans attendre ; crochet de test : chaque jeton de présentation terminé **exactement une fois** (par le retrait) ; image et signalers rendus. **Témoin** : le même scénario sans destruction du swapchain, où le handler est appelé après le signal : le jeton est terminé une fois, par le handler, et aucun sémaphore n'est signalé deux fois. Autre témoin : la file de retrait traite le retrait d'un second device pendant que le premier a des présentations sans callback. **Les deux ordres de R5 (point 6) sont forcés**, sous Guard Malloc : (A) *callback entré* — un swizzle de `-[MTLSharedEvent setSignaledValue:]` sur l'événement importé du sémaphore d'acquisition bloque 300 ms le callback **dans** `endPresentation()`, pendant que l'application rend sa dernière référence ; le retrait ne commence qu'après le retour du callback (horodatages par crochet) ; (B) *retrait d'abord* — un swizzle de `-[CAMetalDrawable addPresentedHandler:]` retarde de 300 ms l'appel du bloc de MoltenVK ; le device est retiré avant, la promotion échoue, le callback ne fait rien, et le retrait a terminé le jeton une fois |
 | **O16** réserve d'acquisition | file Metal saturée par l'application sur la file exportée (4 places) ; une soumission qui attend la réserve ; perte | rapport en moins de 2 s ; aucun fil d'encodage dans Metal (échantillonnage des piles) ; le command buffer obtenu plus tard est relâché sans exécution |
-| **O17** drawable | **Étape 1 faite (§3.13, `0d216bcb`, `41adef90`)** : `nextDrawable` attend environ 1 s, reproductible, une seule fois par couche, après une fin forcée, même sans délai d'expiration. **Le critère « rapport en moins de 2 s » ne peut donc pas être rouge sur macOS 27.2**, même sans R10 : question 4 du §0 octies. L'étape 2 (Vulkan) attend la réponse. Ancienne description : puis la même condition sous une couche d'application avec `allowsNextDrawableTimeout = NO`, une soumission qui rend dans une image de swapchain, et une perte | rapport en moins de 2 s ; aucun fil d'encodage dans `nextDrawable` (échantillonnage des piles) ; un drawable obtenu plus tard est rendu à la couche |
+| **O17** drawable | **Critère d'ordre (révision 12), écrit : `drawable-wait-loss`** (§0 nonies). `nextDrawable` entré avant la perte et pas revenu ; avant R10, un encodage y attend ; après R10, aucun, la perte est publiée avant son retour, et le drawable tardif est rendu. **6/6 rouges sur `630b183e`, 6/6 verts sur `a3f02d1c`** (macOS 27.2, couche détachée). Étape 1 au niveau Metal : §3.13. Anciennes descriptions : le seuil de 2 s ne pouvait pas être rouge sur macOS 27.2 (question 4). Plus ancienne : puis la même condition sous une couche d'application avec `allowsNextDrawableTimeout = NO`, une soumission qui rend dans une image de swapchain, et une perte | rapport en moins de 2 s ; aucun fil d'encodage dans `nextDrawable` (échantillonnage des piles) ; un drawable obtenu plus tard est rendu à la couche |
 | **O18** handlers séparés | un command buffer avec handlers « scheduled » et « completed ». **Les deux ordres sont forcés** par les crochets existants : « completed » terminé pendant que « scheduled » dort encore 200 ms, puis l'inverse ; perte, `vkDestroyDevice` pendant le handler retardé | le device n'est retiré qu'après le retour des deux handlers, dans les deux ordres (crochet de test) ; aucun accès après retrait sous Guard Malloc |
 | **O20** sites de commit | contrôle statique, CPU, dans l'esprit de `run-pervertex-handler-tracking-tests.sh` : chaque appel de `commitMTLCommandBuffer()` figure dans une liste classée (encadré, ou sans accès mémoire) ; pour les sites « sans accès mémoire », aucun encodeur de blit, de calcul ou de rendu entre l'acquisition et le commit | tout site non classé, ou un site sans accès mémoire qui gagne un encodeur, fait échouer le contrôle. **Écrit** : `run-pervertex-commit-sites-check.sh` (`3124ab84`), renforcé (`55b0f996`, `86ea6506`, `ab4e1af7`, `e53de67b`) : fonctions libres ; dans les sites encadrés, acquisition avant le début, garde `isLosing()` entre le début et le commit, puis commit, puis fin, aucune attente de complétion avant la fin ; `pullFromDevice()` n'acquiert pas ; handler de fin décompté sans autre condition que l'inventaire ouvert et après les autres handlers de fin ; aucun commit Metal direct. Rouge sur le runtime de `f97faeb7` (3 problèmes) et sur celui de `67dd59d4`, première version de R8 (3 problèmes, contrôlés au commit `df663204`, même runtime), vert sur le runtime final `d4110762` (7 sites) ; 10 témoins négatifs rouges (§0 sexies, §0 septies) |
 | **O19** progression | 200 itérations d'entrelacements variés, avec une graine affichée : moment de la perte (avant, pendant ou après l'encodage de C), retards et ordre des handlers, attente hôte démarrée avant ou après la perte, destruction du device avant ou après le signal de l'application | chaque attente hôte rend la main en moins de 2 s ; chaque device est retiré exactement une fois ; le compte de vie revient à zéro (crochet) ; aucune erreur de validation |
