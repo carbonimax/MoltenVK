@@ -866,8 +866,6 @@ int main(int argc, char** argv) {
 			// The TCS module holds tescDescriptor, first, then tescMain: selecting tescDescriptor must still be refused.
 			else if (scenarioName == "reject-descriptor-shared") { o = {"shared-named.tesc.spv", ccw ? "ccw-named.tese.spv" : "cw-named.tese.spv", "interp-named.frag.spv"}; o.vert = "topology-named.vert.spv"; o.uniform = o.named = true; o.tescEntry = "tescDescriptor"; }
 			else if (scenarioName == "reject-push-constant") { o.tesc = "push.tesc.spv"; o.push = true; }
-			// Only VK_DYNAMIC_STATE_SCISSOR is qualified; a dynamic viewport stays refused.
-			else if (scenarioName == "reject-dynamic-viewport") { o.dynamicViewport = true; }
 			// A dynamic state outside the qualified ones stays refused.
 			else if (scenarioName == "reject-dynamic-line-width") { o.dynamicLineWidth = true; }
 			// The admission covers one viewport and one scissor.

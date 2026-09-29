@@ -133,6 +133,7 @@ for winding in ccw cw; do
 	topology dev entry-shared-module "$winding" 0 "TES_TOPOLOGY PASS" "renamed entry points: covered=[1-9]"
 	topology dev cache-reuse "$winding" 0 "TES_TOPOLOGY PASS" "stage cache hits: fill=0 reuse=4 of 4"
 	topology dev dynamic-scissor "$winding" 0 "TES_TOPOLOGY PASS" "scissor ab: .*cells=[1-9][0-9]*/0/[1-9]"
+	topology dev dynamic-viewport "$winding" 0 "TES_TOPOLOGY PASS" "viewport lr: pixels differing from left on the left half and right on the right half=0"
 	first_sums="vertex=33 instance=6 tag=42 base_vertex=18 base_instance=6"
 	topology dev first "$winding" 0 "TES_TOPOLOGY PASS" "VS storage sums: expected $first_sums; ordinary $first_sums; pervertex $first_sums"
 	for count in 1 2 4 5; do topology dev "vertices$count" "$winding" 0 "TES_TOPOLOGY PASS" "VS storage counter: expected=$count ordinary=$count pervertex=$count"; done
@@ -141,7 +142,7 @@ done
 PREFILL=1 topology dev mixed ccw 0 "TES_TOPOLOGY PASS"
 PREFILL=2 topology dev mixed cw 0 "TES_TOPOLOGY PASS"
 # 2. Deterministic refusals before submission; ordinary tessellation keeps these modes.
-for scenario in reject-quads reject-fractional reject-point-mode reject-lower-left reject-descriptor reject-push-constant reject-instances reject-descriptor-named reject-descriptor-shared reject-dynamic-viewport reject-multi-viewport; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
+for scenario in reject-quads reject-fractional reject-point-mode reject-lower-left reject-descriptor reject-push-constant reject-instances reject-descriptor-named reject-descriptor-shared reject-dynamic-line-width reject-multi-viewport; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
 for scenario in reject-indirect-tes reject-indexed-indirect-tes; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS" "vkEndCommandBuffer=-8"; done
 topology no-admission reject-no-admission ccw 0 "TES_TOPOLOGY PASS"
 topology shipping public-device-gate ccw 0 "TES_TOPOLOGY PASS"
