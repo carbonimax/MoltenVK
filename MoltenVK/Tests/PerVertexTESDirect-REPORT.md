@@ -129,8 +129,8 @@ Astra a validé le jalon de façon bornée. Elle a demandé de vérifier en test
 ## 9. Le refus de pipeline suivant : des points d'entrée autres que `main`
 
 **Le choix.** C'est le plus petit refus de pipeline indépendant de la soumission.
-- La porte d'admission TES refusait tout point d'entrée qui ne s'appelle pas `main` (`MVKPipeline.mm:1403`).
-- Tout le reste du chemin TES PerVertex utilise déjà le `pName` de chaque étage : réflexion, compilation de la capture, rejeu. Le rejeu TES reçoit l'étage TES (`MVKPipeline.mm:2126`).
+- La porte d'admission TES refusait tout point d'entrée qui ne s'appelle pas `main` (`MVKPipeline.mm:1403` à `358064bd`).
+- Tout le reste du chemin TES PerVertex utilise déjà le `pName` de chaque étage : réflexion, compilation de la capture, rejeu. Le rejeu TES reçoit l'étage TES (`MVKPipeline.mm:2130` à `547c3871`).
 - Une seule vraie dépendance restait : le contrôle des ressources du TCS et du TES. `mvkUsesResources()` réfléchissait le point d'entrée `main` par un argument par défaut.
 - Les front-ends HLSL nomment couramment leurs points d'entrée autrement que `main`.
 
