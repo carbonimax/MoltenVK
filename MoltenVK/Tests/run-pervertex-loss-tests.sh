@@ -16,6 +16,8 @@
 # device blocked on the Metal queue it shares with a lost one; MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE=4),
 # on both sides. timeline-listener-aba reproduces a defect without a device loss (before: 7758838b). The present-* modes
 # are not in the default list: two pass on the current runtime, and present-pending-destroy is invalid without a loss.
+# The host-sync-* modes are not in it either: they need a Mac without unified memory, and report SKIP elsewhere.
+# PERVERTEX_ARCH (default arm64) selects the architecture of the test binary, for an x86_64 library.
 # Usage: run-pervertex-loss-tests.sh <libMoltenVK test build> <output directory> <before|after> [repeats [modes...]]
 set -euo pipefail
 test_dir=$(cd "$(dirname "$0")" && pwd)
@@ -41,12 +43,12 @@ mkdir -p "$output/bin/lib" "$output/runs"
 ln -sf "$library" "$output/bin/lib/libMoltenVK.1.dylib"
 # The sources are copied into the output and hashed there: the evidence stays checkable after they change.
 mkdir -p "$output/source" && cp "$test_dir/PerVertexLossTests.mm" "$output/source/"
-xcrun clang++ -arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -I"$root/External/Vulkan-Headers/include" "$test_dir/PerVertexLossTests.mm" \
+xcrun clang++ -arch "${PERVERTEX_ARCH:-arm64}" -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -I"$root/External/Vulkan-Headers/include" "$test_dir/PerVertexLossTests.mm" \
 	"$library" -Wl,-rpath,@executable_path/lib -framework Metal -framework QuartzCore -framework Foundation -o "$output/bin/pervertex-loss"
 shasum -a 256 "$library" "$output/bin/pervertex-loss" "$output/source/PerVertexLossTests.mm" > "$output/INPUTS.sha256"
 echo 'case,mode,run,expected,actual,verdict' > "$output/results.csv"
 failures=0
-blockers=()
+blockers=() skips=()
 for name in "${modes[@]}"; do
 	case $side:$name in
 		before:teardown | before:teardown-multi | before:prefill-abandon-* | before:metal-error*) expected='1|134|139' ;;
@@ -56,7 +58,7 @@ for name in "${modes[@]}"; do
 	esac
 	prefill=0 places=64
 	[[ $name == teardown-multi || $name == prefill-abandon-* || $name == metal-error-multi ]] && prefill=1
-	[[ $name == shared-queue-block ]] && places=4
+	[[ $name == shared-queue-block || $name == host-sync-progress-* ]] && places=4
 	for mode in sync async; do
 		for run in $(seq 1 "$repeats"); do
 			log=$output/runs/$name-$mode-$run.log rc=0
@@ -74,14 +76,17 @@ for name in "${modes[@]}"; do
 				verdict=FAIL
 				[[ $rc == 1 ]] && grep -q '^SHARED_QUEUE BLOCKED' "$log" && verdict=BLOCKER
 			fi
+			# The host-sync modes need a Mac without unified memory; elsewhere they skip, which is neither a pass nor a failure.
+			[[ $name == host-sync-* && $rc == 3 ]] && grep -q '^HOST_SYNC SKIP' "$log" && verdict=SKIP
 			grep -q 'Metal API Validation Enabled' "$log" || verdict=FAIL
 			[[ $verdict == BLOCKER ]] && blockers+=("$name-$mode-$run")
-			[[ $verdict == PASS || $verdict == BLOCKER ]] || failures=$((failures + 1))
+			[[ $verdict == SKIP ]] && skips+=("$name-$mode-$run")
+			[[ $verdict == PASS || $verdict == BLOCKER || $verdict == SKIP ]] || failures=$((failures + 1))
 			echo "$name,$mode,$run,$expected,$rc,$verdict" >> "$output/results.csv"
-			printf '%-20s %-5s %s exit=%s %s | %s\n' "$name" "$mode" "$run" "$rc" "$verdict" "$(grep -E '^(spurious_waits|COUNTER_RACE|BINARY_GENERATION|DESTROY_AFTER_LOSS|EVENT_WAIT|TEARDOWN|EXTERNAL_QUEUE_WAIT|SHARED_QUEUE|TIMELINE_LISTENER|PREFILL_ABANDON|METAL_ERROR)|^submit=|^C_before_loss|^shared_mtl_queue|^cleanup=|^wait=' "$log" | tr '\n' ' ' | cut -c1-200)"
+			printf '%-20s %-5s %s exit=%s %s | %s\n' "$name" "$mode" "$run" "$rc" "$verdict" "$(grep -E '^(spurious_waits|COUNTER_RACE|BINARY_GENERATION|DESTROY_AFTER_LOSS|EVENT_WAIT|TEARDOWN|EXTERNAL_QUEUE_WAIT|SHARED_QUEUE|TIMELINE_LISTENER|PREFILL_ABANDON|METAL_ERROR|HOST_SYNC)|^submit=|^C_before_loss|^shared_mtl_queue|^cleanup=|^wait=' "$log" | tr '\n' ' ' | cut -c1-200)"
 		done
 	done
 done
 if (( ${#blockers[@]} )); then echo "BLOCKER reproduced, not passed: ${blockers[*]}"; fi
-echo "LOSS ORACLES $side: $failures unexpected, ${#blockers[@]} blocker run(s)"
+echo "LOSS ORACLES $side: $failures unexpected, ${#blockers[@]} blocker run(s)$( (( ${#skips[@]} )) && echo ", ${#skips[@]} skipped run(s) (host-sync: needs a Mac without unified memory)")"
 exit $(( failures ? 1 : 0 ))
