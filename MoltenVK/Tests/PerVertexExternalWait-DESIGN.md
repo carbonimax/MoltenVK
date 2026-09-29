@@ -10,6 +10,19 @@ Rien de ce qui est décrit ici n'est codé. Les références de lignes portent s
 
 **Révision 5.** La revue de la révision 4 (`a253c42c`) conclut encore NO-GO pour R6. Elle relève un fil commun à deux attentes qui peut créer un cycle, des handlers Metal protégés ensemble alors qu'ils s'exécutent séparément, une présentation sans callback qui pourrait bloquer la file de retrait, une R8 incohérente avec R6, R7 et O11, et des oracles de présentation qui pouvaient rester non couverts. Une sonde de présentation (`7e7d53e8`) a d'abord été mesurée (§3.13) : elle **invalide** la phase 2 du retrait de la révision 4. Cette révision répond à chaque point (§0 ter). R6 reste non codé.
 
+**Révision 6.** La revue de la révision 5 (`0ac8e6f5`) conclut encore NO-GO pour R6. Son blocage principal : en R8, un encodage commencé avant `markLost()` peut commiter après l'inventaire du travail protégé, et `vkFreeMemory` rendrait alors des pages que le GPU utilisera encore. Elle demande aussi de placer R4 avant la porte de R6 et de renforcer les oracles de progression et d'ordre des handlers. Elle autorisait le **jeton de présentation comme correctif isolé** ; une mesure préalable a montré qu'il ne corrige aucun défaut en usage valide aujourd'hui (§5.2), il reste donc une pièce de R5. Cette révision répond à chaque point (§0 quater). R6 reste non codé.
+
+## 0 quater. Réponse au NO-GO sur la révision 5 (revue de `0ac8e6f5`)
+
+| Constat | Correction | Section |
+| --- | --- | --- |
+| R8 : l'inventaire relevé à `markLost()` manque le travail d'un encodage commencé avant, qui commite après | L'inventaire est **fermé à la publication**, une fois `_activeEncodings` revenu à zéro : plus aucun encodage ne peut alors commiter du travail d'application. `vkFreeMemory` attend cette fermeture, puis le retrait de tout ce qui a été commité avant elle | R8 |
+| O11 doit forcer cet entrelacement | O11 retient le commit de C (crochet de commit existant, retardé) pour qu'il ait lieu **après** `markLost()` et avant la fin de l'encodage ; témoin négatif : inventaire relevé à `markLost()` | §5 |
+| R4 avant la porte de R6 | L'ordre d'implémentation place R4 et O6 avant R6 | §6 |
+| Oracles de progression et d'ordre des handlers | O18 force les deux ordres entre handlers « scheduled » et « completed » ; nouvel oracle de progression O19, entrelacements variés, toutes les attentes bornées et chaque device retiré une fois | §5 |
+| Jeton de présentation, correctif isolé | **Non implémenté : prémisse non vérifiée.** En usage valide, les présentations se terminent aujourd'hui (mesuré) ; le défaut n'apparaît qu'en détruisant le swapchain avant la fin de ses présentations, ce que Vulkan interdit hors perte et que R6 rendra légal. Le jeton reste une pièce de R5, avec ses oracles | R5, point 6 ; §5.2 |
+| O17 | Toujours sans reproduction fiable du blocage de `nextDrawable` ; R6 reste fermé tant qu'O17 n'est pas vert | §5 |
+
 ## 0 ter. Réponse au NO-GO sur la révision 4 (revue de `a253c42c`)
 
 | Constat | Vérifié | Correction | Section |
@@ -225,9 +238,14 @@ Sonde Metal seule `MetalPresentationProbe.mm` (`7e7d53e8`, `build/astra/r7-prese
 | témoin : les mêmes présentations, signal **sans** changement de taille | handlers 2/2 | 2/2 |
 | 3 drawables retenus (`maximumDrawableCount = 3`), 4ᵉ `nextDrawable` | nouveau drawable (texture et IOSurface distinctes) en moins de 10 ms, avec ou sans délai | idem |
 | 3 drawables en présentation derrière du travail bloqué, 4ᵉ `nextDrawable` | nouveau drawable en 1 ms au plus | idem |
+| **usage valide** : travail terminé (`waitUntilCompleted`), présentation en attente du seul affichage, **puis changement de taille** | handlers 3/3 | handlers **3/3**, alors que 1 ou 2 présentations sur 3 étaient encore en attente au changement (`v6`) |
 
 - **Conséquence pour R5.** La phase 2 de la révision 4 (« attendre les handlers de présentation après la fin forcée ») attendait des callbacks que la fin forcée **supprime**. Elle aurait bloqué pour toujours.
-- **Défaut actuel, sans perte.** `MVKSwapchain::destroy()` appelle `forceUnpresentedImageCompletion()` : les présentations encore en attente derrière du travail non terminé perdent leur callback. `endPresentation()` ne s'exécute pas pour elles. L'image reste retenue par `beginPresentation()`, les signalers ne sont jamais rendus, et `_unpresentedImageCount` ne redescend pas. Reproducteur Vulkan : à écrire (O15 le couvre).
+- **Pas de défaut en usage valide aujourd'hui** (correction de la révision 5, qui en annonçait un). La fin forcée ne supprime les callbacks que des présentations encore **derrière du travail non terminé**. Or Vulkan interdit, hors perte, de détruire un swapchain avant la fin de ses présentations. Avec du travail terminé, même en attente d'affichage, les handlers sont appelés.
+- **Au niveau Vulkan** (`d5ba4e27`, couche détachée, `lib-d24159ce`, `build/astra/r7-present-vulkan-d24159ce/`) :
+  - `present-scheduled-after-destroy` et `present-destroy-race` détruisent le swapchain après `vkQueueWaitIdle`, avec les handlers de MoltenVK retardés de 300 ms ou de 0 à 3 ms : **8/8 verts**. Metal exécute les handlers « scheduled » d'un command buffer avant de le déclarer terminé ;
+  - `present-pending-destroy` détruit le swapchain pendant que ses présentations attendent du travail bloqué, ce qui est **invalide hors perte** : **4/4 plantages** (139) dans `MVKSwapchain::beginPresentation()`, sur le `_swapchain` nul d'une image détachée avant que son handler « scheduled » ne s'exécute (rapports de plantage conservés).
+- **Ce que R6 change.** Une perte publiée en temps fini rendra ce scénario légal : l'application recevra `VK_ERROR_DEVICE_LOST` pendant que ses présentations attendent encore, et pourra alors détruire le swapchain. Le jeton de présentation (R5, point 6) est donc un **prérequis de R6**, pas un correctif d'aujourd'hui.
 - **Conséquence pour R10 et O17.** Le blocage documenté de `nextDrawable` n'est pas reproduit dans ces conditions : Core Animation fournit un drawable de plus. Il n'a été observé qu'une fois : 1 018 à 1 023 ms, délai par défaut, sur une couche réutilisée après une fin forcée (`r7-presentation/`, première exécution). R10 reste une défense ; O17 doit d'abord reproduire ce blocage (§5).
 - Les versions successives de la sonde sont gardées : v1 (le mode fenêtre plante à la sortie, par libération en double de la fenêtre, et sa sortie est perdue), v2 (corrige ce point), v3 (témoin sans changement de taille), v4 (présentations en attente), v5 (réutilisation des textures).
 
@@ -332,7 +350,8 @@ Une tranche de 1 ms ne coûte que quand l'attente dure ; le chemin sans attente 
    - Le bloc du handler ne capture que ce jeton, et **aucune référence de vie du device**.
    - Le jeton a deux états, attaché ou terminé, sous son verrou. Le premier qui le trouve attaché fait la fin de présentation, une seule fois, et le passe à terminé : le handler s'il est appelé ; sinon le retrait, pendant le vidage de la liste différée, pour chaque jeton que le swapchain tient encore.
    - Un handler appelé plus tard trouve un jeton terminé et ne fait rien : il ne touche que le jeton.
-   - Hors perte, sans destruction de swapchain, le handler fait le travail comme aujourd'hui. Avec destruction de swapchain, le défaut actuel de §3.13 (callbacks perdus, image et signalers jamais rendus) est corrigé par la même pièce : `MVKSwapchain::destroyNow()` termine les jetons restants.
+   - **Une présentation qui commence après le détachement de son image** (handler « scheduled » exécuté après la destruction du swapchain, le plantage mesuré en §3.13) se termine aussitôt : elle signale et rend son signaler, sans `beginPresentation()` ni référence à un swapchain disparu.
+   - Hors perte, sans destruction de swapchain, le handler fait le travail comme aujourd'hui. Avec destruction de swapchain, `MVKSwapchain::destroyNow()` termine les jetons restants : callbacks supprimés par la fin forcée, image et signalers rendus.
 
 ### R6. Publication en temps fini
 
@@ -343,7 +362,10 @@ La publication ordonnée de `c78c0289` est inchangée. Une soumission bloquée r
 ### R8. Mémoire hôte importée : `vkFreeMemory` attend le retrait du travail
 
 - **Choix de la conception : l'option (b).** La perte est publiée en temps fini pour tous les devices (R6). Ce qui attend, c'est `vkFreeMemory` d'une allocation `VK_EXT_external_memory_host` qui existait au début de la perte.
-- Il attend, **par tranches de 1 ms et sans tenir aucun verrou de MoltenVK**, que se retire tout le travail commité avant le début de la perte (compte relevé par `markLost()` ; plus simplement, le compte global des handlers en attente de ce moment). Puis il libère l'allocation comme aujourd'hui. Un avertissement est émis à la première tranche.
+- **Inventaire fermé à la publication, pas à `markLost()`.** Un encodage commencé avant `markLost()` peut encore commiter ses command buffers Metal après : `execute()` ne teste la perte qu'au début, et le commit précède `endEncoding()`. Un inventaire relevé à `markLost()` le manquerait (constat de la revue).
+  - Chaque handler Metal enregistré avant la fermeture incrémente un compteur `_handlersBeforeInventory`, et le décrémente à la fin de son exécution. Il garde pour cela un indicateur capturé à l'enregistrement.
+  - `publishLoss()` ferme l'inventaire **après** que `_activeEncodings` est revenu à zéro. Il n'y a plus alors d'encodage, donc plus de commit de travail d'application : les enregistrements se font dans un encodage, qui précède `endEncoding()`, qui précède la lecture de zéro par la publication. Seul le command buffer de secours de la publication est enregistré ensuite ; il ne touche pas la mémoire de l'application.
+- `vkFreeMemory` d'une allocation importée attend, **par tranches de 1 ms et sans tenir aucun verrou de MoltenVK**, que l'inventaire soit fermé, puis que `_handlersBeforeInventory` revienne à zéro. Il libère alors l'allocation comme aujourd'hui. Un avertissement est émis à la première tranche.
 - Une allocation importée **après** le début de la perte ne l'attend pas : aucun travail encodé avant la perte ne l'utilise.
 - **Le blocage est déplacé, pas supprimé.**
   - `vkFreeMemory` n'attend sans borne que si l'application bloque elle-même son propre travail Metal pour toujours.
@@ -393,16 +415,17 @@ Chaque oracle doit échouer sur `7758838b` (ou avec la pièce correspondante ret
 | **O15** présentation et retrait | swapchain `VK_EXT_metal_surface` sur une `CAMetalLayer` détachée (la sonde §3.13 montre qu'elle fournit des drawables et rappelle les handlers), puis dans une fenêtre ; présentations en attente derrière du travail bloqué, perte, `vkDestroySwapchainKHR` et `vkDestroyDevice` pendant le blocage, puis signal | le retrait se termine sans attendre ; crochet de test : chaque jeton de présentation terminé **exactement une fois** (par le retrait) ; image et signalers rendus. **Témoin** : le même scénario sans destruction du swapchain, où le handler est appelé après le signal : le jeton est terminé une fois, par le handler, et aucun sémaphore n'est signalé deux fois. Autre témoin : la file de retrait traite le retrait d'un second device pendant que le premier a des présentations sans callback |
 | **O16** réserve d'acquisition | file Metal saturée par l'application sur la file exportée (4 places) ; une soumission qui attend la réserve ; perte | rapport en moins de 2 s ; aucun fil d'encodage dans Metal (échantillonnage des piles) ; le command buffer obtenu plus tard est relâché sans exécution |
 | **O17** drawable | **d'abord reproduire un `nextDrawable` bloqué** au niveau Metal, sans quoi l'oracle ne prouve rien (seule recette observée : couche réutilisée après une fin forcée, 1 018 à 1 023 ms, §3.13) ; puis la même condition sous une couche d'application avec `allowsNextDrawableTimeout = NO`, une soumission qui rend dans une image de swapchain, et une perte | rapport en moins de 2 s ; aucun fil d'encodage dans `nextDrawable` (échantillonnage des piles) ; un drawable obtenu plus tard est rendu à la couche |
-| **O18** handlers séparés | un command buffer avec handlers « scheduled » et « completed », celui-ci retardé de 50 ms et celui-là de 200 ms (crochets existants), perte, `vkDestroyDevice` | le device n'est retiré qu'après le retour des deux handlers (crochet de test) ; aucun accès après retrait sous Guard Malloc |
+| **O18** handlers séparés | un command buffer avec handlers « scheduled » et « completed ». **Les deux ordres sont forcés** par les crochets existants : « completed » terminé pendant que « scheduled » dort encore 200 ms, puis l'inverse ; perte, `vkDestroyDevice` pendant le handler retardé | le device n'est retiré qu'après le retour des deux handlers, dans les deux ordres (crochet de test) ; aucun accès après retrait sous Guard Malloc |
+| **O19** progression | 200 itérations d'entrelacements variés, avec une graine affichée : moment de la perte (avant, pendant ou après l'encodage de C), retards et ordre des handlers, attente hôte démarrée avant ou après la perte, destruction du device avant ou après le signal de l'application | chaque attente hôte rend la main en moins de 2 s ; chaque device est retiré exactement une fois ; le compte de vie revient à zéro (crochet) ; aucune erreur de validation |
 | **O4** file saturée | `maxActiveMetalCommandBuffersPerQueue=4` ; l'application garde 2 command buffers en attente sur la file exportée ; MoltenVK remplit les places restantes ; perte | rapport en temps fini ; `vkBeginCommandBuffer` avec préremplissage, appelé pendant la perte, rend la main |
 | **O5** attentes idle | `vkQueueWaitIdle` et `vkDeviceWaitIdle` après la perte, pendant que C est bloqué | `VK_ERROR_DEVICE_LOST` en moins de 2 s |
 | **O6** pools pendant la perte | après le rapport : `vkFreeDescriptorSets` puis `vkResetDescriptorPool` sur le pool des descriptor sets de C, puis une allocation ; reset, libération, réallocation et réenregistrement des command buffers de C ; puis signal | pas d'erreur de validation ; l'allocation après le reset rend `VK_ERROR_OUT_OF_POOL_MEMORY` ; le crochet `mvkTestGetDescriptorPoolState` montre les allocateurs **non rembobinés** (même `_gpuBufferUsed` qu'avant le reset) ; la région d'argument buffer de C garde son contenu jusqu'au signal ; allocations temporaires rendues exactement une fois (`mvkTestGetOutstandingCommandPoolAllocations`) |
 | **O9** attentes sans délai | `external-queue-wait-idle` et `external-queue-wait-query` (§5.1) ; `vkWaitForPresentKHR` si un chemin de présentation sans fenêtre est disponible | perte rapportée en moins de 2 s, puis C après le signal |
 | **O10** files Metal | `shared-queue-block` (§5.1) ; puis un troisième device, créé après la perte du premier alors que son travail est bloqué | le troisième reçoit une autre file Metal, et sa soumission se termine ; `shared-queue-block` reste `BLOCKER` tant que la question du §7 n'est pas tranchée |
-| **O11** mémoire hôte importée | C écrit dans un buffer lié à de la mémoire importée ; perte pendant le blocage ; l'attente hôte, démarrée avant la perte, puis `vkFreeMemory` sur un autre fil | l'attente rend `VK_ERROR_DEVICE_LOST` en moins de 2 s ; `vkFreeMemory` ne rend la main qu'après le signal de l'application et le retrait de C ; l'avertissement est émis ; la valeur écrite par C est dans les pages de l'application avant qu'elle les libère |
+| **O11** mémoire hôte importée | C écrit dans un buffer lié à de la mémoire importée. **L'entrelacement de la revue est forcé** : le commit de C est retenu (crochet de commit, retard de 200 ms) pour avoir lieu **après** `markLost()`, encodage de C en cours. L'attente hôte démarre avant la perte ; `vkFreeMemory` est appelé sur un autre fil dès le rapport ; l'application ne rend ses pages qu'après son retour | l'attente rend `VK_ERROR_DEVICE_LOST` en moins de 2 s ; `vkFreeMemory` ne rend la main qu'après le retrait de C (horodatages : fin du handler de C, puis retour de `vkFreeMemory`) ; la valeur écrite par C est dans les pages avant leur libération ; l'avertissement est émis. **Témoin négatif** : inventaire relevé à `markLost()` — `vkFreeMemory` rend la main avant le retrait de C |
 | **O12** listeners | `timeline-listener-aba` (§5.1), chaque attente jugée sur 10 tours ; puis, après une perte, destruction du sémaphore et du device pendant qu'un listener sur un événement importé attend, et signal ensuite | aucun faux succès ; aucun plantage sous Guard Malloc. **Fait pour l'ABA** : 6/6 rouges avant R9 (18 à 19 attentes fausses sur 20), 6/6 verts après |
 | **O13** récursion de `destroyNow()` | contrôle statique de R1 ; O2 détruit un objet de chacune des 7 classes, dont un swapchain et ses images si un chemin sans fenêtre existe | contrôle vert ; aucune récursion, aucun plantage |
-| **O7** témoins négatifs | chaque pièce retirée à tour de rôle (R1 sans `final`, avec interception au point central, ou avec un appel à la base resté à `destroy()` ; R2 avec un appel direct à Metal sur le fil d'encodage ; R10 avec `nextDrawable` sur le fil d'encodage ; R5 avec deux lectures de compteurs au lieu du compte unique, avec une seule référence pour les deux handlers Metal, ou avec les handlers de présentation comptés dans la vie du device ; R8 sans l'attente de `vkFreeMemory` ; R3 avec `waitUntilCompleted` ; R5 avec suppression inline ; R8 désactivé ; R9 avec l'adresse du sitter) | l'oracle correspondant échoue |
+| **O7** témoins négatifs | chaque pièce retirée à tour de rôle (R1 sans `final`, avec interception au point central, ou avec un appel à la base resté à `destroy()` ; R2 avec un appel direct à Metal sur le fil d'encodage ; R10 avec `nextDrawable` sur le fil d'encodage ; R5 avec deux lectures de compteurs au lieu du compte unique, avec une seule référence pour les deux handlers Metal, ou avec les handlers de présentation comptés dans la vie du device ; R8 sans l'attente de `vkFreeMemory`, ou avec l'inventaire relevé à `markLost()` ; R3 avec `waitUntilCompleted` ; R5 avec suppression inline ; R8 désactivé ; R9 avec l'adresse du sitter) | l'oracle correspondant échoue |
 | **O8** non-régression et coût | oracles de perte, binaires, de continuation, suite M4, CTS de synchronisation ; `QueueRetirementBench` et `BinarySemaphoreBench` | tout vert ; coût mesuré avant/après, sur une charge identique |
 
 ### 5.1 Reproducteurs écrits dès maintenant
@@ -416,17 +439,32 @@ Ces modes de `PerVertexLossTests.mm` reproduisent, sur le runtime actuel, les co
 | `shared-queue-block` | deux devices reçoivent la même file Metal ; un device sain attend le travail d'un device perdu, par les places (file pleine) ou par l'ordre d'exécution (témoin à 64 places) |
 | `timeline-listener-aba` | sans perte : un ancien listener réveille une attente plus récente, qui rend `VK_SUCCESS` sous sa valeur. **Corrigé par R9** (`d24159ce`) |
 
+### 5.2 Jeton de présentation : prémisse vérifiée avant implémentation
+
+La revue autorisait le jeton comme correctif isolé, avec un oracle qui met le callback en concurrence avec la destruction du swapchain. Avant de toucher au runtime, j'ai vérifié qu'un défaut existe aujourd'hui en usage valide. Il n'en existe pas (§3.13) :
+
+| Oracle (`PerVertexLossTests.mm`, `d5ba4e27`) | Usage | `lib-d24159ce` |
+| --- | --- | --- |
+| `present-scheduled-after-destroy` : destruction après `vkQueueWaitIdle`, handlers retardés de 300 ms | valide | 4/4 verts |
+| `present-destroy-race` : 20 tours, handlers retardés de 0 à 3 ms, en course avec la destruction | valide | 4/4 verts |
+| `present-pending-destroy` : destruction pendant que les présentations attendent du travail bloqué | invalide hors perte ; légal après R6 | 4/4 plantages dans `MVKSwapchain::beginPresentation()` |
+
+- Un correctif isolé n'aurait eu, comme oracle rouge, qu'un scénario que Vulkan interdit aujourd'hui. Je ne l'ai donc **pas implémenté**.
+- Le jeton reste une pièce de R5, livrée avec R6.
+- Ses oracles sont prêts : `present-pending-destroy` passera du plantage au vert avec R5, puis sa variante avec perte (O15) avec R6. Les deux modes valides restent des oracles de non-régression.
+- Le crochet `mvkTestGetUnpresentedImageCount` (`d5ba4e27`) n'existe que dans les bibliothèques construites à partir de ce commit : `begun_at_destroy=-1` sur `lib-d24159ce` est attendu.
+
 ## 6. Ordre d'implémentation proposé, après la revue
 
 0. R9 et O12 : fait (`d24159ce`).
 1. R1, avec la surface retenue, puis O2 et O13.
 2. R3, puis O5.
 3. R2 et R10, puis O4, O10, O16 et O17.
-4. R5, dont le jeton de présentation, puis O3, O14, O15 et O18. Le jeton corrige aussi le défaut actuel de §3.13 et peut être proposé avant R6.
+4. R5, dont le jeton de présentation (§5.2), puis O3, O14, O15 et O18.
 5. R8, puis O11.
-6. R6 : O1 et O9 passent de `BLOCKER` à `PASS`, seulement si O2 à O6 et O10 à O18 sont verts sur la même bibliothèque.
-7. R4, puis O6.
-8. O7 et O8.
+6. R4, puis O6.
+7. O7, O8 et O19.
+8. R6 : O1 et O9 passent de `BLOCKER` à `PASS`, **seulement si O2 à O8 et O10 à O19 sont verts** sur la même bibliothèque.
 
 ## 7. Questions pour la revue
 
@@ -439,4 +477,4 @@ Ces modes de `PerVertexLossTests.mm` reproduisent, sur le runtime actuel, les co
 7. **Mémoire hôte importée** (R8) : la conception adopte (b) ; la revue confirme-t-elle ce choix, avec le blocage déplacé vers `vkFreeMemory` ?
 8. **Handlers de présentation** (R5) : l'hypothèse a été mesurée fausse (§3.13) ; le jeton détachable, sans attente, répond-il à la question ?
 9. **R9** : accordé par la revue ; fait.
-10. **Jeton de présentation** (R5, point 6) : peut-il être proposé seul, avant R6, puisqu'il corrige aussi le défaut actuel de la destruction d'un swapchain avec des présentations en attente ?
+10. **Jeton de présentation** (R5, point 6) : la mesure de §5.2 montre qu'il ne corrige rien en usage valide aujourd'hui. D'accord pour qu'il reste une pièce de R5, livrée avec R6 plutôt que seule ?
