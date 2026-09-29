@@ -9,7 +9,7 @@ A PerVertexKHR pipeline with tessellation is admitted only for:
 - triangles, equal spacing, `cw` or `ccw`, no point mode;
 - three input and output control points, and the default upper-left domain origin (no `VkPipelineTessellationDomainOriginStateCreateInfo`);
 - TCS and TES without descriptor resources or push constants, because the float32 TessLevel ABI excludes Metal argument buffers (VS and fragment resources are allowed and use the pipeline's own binding model);
-- vertex inputs without divisors, static state except `VK_DYNAMIC_STATE_SCISSOR`, a single view and a single sample;
+- vertex inputs without divisors, static state except `VK_DYNAMIC_STATE_SCISSOR`, one viewport and one scissor, a single view and a single sample;
 - no specialization; entry points may have any name, and Vulkan pipeline caches are allowed;
 - direct non-indexed draws of one instance, with any `firstVertex` and `firstInstance`, and DrawID 0 (the VS reads a bound DrawID of 0).
 
@@ -69,7 +69,7 @@ Scenarios cover:
 - both windings;
 - seams: two patches of level 1, 2 or 3 sharing an edge, which is the `u = 0` edge of one and the `w = 0` edge of the other (rule 4);
 - draws of 1, 2, 4 and 5 vertices, counted by the VS storage counter;
-- a dynamic scissor: a full, a left and a right scissor, and two draws of the same patches in one render pass with a different scissor each; every PerVertex image matches the ordinary pipeline and stays inside its scissor, and a dynamic viewport is still refused;
+- a dynamic scissor: a full, a left and a right scissor, and two draws of the same patches in one render pass with a different scissor each; every PerVertex image matches the ordinary pipeline and stays inside its scissor, and a dynamic viewport, like two viewports and scissors, is still refused;
 - a pipeline created in an empty Vulkan pipeline cache, then through a cache created from its data: every stage reports an application cache hit, the restored cache gains no entry, and both images equal the one without cache;
 - every entry point renamed (`vertMain`, `tescMain`, `teseMain`, `fragMain`): the image matches the ordinary pipeline built from the same stages and equals the one of the shaders named `main`, and a TCS descriptor behind a renamed entry point is still refused. A TCS module with two entry points, `tescDescriptor` first, then `tescMain`, renders through `tescMain` and is refused through `tescDescriptor`;
 - `firstVertex` 3 and `firstInstance` 1: zeroed decoy vertices precede the data, and a per-instance attribute holds a decoy tag 6 for instance 0 and 7 for instance 1. The VS adds `gl_InstanceIndex - 1` and `tag - 7` to the levels, and its storage counter also sums `gl_VertexIndex` (33), `gl_InstanceIndex` (6), the tag (42), `gl_BaseVertex` (18) and `gl_BaseInstance` (6), on the ordinary and the PerVertex pipeline;
