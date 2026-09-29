@@ -96,6 +96,7 @@ library mutation-offset ON ON 's/uint key = offsets\[i\] \+ triangle;/uint key =
 library mutation-helper-missing ON ON 's/kernel void tessLevelsToHalfFactors\(/kernel void tessLevelsToHalfFactorsUnavailable(/'
 library mutation-first-vertex-origin ON ON 's/MTLRegionMake2D\(firstVertex, firstInstance, vertexCount, 1\)/MTLRegionMake2D(0, firstInstance, vertexCount, 1)/' Commands/MVKCmdDraw.mm
 library mutation-first-instance-origin ON ON 's/MTLRegionMake2D\(firstVertex, firstInstance, vertexCount, 1\)/MTLRegionMake2D(firstVertex, 0, vertexCount, 1)/' Commands/MVKCmdDraw.mm
+library mutation-cache-layout ON ON 's/^(\t+)slCache->addShaderLibrary\(&shaderConversionConfig, resultInfo, compressedMSL\);$/$1resultInfo.capturedVertexLayout = {};\n$1slCache->addShaderLibrary(&shaderConversionConfig, resultInfo, compressedMSL);/' GPUObjects/MVKPipeline.mm
 library mutation-entry-default ON ON 's/^\treflect\.set_entry_point\(entryName, model\);$//' GPUObjects/MVKPipeline.mm
 library mutation-entry-main ON ON 's/spv::ExecutionModelTessellationControl, tessCtlEntry\)/spv::ExecutionModelTessellationControl, "main")/' GPUObjects/MVKPipeline.mm
 
@@ -130,6 +131,7 @@ for winding in ccw cw; do
 	topology dev resources "$winding" 0 "TES_TOPOLOGY PASS" "VS storage counter: expected=9 ordinary=9 pervertex=9"
 	topology dev entry-names "$winding" 0 "TES_TOPOLOGY PASS" "renamed entry points: covered=[1-9]"
 	topology dev entry-shared-module "$winding" 0 "TES_TOPOLOGY PASS" "renamed entry points: covered=[1-9]"
+	topology dev cache-reuse "$winding" 0 "TES_TOPOLOGY PASS" "stage cache hits: fill=0 reuse=4 of 4"
 	first_sums="vertex=33 instance=6 tag=42 base_vertex=18 base_instance=6"
 	topology dev first "$winding" 0 "TES_TOPOLOGY PASS" "VS storage sums: expected $first_sums; ordinary $first_sums; pervertex $first_sums"
 	for count in 1 2 4 5; do topology dev "vertices$count" "$winding" 0 "TES_TOPOLOGY PASS" "VS storage counter: expected=$count ordinary=$count pervertex=$count"; done
@@ -138,7 +140,7 @@ done
 PREFILL=1 topology dev mixed ccw 0 "TES_TOPOLOGY PASS"
 PREFILL=2 topology dev mixed cw 0 "TES_TOPOLOGY PASS"
 # 2. Deterministic refusals before submission; ordinary tessellation keeps these modes.
-for scenario in reject-quads reject-fractional reject-point-mode reject-lower-left reject-descriptor reject-push-constant reject-cache reject-instances reject-descriptor-named reject-descriptor-shared; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
+for scenario in reject-quads reject-fractional reject-point-mode reject-lower-left reject-descriptor reject-push-constant reject-instances reject-descriptor-named reject-descriptor-shared; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
 for scenario in reject-indirect-tes reject-indexed-indirect-tes; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS" "vkEndCommandBuffer=-8"; done
 topology no-admission reject-no-admission ccw 0 "TES_TOPOLOGY PASS"
 topology shipping public-device-gate ccw 0 "TES_TOPOLOGY PASS"
@@ -167,7 +169,7 @@ pilot dev ordered ordered.frag
 pilot dev swapped ordered-swapped.frag
 pilot dev wrong-patch wrong-patch.frag
 pilot dev control control.frag
-for mode in ordered-compute reject-instance-compute reject-cache reject-patch-size reject-specialization reject-instance reject-indexed; do pilot dev "$mode" ordered.frag; done
+for mode in ordered-compute reject-instance-compute reject-patch-size reject-specialization reject-instance reject-indexed; do pilot dev "$mode" ordered.frag; done
 pilot no-admission reject-public ordered.frag
 pilot no-admission control control.frag
 # 4. Generator mutations must be caught: reversed winding, moved level-3 interior coordinates, patch offsets ignored.
@@ -179,6 +181,8 @@ topology mutation-offset mixed ccw 2 "FAIL PerVertex replay matches ordinary TES
 # image and the VS sums of that coordinate differ while those of the other coordinate stay exact.
 topology mutation-first-vertex-origin first ccw 2 "FAIL PerVertex replay matches ordinary TES coverage" "pervertex vertex=15 instance=6 tag=42 base_vertex=0 base_instance=6"
 topology mutation-first-instance-origin first ccw 2 "FAIL PerVertex replay matches ordinary TES coverage" "pervertex vertex=33 instance=0 tag=36 base_vertex=18 base_instance=0"
+# The captured layout is lost when a cache is read back: the pipeline created through the restored cache is refused.
+topology mutation-cache-layout cache-reuse ccw 1 "ERROR: Create pipeline interp-reuse: -8"
 # Renamed entry points while the TCS resource check still reflects main: SPIRV-Cross's exception escapes pipeline creation.
 topology mutation-entry-main entry-names ccw 1 "ERROR: Entry point does not exist"
 # The resource check reflects the module's first TCS entry point instead of pName: the admitted tescMain is refused.

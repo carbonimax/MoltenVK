@@ -1416,8 +1416,6 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 			mvkUsesResources(_tessEvalModule->getSPIRV(), spv::ExecutionModelTessellationEvaluation, tessEvalEntry)) {
 			return unsupported("TES requires TCS and TES stages without descriptors or push constants for the float32 tessellation level ABI.");
 		}
-		// The persistent cache serializes the TES options, but this test path does not qualify cache reuse.
-		if (_pipelineCache) { return unsupported("TES test disables Vulkan pipeline caches."); }
 		// The domain origin extension changes the winding convention of the generated triangles.
 		if (!getMetalFeatures().nonUniformThreadgroups || pCreateInfo->stageCount != 4 || !_dynamicStateFlags.empty() || !pCreateInfo->pTessellationState || pCreateInfo->pTessellationState->patchControlPoints != 3 || pCreateInfo->pTessellationState->pNext || getRenderingCreateInfo(pCreateInfo)->viewMask || pCreateInfo->pMultisampleState->rasterizationSamples != VK_SAMPLE_COUNT_1_BIT || !pCreateInfo->pVertexInputState || pCreateInfo->pVertexInputState->pNext) {
 			return unsupported("TES test requires static single-view, single-sample triangle patches with three control points, an upper-left domain and no vertex divisors.");

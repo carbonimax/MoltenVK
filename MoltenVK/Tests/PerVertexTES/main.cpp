@@ -283,19 +283,13 @@ int main(int argc, char** argv) {
         pipelineInfo.layout = pipelineLayout;
         pipelineInfo.renderPass = renderPass;
         VkPipeline pipeline = VK_NULL_HANDLE;
-        VkPipelineCache cache = VK_NULL_HANDLE;
-        if (mode == "reject-cache") {
-            VkPipelineCacheCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
-            check(vkCreatePipelineCache(device, &info, nullptr, &cache), "Create cache");
-        }
         if (mode == "reject-patch-size") tessellation.patchControlPoints = 4;
         VkSpecializationInfo specialization{};
         if (mode == "reject-specialization") stages[1].pSpecializationInfo = &specialization;
-        VkResult pipelineResult = vkCreateGraphicsPipelines(device, cache, 1, &pipelineInfo, nullptr, &pipeline);
-        if (mode == "reject-public" || mode == "reject-cache" || mode == "reject-patch-size" || mode == "reject-specialization") {
+        VkResult pipelineResult = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline);
+        if (mode == "reject-public" || mode == "reject-patch-size" || mode == "reject-specialization") {
             std::printf("pipeline rejection: %d (expected %d)\n", pipelineResult, VK_ERROR_FEATURE_NOT_PRESENT);
             if (pipeline) vkDestroyPipeline(device, pipeline, nullptr);
-            if (cache) vkDestroyPipelineCache(device, cache, nullptr);
             vkDestroyDevice(device, nullptr);
             vkDestroyInstance(instance, nullptr);
             return pipelineResult == VK_ERROR_FEATURE_NOT_PRESENT ? 0 : 2;
