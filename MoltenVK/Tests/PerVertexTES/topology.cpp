@@ -152,6 +152,7 @@ int main(int argc, char** argv) {
 		scenarios["cache-reuse"] = scenarios["entry-names"];
 		scenarios["dynamic-scissor"] = {{uniform(two), uniform(three), uniform(two)}, {}};
 		scenarios["dynamic-viewport"] = scenarios["dynamic-scissor"];
+		scenarios["dynamic-both"] = scenarios["dynamic-scissor"];
 		for (uint32_t level : {1u, 2u, 3u}) {
 			Scenario seam{{uniform(bits(float(level))), uniform(bits(float(level)))}};
 			seam.seam = true;
@@ -901,6 +902,54 @@ int main(int argc, char** argv) {
 		auto verdict = [&](bool ok, const char* what) { std::printf("  %s %s\n", ok ? "ok  " : "FAIL", what); pass &= ok; };
 		auto prior = [](const std::vector<uint8_t>& rgba) { return rgba[0] == 255 && rgba[1] == 0 && rgba[2] == 255 && rgba[3] == 255; };
 
+		if (scenarioName == "dynamic-both") {
+			// Dynamic viewport and scissor together: in one render pass, the first draw goes through the left half clipped to
+			// the first cell, the second through the right half clipped to the last cell. The result must equal the left image
+			// on the first cell, the right image on the last, and stay empty in between; each image must match ordinary TES.
+			const float half = float(kWidth) / 2;
+			const VkRect2D full{{0, 0}, {kWidth, kHeight}}, first{{0, 0}, {kCell, kHeight}}, last{{2 * kCell, 0}, {kCell, kHeight}};
+			const VkViewport left{0, 0, half, float(kHeight), 0, 1}, right{half, 0, half, float(kHeight), 0, 1};
+			const std::pair<const char*, std::vector<DynamicDraw>> cases[] = {{"left", {{full, 0, 9, left}}}, {"right", {{full, 0, 9, right}}}, {"both", {{first, 0, 9, left}, {last, 0, 9, right}}}};
+			std::map<std::string, Image> images;
+			bool submitted = true;
+			for (const auto& c : cases) {
+				for (const char* frag : {"interp.frag.spv", "ordinary.frag.spv"}) {
+					PipelineOptions o{"topology.tesc.spv", tese, frag};
+					o.dynamicScissor = o.dynamicViewport = true;
+					o.dynamicDraws = c.second;
+					const std::string name = std::string(frag == std::string("interp.frag.spv") ? "interp-" : "ordinary-") + c.first;
+					images[name] = render(o, scenario.patches, name);
+					submitted &= images[name].submit == VK_SUCCESS && images[name].wait == VK_SUCCESS;
+				}
+			}
+			verdict(submitted, "all submissions and fences succeed");
+			for (const auto& c : cases) {
+				const Image& mine = images[std::string("interp-") + c.first];
+				const Image& theirs = images[std::string("ordinary-") + c.first];
+				uint32_t coverageMismatch = 0, valueMismatch = 0, coveredPixels = 0;
+				for (uint32_t i = 0; i < kWidth * kHeight; ++i) {
+					bool a = covered(theirs.rgba, i), b = covered(mine.rgba, i);
+					coveredPixels += a;
+					if (a != b) { ++coverageMismatch; continue; }
+					for (int k = 0; a && k < 3; ++k) valueMismatch += std::abs(int(theirs.rgba[4 * i + k]) - int(mine.rgba[4 * i + k])) > 2;
+				}
+				std::printf("  viewport and scissor %s: covered=%u coverage_mismatch=%u value_mismatch(>2)=%u\n", c.first, coveredPixels, coverageMismatch, valueMismatch);
+				verdict(coveredPixels > 0 && coverageMismatch == 0 && valueMismatch == 0, (std::string("viewport and scissor ") + c.first + ": PerVertex replay matches ordinary TES").c_str());
+			}
+			const auto& both = images["interp-both"].rgba;
+			uint32_t firstCell = 0, middle = 0, lastCell = 0;
+			for (uint32_t i = 0; i < kWidth * kHeight; ++i) {
+				uint32_t x = i % kWidth;
+				if (x < kCell) firstCell += memcmp(&both[4 * i], &images["interp-left"].rgba[4 * i], 4) != 0;
+				else if (x < 2 * kCell) middle += covered(both, i);
+				else lastCell += memcmp(&both[4 * i], &images["interp-right"].rgba[4 * i], 4) != 0;
+			}
+			std::printf("  viewport and scissor both: first cell differing from left=%u, covered middle=%u, last cell differing from right=%u\n", firstCell, middle, lastCell);
+			verdict(firstCell == 0 && middle == 0 && lastCell == 0, "viewport and scissor both: each draw keeps its own viewport and scissor");
+			std::printf("TES_TOPOLOGY %s %s %s\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), winding.c_str());
+			vkDeviceWaitIdle(device);
+			return pass ? 0 : 2;
+		}
 		if (scenarioName == "dynamic-viewport") {
 			// Three patches, one per 64-pixel cell, drawn through a dynamic viewport: the full target, its left half, its right
 			// half, and in lr two draws of the same patches in one render pass, left then right. Each draw's replay, after its
