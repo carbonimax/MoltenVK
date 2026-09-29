@@ -23,7 +23,9 @@
 // - reuse after forced completion: the recipe that once blocked nextDrawable, 3 rounds on fresh layers;
 // - presentation ahead: 3 drawables presented 0.1, 0.5, 1 and 2 s ahead, whether Core Animation honours the time, and
 //   how long a nextDrawable made meanwhile takes;
-// - tight loop: 120 frames presented without waiting, display sync on: how long nextDrawable waits.
+// - tight loop: 120 frames presented without waiting, display sync on: how long nextDrawable waits;
+// - recipes: the forced completion of pending presentations, then 3 drawables held, and a fourth nextDrawable, with
+//   controls; then, as MoltenVK retains them, the dropped drawables kept, and 6 drawables requested one at a time.
 // The window is that of a regular, launched and active application; its visibility is printed. Each section uses a new
 // layer. The lines are data; exit 0 when the probe completed.
 // Usage: MetalPresentationProbe detached|window
@@ -482,6 +484,52 @@ int main(int argc, char** argv) {
 					bool late = !dispatch_semaphore_wait(returned, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC));
 					std::printf("PRESENT_PROBE DATA recipe=%s round=%d returned_after_release=%d took_ms=%.0f\n", recipe.name, round, int(late), tookMs);
 				}
+			}
+		}
+		// 12. As MoltenVK does: the drawables whose presentations the forced completion dropped stay retained, since the
+		// presented handler that would release them never runs. The size is restored, as a replacement swapchain of the
+		// same extent does. Then 6 drawables requested one at a time, each held: which requests wait, and how long each;
+		// then the dropped drawables released, and one more request. With and without the timeout, 3 rounds each.
+		for (int timeoutAllowed = 1; timeoutAllowed >= 0; --timeoutAllowed) {
+			for (int round = 0; round < 3; ++round) {
+				layer = makeLayer(device);
+				NSMutableArray* dropped = [NSMutableArray array];
+				id<MTLSharedEvent> gate = [device newSharedEvent];
+				NSMutableArray* gateWork = [NSMutableArray array];
+				for (int frame = 0; frame < 2; ++frame) {
+					id<CAMetalDrawable> drawable = [layer nextDrawable];
+					if (!drawable) { continue; }
+					[dropped addObject: drawable];
+					id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
+					[commandBuffer encodeWaitForEvent: gate value: 1];
+					clear(commandBuffer, drawable.texture);
+					[commandBuffer addScheduledHandler: ^(id<MTLCommandBuffer>) { [drawable present]; }];
+					[commandBuffer commit];
+					[gateWork addObject: commandBuffer];
+				}
+				pumpUntil(^{ return false; }, 200);
+				layer.drawableSize = CGSizeMake(1, 1);
+				pumpUntil(^{ return false; }, 200);
+				gate.signaledValue = 1;
+				for (id<MTLCommandBuffer> commandBuffer in gateWork) { [commandBuffer waitUntilCompleted]; }
+				layer.drawableSize = CGSizeMake(64, 64);
+				layer.allowsNextDrawableTimeout = timeoutAllowed;
+				NSMutableArray* held = [NSMutableArray array];
+				std::string timings;
+				for (int i = 0; i < 6; ++i) {
+					double begin = nowMs();
+					id drawable = [layer nextDrawable];
+					char entry[48];
+					std::snprintf(entry, sizeof(entry), "%s%.0f%s", i ? "," : "", nowMs() - begin, drawable ? "" : "(nil)");
+					timings += entry;
+					if (drawable) { [held addObject: drawable]; }
+				}
+				[dropped removeAllObjects];
+				double begin = nowMs();
+				@autoreleasepool { [layer nextDrawable]; }
+				double afterRelease = nowMs() - begin;
+				std::printf("PRESENT_PROBE DATA dropped_retained allowsNextDrawableTimeout=%d round=%d next_drawable_ms=%s after_dropped_released_ms=%.0f\n",
+							timeoutAllowed, round, timings.c_str(), afterRelease);
 			}
 		}
 		std::printf("PRESENT_PROBE DONE mode=%s\n", argv[1]);
