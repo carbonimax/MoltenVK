@@ -148,8 +148,9 @@
 //   fourth: on macOS 27.2, Core Animation makes that call wait about one second. The device is lost 50 ms after the call
 //   entered, if it has not returned. nextDrawable is timed through a swizzle, and mvkTestGetLossCounters gives the encodings in progress.
 //   Exit 0 when nextDrawable was entered before the loss and returned after it, no encoding still waits 20 ms after the
-//   loss, the loss is reported before nextDrawable returns, and the late drawable is released to the layer; 1
-//   otherwise. Before R10 an encoding waits in nextDrawable, and holds the loss report back until it returns.
+//   loss, the loss is reported before nextDrawable returns, and the late drawable is released to the layer; 3 with
+//   "DRAWABLE_WAIT SKIP" when nextDrawable did not wait across the loss (a system without this wait); 1 otherwise.
+//   Before R10 an encoding waits in nextDrawable, and holds the loss report back until it returns.
 // Exit 2 for a setup failure, 3 when the device lacks a capability.
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
@@ -1869,6 +1870,9 @@ id nextDrawableTimed(id self, SEL command) {
 		gNextDrawableReturnedMs = drawableClockMs();
 		gNextDrawableInside = 0;
 	}
+	// PERVERTEX_DRAWABLE_NIL=1: from the timed call on, every call returns nil, as when every attempt of MoltenVK times
+	// out, to exercise its nil path.
+	if (gTimedNextDrawableCall && call >= gTimedNextDrawableCall && getenv("PERVERTEX_DRAWABLE_NIL")) { return nil; }
 	return drawable;
 }
 
@@ -2069,6 +2073,7 @@ int drawableWaitLoss(Context& c) {
 	bool encodingWaits = insideAfterLoss && activeEncodingsAfterLoss > 0;
 	bool reportedBeforeReturn = reportMs >= 0 && (returnedMs < 0 || reportMs < returnedMs);
 	bool pass = forced && !encodingWaits && reportedBeforeReturn && lateReleased;
+	bool skip = !forced && (enteredMs < 0 || returnedMs < lossMs);	// nextDrawable did not wait: this system has no such wait
 	std::printf("pending_at_recreate=%u next_drawable_calls=%d timed_call=%d entered=%.0f ms loss=%.0f ms returned=%.0f ms reported=%.0f ms (wait=%d) "
 				"submit=%d\n", pendingAtRecreate, gNextDrawableCalls.load(), gTimedNextDrawableCall, enteredMs, lossMs, returnedMs, reportMs, int(reported),
 				int(submitted));
@@ -2076,6 +2081,7 @@ int drawableWaitLoss(Context& c) {
 				"next_drawable_on_submitting_thread=%d late_drawable_released=%d\n", insideAtLoss, activeEncodingsAtLoss, insideAfterLoss,
 				activeEncodingsAfterLoss, int(isSubmitterThread), int(lateReleased));
 	std::printf("DRAWABLE_WAIT %s\n", pass ? "PASS: no encoding waits in nextDrawable; the loss is reported before it returns, and the late drawable is released"
+				: skip ? "SKIP: nextDrawable did not wait across the loss on this system, so the interleaving cannot be forced"
 				: !forced ? "FAIL: the interleaving was not forced: nextDrawable did not wait across the loss"
 				: encodingWaits ? "FAIL: an encoding waits in nextDrawable after the loss began, and holds the loss report back"
 				: !reportedBeforeReturn ? "FAIL: the loss was reported only after nextDrawable returned"
@@ -2089,7 +2095,7 @@ int drawableWaitLoss(Context& c) {
 	vkDestroyFence(c.device, fence, nullptr);
 	[gate release];
 	[layer release];
-	return pass ? 0 : 1;
+	return pass ? 0 : skip ? 3 : 1;
 }
 
 int presentation(Context& c, const std::string& mode) {
