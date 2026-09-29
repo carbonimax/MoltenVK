@@ -144,6 +144,7 @@ int main(int argc, char** argv) {
 		scenarios["drawid"] = {{uniform(two), uniform(three)}, {}, false, false, "drawid.vert.spv"};
 		scenarios["resources"] = {{uniform(two), {{0, three, three, three}}, uniform(three)}, {}, false, false, "resources.vert.spv", true};
 		scenarios["inner-nan"] = {{{{two, two, two, nan}}}, {}, true};
+		scenarios["entry-names"] = {{uniform(two), uniform(three)}, {}};
 		for (uint32_t level : {1u, 2u, 3u}) {
 			Scenario seam{{uniform(bits(float(level))), uniform(bits(float(level)))}};
 			seam.seam = true;
@@ -468,7 +469,7 @@ int main(int argc, char** argv) {
 			check(vkCreateShaderModule(device, &info, nullptr, &result), "Create shader module");
 			return modules[name] = result;
 		};
-		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, cache = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; };
+		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, cache = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; bool named = false; };
 		auto pipelineLayout = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureLayout : o.capture == 2 ? fragmentCaptureLayout : o.uniform ? uniformLayout : o.resources ? resourceLayout : o.push ? pushLayout : emptyLayout; };
 		auto descriptorSet = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureSet : o.capture == 2 ? fragmentCaptureSet : o.resources ? resourceSet : VK_NULL_HANDLE; };
 		auto createPipeline = [&](const PipelineOptions& o, VkPipeline& pipeline) {
@@ -479,7 +480,9 @@ int main(int argc, char** argv) {
 				stages[i].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 				stages[i].stage = stageBits[i];
 				stages[i].module = module(names[i]);
-				stages[i].pName = "main";
+				// Named variants rename every entry point, as HLSL front ends commonly do.
+				static const char* const kNamedEntries[4] = {"vertMain", "tescMain", "teseMain", "fragMain"};
+				stages[i].pName = o.named ? kNamedEntries[i] : "main";
 			}
 			// first.vert.spv also reads a per-instance tag from binding 1.
 			const bool tagged = o.vert == "first.vert.spv";
@@ -831,6 +834,8 @@ int main(int argc, char** argv) {
 			else if (scenarioName == "reject-point-mode") o.tese = "points.tese.spv";
 			else if (scenarioName == "reject-lower-left") o.lowerLeft = true;
 			else if (scenarioName == "reject-descriptor") { o.tesc = "descriptor.tesc.spv"; o.uniform = true; }
+			// The same TCS descriptor behind renamed entry points must still be found.
+			else if (scenarioName == "reject-descriptor-named") { o = {"descriptor-named.tesc.spv", ccw ? "ccw-named.tese.spv" : "cw-named.tese.spv", "interp-named.frag.spv"}; o.vert = "topology-named.vert.spv"; o.uniform = o.named = true; }
 			else if (scenarioName == "reject-cache") o.cache = true;
 			else if (scenarioName == "reject-push-constant") { o.tesc = "push.tesc.spv"; o.push = true; }
 			else if (scenarioName == "reject-no-admission") {}
@@ -849,7 +854,7 @@ int main(int argc, char** argv) {
 			actual = createPipeline(o, pipeline);
 			// The same modes stay available to ordinary tessellation.
 			PipelineOptions ordinary = o;
-			ordinary.frag = "ordinary.frag.spv";
+			ordinary.frag = o.named ? "ordinary-named.frag.spv" : "ordinary.frag.spv";
 			VkPipeline ordinaryPipeline = VK_NULL_HANDLE;
 			VkResult ordinaryResult = createPipeline(ordinary, ordinaryPipeline);
 			// Ordinary point-mode TES pipelines already fail in MoltenVK (point size with a triangle input
@@ -863,6 +868,33 @@ int main(int argc, char** argv) {
 		bool pass = true;
 		auto verdict = [&](bool ok, const char* what) { std::printf("  %s %s\n", ok ? "ok  " : "FAIL", what); pass &= ok; };
 		auto prior = [](const std::vector<uint8_t>& rgba) { return rgba[0] == 255 && rgba[1] == 0 && rgba[2] == 255 && rgba[3] == 255; };
+
+		if (scenarioName == "entry-names") {
+			// Every entry point renamed: the PerVertex image must match the ordinary pipeline built from the same renamed
+			// stages, and equal byte for byte the PerVertex image of the same shaders named main.
+			PipelineOptions named{"topology-named.tesc.spv", ccw ? "ccw-named.tese.spv" : "cw-named.tese.spv", "interp-named.frag.spv"};
+			named.vert = "topology-named.vert.spv";
+			named.named = true;
+			PipelineOptions ordinaryNamed = named;
+			ordinaryNamed.frag = "ordinary-named.frag.spv";
+			Image ordinaryImage = render(ordinaryNamed, scenario.patches, "ordinary-named");
+			Image namedImage = render(named, scenario.patches, "interp-named");
+			Image mainImage = render({"topology.tesc.spv", tese, "interp.frag.spv"}, scenario.patches, "interp");
+			verdict(ordinaryImage.submit == VK_SUCCESS && ordinaryImage.wait == VK_SUCCESS && namedImage.submit == VK_SUCCESS && namedImage.wait == VK_SUCCESS && mainImage.submit == VK_SUCCESS && mainImage.wait == VK_SUCCESS, "all submissions and fences succeed");
+			uint32_t coverageMismatch = 0, valueMismatch = 0, coveredPixels = 0;
+			for (uint32_t i = 0; i < kWidth * kHeight; ++i) {
+				bool a = covered(ordinaryImage.rgba, i), b = covered(namedImage.rgba, i);
+				coveredPixels += a;
+				if (a != b) { ++coverageMismatch; continue; }
+				for (int c = 0; a && c < 3; ++c) valueMismatch += std::abs(int(ordinaryImage.rgba[4 * i + c]) - int(namedImage.rgba[4 * i + c])) > 2;
+			}
+			std::printf("  ordinary vs PerVertex, renamed entry points: covered=%u coverage_mismatch=%u value_mismatch(>2)=%u\n", coveredPixels, coverageMismatch, valueMismatch);
+			verdict(coveredPixels > 0 && coverageMismatch == 0 && valueMismatch == 0, "PerVertex replay with renamed entry points matches ordinary TES coverage and interpolation");
+			verdict(namedImage.rgba == mainImage.rgba, "PerVertex image with renamed entry points equals the one with main entry points");
+			std::printf("TES_TOPOLOGY %s %s %s\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), winding.c_str());
+			vkDeviceWaitIdle(device);
+			return pass ? 0 : 2;
+		}
 
 		if (scenario.expectLost) {
 			Image lost = render({"topology.tesc.spv", tese, "interp.frag.spv"}, scenario.patches, "pervertex");
