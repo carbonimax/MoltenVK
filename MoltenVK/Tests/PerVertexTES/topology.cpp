@@ -155,6 +155,17 @@ int main(int argc, char** argv) {
 		scenarios["dynamic-viewport"] = scenarios["dynamic-scissor"];
 		scenarios["dynamic-both"] = scenarios["dynamic-scissor"];
 		scenarios["drawid-multi"] = {{uniform(two), uniform(two)}, {}};
+		// Three draws of level-1 data at a 16-byte stride, reaching levels 1, 2 and 3.
+		scenarios["drawid-multi3"] = {{uniform(one), uniform(one), uniform(one)}, {}};
+		// Two draws from vertex 3 with firstInstance 1: DrawID with the stage-in origin and its per-instance attribute.
+		Scenario drawIdFirst{{uniform(two), uniform(two)}, {}};
+		drawIdFirst.firstVertex = 3;
+		drawIdFirst.firstInstance = 1;
+		scenarios["drawid-first"] = drawIdFirst;
+		// Dynamic viewport and scissor with the lower-left origin.
+		Scenario lowerLeftDynamic = scenarios["dynamic-both"];
+		lowerLeftDynamic.lowerLeft = true;
+		scenarios["lower-left-dynamic"] = lowerLeftDynamic;
 		// Every proven level under the lower-left domain origin, with the full set of checks.
 		Scenario lowerLeft{{uniform(one), uniform(two), uniform(three)}, {}};
 		lowerLeft.lowerLeft = true;
@@ -277,12 +288,21 @@ int main(int argc, char** argv) {
 		if (!ordinaryOnly) deviceExtensions.push_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
 		if (scenarioName == "cache-reuse") deviceExtensions.push_back(VK_EXT_PIPELINE_CREATION_FEEDBACK_EXTENSION_NAME);
 		VkPhysicalDeviceMultiDrawFeaturesEXT multiDrawFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTI_DRAW_FEATURES_EXT};
-		if (scenarioName == "drawid-multi") {
+		const bool multiDraw = scenarioName.rfind("drawid-", 0) == 0 || scenarioName.rfind("reject-multi-draw", 0) == 0;
+		if (multiDraw) {
 			if (!hasExtension(extensions, VK_EXT_MULTI_DRAW_EXTENSION_NAME)) throw std::runtime_error("VK_EXT_multi_draw unavailable");
 			deviceExtensions.push_back(VK_EXT_MULTI_DRAW_EXTENSION_NAME);
 			multiDrawFeatures.multiDraw = VK_TRUE;
 			multiDrawFeatures.pNext = features.pNext;
 			features.pNext = &multiDrawFeatures;
+		}
+		VkPhysicalDeviceExtendedDynamicStateFeaturesEXT dynamicState1{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT};
+		if (scenarioName == "reject-dynamic-scissor-count") {
+			if (!hasExtension(extensions, VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME)) throw std::runtime_error("VK_EXT_extended_dynamic_state unavailable");
+			deviceExtensions.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
+			dynamicState1.extendedDynamicState = VK_TRUE;
+			dynamicState1.pNext = features.pNext;
+			features.pNext = &dynamicState1;
 		}
 		if (hasExtension(extensions, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) deviceExtensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
 		VkPhysicalDeviceExtendedDynamicState2FeaturesEXT dynamicState2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT};
@@ -304,7 +324,8 @@ int main(int argc, char** argv) {
 		vkGetDeviceQueue(device, family, 0, &queue);
 		auto setPatchControlPoints = reinterpret_cast<PFN_vkCmdSetPatchControlPointsEXT>(vkGetDeviceProcAddr(device, "vkCmdSetPatchControlPointsEXT"));
 		auto drawMulti = reinterpret_cast<PFN_vkCmdDrawMultiEXT>(vkGetDeviceProcAddr(device, "vkCmdDrawMultiEXT"));
-		if (scenarioName == "drawid-multi" && !drawMulti) throw std::runtime_error("vkCmdDrawMultiEXT unavailable");
+		auto drawMultiIndexed = reinterpret_cast<PFN_vkCmdDrawMultiIndexedEXT>(vkGetDeviceProcAddr(device, "vkCmdDrawMultiIndexedEXT"));
+		if (multiDraw && (!drawMulti || !drawMultiIndexed)) throw std::runtime_error("vkCmdDrawMulti*EXT unavailable");
 		if (dynamicScratchLimit && !setPatchControlPoints) throw std::runtime_error("vkCmdSetPatchControlPointsEXT unavailable");
 		VkPhysicalDeviceProperties properties{};
 		vkGetPhysicalDeviceProperties(physical, &properties);
@@ -505,7 +526,7 @@ int main(int argc, char** argv) {
 			check(vkCreateShaderModule(device, &info, nullptr, &result), "Create shader module");
 			return modules[name] = result;
 		};
-		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, upperLeftStruct = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; bool named = false; const char* tescEntry = nullptr; VkPipelineCache pipelineCache = VK_NULL_HANDLE; VkPipelineCreationFeedback* stageFeedback = nullptr; bool dynamicScissor = false, dynamicViewport = false, dynamicLineWidth = false; std::vector<DynamicDraw> dynamicDraws; uint32_t viewportCount = 1; std::vector<VkMultiDrawInfoEXT> multiDraws; };
+		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, upperLeftStruct = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; bool named = false; const char* tescEntry = nullptr; VkPipelineCache pipelineCache = VK_NULL_HANDLE; VkPipelineCreationFeedback* stageFeedback = nullptr; bool dynamicScissor = false, dynamicViewport = false, dynamicLineWidth = false; std::vector<DynamicDraw> dynamicDraws; uint32_t viewportCount = 1; std::vector<VkMultiDrawInfoEXT> multiDraws; uint32_t multiStride = sizeof(VkMultiDrawInfoEXT); bool multiIndexed = false, dynamicWithCount = false; };
 		auto pipelineLayout = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureLayout : o.capture == 2 ? fragmentCaptureLayout : o.uniform ? uniformLayout : o.resources ? resourceLayout : o.push ? pushLayout : emptyLayout; };
 		auto descriptorSet = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureSet : o.capture == 2 ? fragmentCaptureSet : o.resources ? resourceSet : VK_NULL_HANDLE; };
 		auto createPipeline = [&](const PipelineOptions& o, VkPipeline& pipeline) {
@@ -521,7 +542,7 @@ int main(int argc, char** argv) {
 				stages[i].pName = i == 1 && o.tescEntry ? o.tescEntry : o.named ? kNamedEntries[i] : "main";
 			}
 			// first.vert.spv also reads a per-instance tag from binding 1.
-			const bool tagged = o.vert == "first.vert.spv";
+			const bool tagged = o.vert == "first.vert.spv" || o.vert == "first-drawid.vert.spv";
 			VkVertexInputBindingDescription bindings[2] = {{0, kVertexStride, VK_VERTEX_INPUT_RATE_VERTEX}, {1, sizeof(uint32_t), VK_VERTEX_INPUT_RATE_INSTANCE}};
 			VkVertexInputAttributeDescription attributes[3] = {{0, 0, VK_FORMAT_R32G32_SFLOAT, 0}, {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 16}, {2, 1, VK_FORMAT_R32_UINT, 0}};
 			VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
@@ -568,6 +589,7 @@ int main(int argc, char** argv) {
 			if (o.dynamicScissor) dynamicStates.push_back(VK_DYNAMIC_STATE_SCISSOR);
 			if (o.dynamicViewport) dynamicStates.push_back(VK_DYNAMIC_STATE_VIEWPORT);
 			if (o.dynamicLineWidth) dynamicStates.push_back(VK_DYNAMIC_STATE_LINE_WIDTH);
+			if (o.dynamicWithCount) { dynamicStates.push_back(VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT); dynamicStates.push_back(VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT); }
 			VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
 			dynamic.dynamicStateCount = uint32_t(dynamicStates.size());
 			dynamic.pDynamicStates = dynamicStates.data();
@@ -655,11 +677,23 @@ int main(int argc, char** argv) {
 			if (set) vkCmdBindDescriptorSets(target, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout(o), 0, 1, &set, 0, nullptr);
 			VkDeviceSize offset = 0;
 			vkCmdBindVertexBuffers(target, 0, 1, &vertices.buffer, &offset);
-			if (o.vert == "first.vert.spv") vkCmdBindVertexBuffers(target, 1, 1, &instanceTags.buffer, &offset);
+			if (o.vert == "first.vert.spv" || o.vert == "first-drawid.vert.spv") vkCmdBindVertexBuffers(target, 1, 1, &instanceTags.buffer, &offset);
 			const uint32_t drawCount = scenario.vertexCount ? scenario.vertexCount : uint32_t(3 * patches.size());
 			const uint32_t parts = splitDraw ? 2 : 1, counts[2] = {splitDraw ? 3 : drawCount, drawCount - 3}, starts[2] = {0, 3};
 			if (!o.multiDraws.empty()) {
-				drawMulti(target, uint32_t(o.multiDraws.size()), o.multiDraws.data(), instances, scenario.firstInstance, sizeof(VkMultiDrawInfoEXT));
+				// Entries at o.multiStride bytes; the indexed form reads the identity indices, firstIndex = firstVertex.
+				const uint32_t n = uint32_t(o.multiDraws.size());
+				std::vector<uint8_t> packed(size_t(n) * o.multiStride);
+				for (uint32_t i = 0; i < n; ++i) {
+					if (o.multiIndexed) {
+						const VkMultiDrawIndexedInfoEXT info{o.multiDraws[i].firstVertex, o.multiDraws[i].vertexCount, 0};
+						memcpy(&packed[size_t(i) * o.multiStride], &info, sizeof(info));
+					} else memcpy(&packed[size_t(i) * o.multiStride], &o.multiDraws[i], sizeof(VkMultiDrawInfoEXT));
+				}
+				if (o.multiIndexed) {
+					vkCmdBindIndexBuffer(target, indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+					drawMultiIndexed(target, n, reinterpret_cast<const VkMultiDrawIndexedInfoEXT*>(packed.data()), instances, scenario.firstInstance, o.multiStride, nullptr);
+				} else drawMulti(target, n, reinterpret_cast<const VkMultiDrawInfoEXT*>(packed.data()), instances, scenario.firstInstance, o.multiStride);
 			} else if (!o.dynamicDraws.empty()) {
 				for (const auto& draw : o.dynamicDraws) {
 					if (o.dynamicScissor) vkCmdSetScissor(target, 0, 1, &draw.scissor);
@@ -894,6 +928,8 @@ int main(int argc, char** argv) {
 			else if (scenarioName == "reject-dynamic-line-width") { o.dynamicLineWidth = true; }
 			// The admission covers one viewport and one scissor.
 			else if (scenarioName == "reject-multi-viewport") { o.viewportCount = 2; }
+			// The WITH_COUNT viewport and scissor states set the same MoltenVK flags as the admitted ones, and stay refused.
+			else if (scenarioName == "reject-dynamic-scissor-count") { o.dynamicWithCount = true; o.viewportCount = 0; }
 			else if (scenarioName == "reject-no-admission") {}
 			else if (scenarioName == "reject-indirect-tes" || scenarioName == "reject-indexed-indirect-tes") {
 				check(createPipeline(o, pipeline), "Create admitted pipeline");
@@ -901,9 +937,12 @@ int main(int argc, char** argv) {
 				std::printf("TES_TOPOLOGY %s %s: vkEndCommandBuffer=%d expected=%d, nothing submitted\n", actual == expected ? "PASS" : "FAIL", scenarioName.c_str(), actual, expected);
 				return actual == expected ? 0 : 2;
 			}
-			else if (scenarioName == "reject-instances") {
+			else if (scenarioName == "reject-instances" || scenarioName == "reject-multi-draw-instances" || scenarioName == "reject-multi-draw-indexed") {
+				// Two instances, as a plain or a multi-draw, and an indexed multi-draw stay refused at recording.
+				if (scenarioName != "reject-instances") o.multiDraws = {{0, 3}, {3, 3}};
+				o.multiIndexed = scenarioName == "reject-multi-draw-indexed";
 				check(createPipeline(o, pipeline), "Create admitted pipeline");
-				actual = record(pipeline, {uniform(two)}, 0, 2, o);
+				actual = record(pipeline, {uniform(two), uniform(two)}, 0, o.multiIndexed ? 1 : 2, o);
 				std::printf("TES_TOPOLOGY %s %s: vkEndCommandBuffer=%d expected=%d, nothing submitted\n", actual == expected ? "PASS" : "FAIL", scenarioName.c_str(), actual, expected);
 				return actual == expected ? 0 : 2;
 			} else throw std::runtime_error("Unknown refusal");
@@ -925,21 +964,33 @@ int main(int argc, char** argv) {
 		auto verdict = [&](bool ok, const char* what) { std::printf("  %s %s\n", ok ? "ok  " : "FAIL", what); pass &= ok; };
 		auto prior = [](const std::vector<uint8_t>& rgba) { return rgba[0] == 255 && rgba[1] == 0 && rgba[2] == 255 && rgba[3] == 255; };
 
-		if (scenarioName == "drawid-multi") {
-			// One vkCmdDrawMultiEXT of two patches whose vertex data both hold level 2: the VS adds gl_DrawID, so draws 0 and 1
-			// tessellate at levels 2 and 3. Each image must equal two plain draws of data already at levels 2 and 3, which
-			// restart gl_PrimitiveID the same way, and differ from two plain draws of the level-2 data. PerVertex must also match
-			// ordinary TES under the same multi-draw.
+		if (scenarioName == "drawid-multi" || scenarioName == "drawid-multi3" || scenarioName == "drawid-first") {
+			// One vkCmdDrawMultiEXT of patches whose vertex data share one level: the VS adds gl_DrawID, so each draw tessellates
+			// one level higher than the previous. Each image must equal plain draws of data already at those levels, which restart
+			// gl_PrimitiveID the same way, and differ from plain draws of the unchanged data. PerVertex must also match ordinary
+			// TES under the same multi-draw. drawid-multi3 draws three patches at a 16-byte stride. drawid-first draws from
+			// vertex 3 with firstInstance 1, and its VS storage sums check the stage-in origin of each draw.
+			const bool threeDraws = scenarioName == "drawid-multi3", first = scenarioName == "drawid-first";
 			const VkRect2D full{{0, 0}, {kWidth, kHeight}};
-			const std::vector<Patch> levels{uniform(two), uniform(three)};
+			const std::vector<Patch> levels = threeDraws ? std::vector<Patch>{uniform(one), uniform(two), uniform(three)} : std::vector<Patch>{uniform(two), uniform(three)};
+			std::vector<VkMultiDrawInfoEXT> infos;
+			std::vector<DynamicDraw> plainDraws;
+			for (uint32_t i = 0; i < levels.size(); ++i) {
+				infos.push_back({scenario.firstVertex + 3 * i, 3});
+				plainDraws.push_back({full, 3 * i, 3});
+			}
 			std::map<std::string, Image> images;
 			bool submitted = true;
 			for (const char* frag : {"interp", "ordinary", "flat-ordered"}) {
 				PipelineOptions multi{"topology.tesc.spv", tese, std::string(frag) + ".frag.spv"};
-				multi.vert = "drawid.vert.spv";
-				multi.multiDraws = {{0, 3}, {3, 3}};
+				multi.vert = first ? "first-drawid.vert.spv" : "drawid.vert.spv";
+				multi.resources = first;
+				multi.multiDraws = infos;
+				multi.multiStride = threeDraws ? 16 : sizeof(VkMultiDrawInfoEXT);
 				PipelineOptions plain{"topology.tesc.spv", tese, std::string(frag) + ".frag.spv"};
-				plain.dynamicDraws = {{full, 0, 3}, {full, 3, 3}};
+				plain.vert = first ? "first.vert.spv" : "topology.vert.spv";
+				plain.resources = first;
+				plain.dynamicDraws = plainDraws;
 				images[std::string("multi-") + frag] = render(multi, scenario.patches, std::string("multi-") + frag);
 				images[std::string("plain-") + frag] = render(plain, levels, std::string("plain-") + frag);
 				images[std::string("same-") + frag] = render(plain, scenario.patches, std::string("same-") + frag);
@@ -959,14 +1010,23 @@ int main(int argc, char** argv) {
 			verdict(coveredPixels > 0 && coverageMismatch == 0 && valueMismatch == 0, "multi-draw PerVertex replay matches ordinary TES");
 			for (const char* frag : {"interp", "ordinary", "flat-ordered"}) {
 				const auto& multi = images[std::string("multi-") + frag].rgba;
-				std::printf("  %s: multi-draw equals the level 2 and 3 draws=%d, differs from the level 2 and 2 draws=%d\n", frag, multi == images[std::string("plain-") + frag].rgba, multi != images[std::string("same-") + frag].rgba);
-				verdict(multi == images[std::string("plain-") + frag].rgba && multi != images[std::string("same-") + frag].rgba, (std::string(frag) + ": gl_DrawID 1 reaches the second draw").c_str());
+				std::printf("  %s: multi-draw equals the draws at the added levels=%d, differs from the draws of the unchanged data=%d\n", frag, multi == images[std::string("plain-") + frag].rgba, multi != images[std::string("same-") + frag].rgba);
+				verdict(multi == images[std::string("plain-") + frag].rgba && multi != images[std::string("same-") + frag].rgba, (std::string(frag) + ": each draw reads its own gl_DrawID").c_str());
+			}
+			if (first) {
+				// gl_VertexIndex 3..8, gl_InstanceIndex 1, tag 7, gl_BaseVertex 3 then 6, gl_BaseInstance 1, per vertex.
+				const std::array<uint32_t, 5> expected{33, 6, 42, 27, 6};
+				bool sums = true;
+				for (const char* name : {"multi-interp", "multi-ordinary", "multi-flat-ordered", "plain-interp", "plain-ordinary", "plain-flat-ordered"}) sums &= images[name].sums == expected;
+				const auto& m = images["multi-interp"].sums;
+				std::printf("  VS storage sums: expected vertex=33 instance=6 tag=42 base_vertex=27 base_instance=6; pervertex multi-draw vertex=%u instance=%u tag=%u base_vertex=%u base_instance=%u\n", m[0], m[1], m[2], m[3], m[4]);
+				verdict(sums, "each draw of the multi-draw starts at its firstVertex and at firstInstance, in ordinary and PerVertex pipelines");
 			}
 			std::printf("TES_TOPOLOGY %s %s %s\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), winding.c_str());
 			vkDeviceWaitIdle(device);
 			return pass ? 0 : 2;
 		}
-		if (scenarioName == "dynamic-both") {
+		if (scenarioName == "dynamic-both" || scenarioName == "lower-left-dynamic") {
 			// Dynamic viewport and scissor together: in one render pass, the first draw goes through the left half clipped to
 			// the first cell, the second through the right half clipped to the last cell. The result must equal the left image
 			// on the first cell, the right image on the last, and stay empty in between; each image must match ordinary TES.
@@ -980,6 +1040,7 @@ int main(int argc, char** argv) {
 				for (const char* frag : {"interp.frag.spv", "ordinary.frag.spv"}) {
 					PipelineOptions o{"topology.tesc.spv", tese, frag};
 					o.dynamicScissor = o.dynamicViewport = true;
+					o.lowerLeft = scenario.lowerLeft;
 					o.dynamicDraws = c.second;
 					const std::string name = std::string(frag == std::string("interp.frag.spv") ? "interp-" : "ordinary-") + c.first;
 					images[name] = render(o, scenario.patches, name);
@@ -1010,6 +1071,15 @@ int main(int argc, char** argv) {
 			}
 			std::printf("  viewport and scissor both: first cell differing from left=%u, covered middle=%u, last cell differing from right=%u\n", firstCell, middle, lastCell);
 			verdict(firstCell == 0 && middle == 0 && lastCell == 0, "viewport and scissor both: each draw keeps its own viewport and scissor");
+			// The corner order does not depend on the dynamic states: a full dynamic viewport and scissor give the static image.
+			PipelineOptions ordered{"topology.tesc.spv", tese, "flat-ordered.frag.spv"};
+			ordered.lowerLeft = scenario.lowerLeft;
+			Image staticOrdered = render(ordered, scenario.patches, "ordered-static");
+			ordered.dynamicScissor = ordered.dynamicViewport = true;
+			ordered.dynamicDraws = {{full, 0, 9, {0, 0, float(kWidth), float(kHeight), 0, 1}}};
+			Image dynamicOrdered = render(ordered, scenario.patches, "ordered-dynamic");
+			verdict(staticOrdered.submit == VK_SUCCESS && staticOrdered.wait == VK_SUCCESS && dynamicOrdered.submit == VK_SUCCESS && dynamicOrdered.wait == VK_SUCCESS &&
+			        dynamicOrdered.rgba == staticOrdered.rgba, "ordered PerVertex image with full dynamic viewport and scissor equals the static one");
 			std::printf("TES_TOPOLOGY %s %s %s\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), winding.c_str());
 			vkDeviceWaitIdle(device);
 			return pass ? 0 : 2;

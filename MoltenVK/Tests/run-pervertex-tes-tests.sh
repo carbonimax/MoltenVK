@@ -27,6 +27,7 @@ compile topology.vert topology.vert.spv
 compile topology.vert drawid.vert.spv -DDRAWID
 compile topology.vert resources.vert.spv -DRESOURCES
 compile topology.vert first.vert.spv -DRESOURCES -DFIRST
+compile topology.vert first-drawid.vert.spv -DRESOURCES -DFIRST -DDRAWID
 # Every entry point renamed, as HLSL front ends commonly emit them.
 compile topology.vert topology-named.vert.spv -e vertMain --source-entrypoint main
 compile topology.tesc topology-named.tesc.spv -e tescMain --source-entrypoint main
@@ -138,7 +139,8 @@ for winding in ccw cw; do
 	topology dev dynamic-viewport "$winding" 0 "TES_TOPOLOGY PASS" "viewport lr: pixels differing from left on the left half and right on the right half=0"
 	topology dev lower-left "$winding" 0 "TES_TOPOLOGY PASS" "ok   an explicit upper-left domain origin renders the default image"
 	for scenario in lower-left-cull lower-left-seam1 lower-left-seam2 lower-left-seam3; do topology dev "$scenario" "$winding" 0 "TES_TOPOLOGY PASS"; done
-	topology dev drawid-multi "$winding" 0 "TES_TOPOLOGY PASS" "flat-ordered: multi-draw equals the level 2 and 3 draws=1, differs from the level 2 and 2 draws=1"
+	for scenario in drawid-multi drawid-multi3 drawid-first; do topology dev "$scenario" "$winding" 0 "TES_TOPOLOGY PASS" "flat-ordered: multi-draw equals the draws at the added levels=1, differs from the draws of the unchanged data=1"; done
+	topology dev lower-left-dynamic "$winding" 0 "TES_TOPOLOGY PASS" "ok   ordered PerVertex image with full dynamic viewport and scissor equals the static one"
 	topology dev dynamic-both "$winding" 0 "TES_TOPOLOGY PASS" "first cell differing from left=0, covered middle=0, last cell differing from right=0"
 	first_sums="vertex=33 instance=6 tag=42 base_vertex=18 base_instance=6"
 	topology dev first "$winding" 0 "TES_TOPOLOGY PASS" "VS storage sums: expected $first_sums; ordinary $first_sums; pervertex $first_sums"
@@ -148,8 +150,8 @@ done
 PREFILL=1 topology dev mixed ccw 0 "TES_TOPOLOGY PASS"
 PREFILL=2 topology dev mixed cw 0 "TES_TOPOLOGY PASS"
 # 2. Deterministic refusals before submission; ordinary tessellation keeps these modes.
-for scenario in reject-quads reject-fractional reject-point-mode reject-descriptor reject-push-constant reject-instances reject-descriptor-named reject-descriptor-shared reject-dynamic-line-width reject-multi-viewport; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
-for scenario in reject-indirect-tes reject-indexed-indirect-tes; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS" "vkEndCommandBuffer=-8"; done
+for scenario in reject-quads reject-fractional reject-point-mode reject-descriptor reject-push-constant reject-instances reject-descriptor-named reject-descriptor-shared reject-dynamic-line-width reject-multi-viewport reject-dynamic-scissor-count; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
+for scenario in reject-indirect-tes reject-indexed-indirect-tes reject-multi-draw-instances reject-multi-draw-indexed; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS" "vkEndCommandBuffer=-8"; done
 topology no-admission reject-no-admission ccw 0 "TES_TOPOLOGY PASS"
 topology shipping public-device-gate ccw 0 "TES_TOPOLOGY PASS"
 # 2b. Ordinary tessellation keeps float32 TCS levels until Vulkan classification, in every draw command, on the
@@ -198,7 +200,7 @@ topology mutation-entry-default entry-shared-module ccw 1 "ERROR: Create pipelin
 # The lower-left origin no longer reverses the generator's corner order: the CPU model must fail.
 topology mutation-lower-left-order lower-left ccw 2 "FAIL ordered PerVertex values match the CPU model"
 # The multi-draw is admitted but the VS still reads DrawID 0: the second draw keeps level 2.
-topology mutation-drawid-zero drawid-multi ccw 2 "FAIL interp: gl_DrawID 1 reaches the second draw"
+topology mutation-drawid-zero drawid-multi ccw 2 "FAIL interp: each draw reads its own gl_DrawID"
 topology mutation-helper-missing ordinary-levels-direct ccw 1 "Could not find support compute shader function tessLevelsToHalfFactors" "ERROR: Create pipeline case0-levels: -3"
 # 5. The float32 level ABI is live in the PerVertex TCS and TES compute kernels.
 mkdir -p "$output/dump"
