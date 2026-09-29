@@ -145,6 +145,7 @@ int main(int argc, char** argv) {
 		scenarios["resources"] = {{uniform(two), {{0, three, three, three}}, uniform(three)}, {}, false, false, "resources.vert.spv", true};
 		scenarios["inner-nan"] = {{{{two, two, two, nan}}}, {}, true};
 		scenarios["entry-names"] = {{uniform(two), uniform(three)}, {}};
+		scenarios["entry-shared-module"] = scenarios["entry-names"];
 		for (uint32_t level : {1u, 2u, 3u}) {
 			Scenario seam{{uniform(bits(float(level))), uniform(bits(float(level)))}};
 			seam.seam = true;
@@ -469,7 +470,7 @@ int main(int argc, char** argv) {
 			check(vkCreateShaderModule(device, &info, nullptr, &result), "Create shader module");
 			return modules[name] = result;
 		};
-		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, cache = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; bool named = false; };
+		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, cache = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; bool named = false; const char* tescEntry = nullptr; };
 		auto pipelineLayout = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureLayout : o.capture == 2 ? fragmentCaptureLayout : o.uniform ? uniformLayout : o.resources ? resourceLayout : o.push ? pushLayout : emptyLayout; };
 		auto descriptorSet = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureSet : o.capture == 2 ? fragmentCaptureSet : o.resources ? resourceSet : VK_NULL_HANDLE; };
 		auto createPipeline = [&](const PipelineOptions& o, VkPipeline& pipeline) {
@@ -482,7 +483,7 @@ int main(int argc, char** argv) {
 				stages[i].module = module(names[i]);
 				// Named variants rename every entry point, as HLSL front ends commonly do.
 				static const char* const kNamedEntries[4] = {"vertMain", "tescMain", "teseMain", "fragMain"};
-				stages[i].pName = o.named ? kNamedEntries[i] : "main";
+				stages[i].pName = i == 1 && o.tescEntry ? o.tescEntry : o.named ? kNamedEntries[i] : "main";
 			}
 			// first.vert.spv also reads a per-instance tag from binding 1.
 			const bool tagged = o.vert == "first.vert.spv";
@@ -836,6 +837,8 @@ int main(int argc, char** argv) {
 			else if (scenarioName == "reject-descriptor") { o.tesc = "descriptor.tesc.spv"; o.uniform = true; }
 			// The same TCS descriptor behind renamed entry points must still be found.
 			else if (scenarioName == "reject-descriptor-named") { o = {"descriptor-named.tesc.spv", ccw ? "ccw-named.tese.spv" : "cw-named.tese.spv", "interp-named.frag.spv"}; o.vert = "topology-named.vert.spv"; o.uniform = o.named = true; }
+			// The TCS module holds tescDescriptor, first, then tescMain: selecting tescDescriptor must still be refused.
+			else if (scenarioName == "reject-descriptor-shared") { o = {"shared-named.tesc.spv", ccw ? "ccw-named.tese.spv" : "cw-named.tese.spv", "interp-named.frag.spv"}; o.vert = "topology-named.vert.spv"; o.uniform = o.named = true; o.tescEntry = "tescDescriptor"; }
 			else if (scenarioName == "reject-cache") o.cache = true;
 			else if (scenarioName == "reject-push-constant") { o.tesc = "push.tesc.spv"; o.push = true; }
 			else if (scenarioName == "reject-no-admission") {}
@@ -869,10 +872,12 @@ int main(int argc, char** argv) {
 		auto verdict = [&](bool ok, const char* what) { std::printf("  %s %s\n", ok ? "ok  " : "FAIL", what); pass &= ok; };
 		auto prior = [](const std::vector<uint8_t>& rgba) { return rgba[0] == 255 && rgba[1] == 0 && rgba[2] == 255 && rgba[3] == 255; };
 
-		if (scenarioName == "entry-names") {
+		if (scenarioName == "entry-names" || scenarioName == "entry-shared-module") {
 			// Every entry point renamed: the PerVertex image must match the ordinary pipeline built from the same renamed
-			// stages, and equal byte for byte the PerVertex image of the same shaders named main.
-			PipelineOptions named{"topology-named.tesc.spv", ccw ? "ccw-named.tese.spv" : "cw-named.tese.spv", "interp-named.frag.spv"};
+			// stages, and equal byte for byte the PerVertex image of the same shaders named main. The shared module variant
+			// selects tescMain in a TCS module whose first entry point, tescDescriptor, uses a descriptor.
+			const bool shared = scenarioName == "entry-shared-module";
+			PipelineOptions named{shared ? "shared-named.tesc.spv" : "topology-named.tesc.spv", ccw ? "ccw-named.tese.spv" : "cw-named.tese.spv", "interp-named.frag.spv"};
 			named.vert = "topology-named.vert.spv";
 			named.named = true;
 			PipelineOptions ordinaryNamed = named;

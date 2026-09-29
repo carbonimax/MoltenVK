@@ -15,6 +15,7 @@ sw_vers
 # Whole outputs: a closed pipe would trip pipefail.
 xcodebuild -version > "$output/tools.txt"
 glslangValidator --version >> "$output/tools.txt"
+spirv-link --version >> "$output/tools.txt"
 cat "$output/tools.txt"
 head=$(git -C "$root" rev-parse HEAD)
 git -C "$root" diff --quiet HEAD -- MoltenVK MoltenVKShaderConverter ExternalRevisions || { echo "Commit the sources first: libraries are built from HEAD"; exit 1; }
@@ -34,6 +35,11 @@ compile topology.tese ccw-named.tese.spv -e teseMain --source-entrypoint main
 compile topology.tese cw-named.tese.spv -DCW -e teseMain --source-entrypoint main
 compile interp.frag interp-named.frag.spv -e fragMain --source-entrypoint main
 compile ordinary.frag ordinary-named.frag.spv -e fragMain --source-entrypoint main
+# One TCS module with two entry points; the descriptor one comes first, where a reflection ignoring pName would land.
+compile topology.tesc shared-descriptor.tesc.spv -DDESCRIPTOR -e tescDescriptor --source-entrypoint main
+compile topology.tesc shared-main.tesc.spv -e tescMain --source-entrypoint main
+spirv-link --target-env vulkan1.1 "$output/shaders/shared-descriptor.tesc.spv" "$output/shaders/shared-main.tesc.spv" -o "$output/shaders/shared-named.tesc.spv"
+spirv-val --target-env vulkan1.1 "$output/shaders/shared-named.tesc.spv"
 compile topology.tesc push.tesc.spv -DPUSH
 compile topology.tesc topology.tesc.spv
 compile topology.tesc descriptor.tesc.spv -DDESCRIPTOR
@@ -90,6 +96,7 @@ library mutation-offset ON ON 's/uint key = offsets\[i\] \+ triangle;/uint key =
 library mutation-helper-missing ON ON 's/kernel void tessLevelsToHalfFactors\(/kernel void tessLevelsToHalfFactorsUnavailable(/'
 library mutation-first-vertex-origin ON ON 's/MTLRegionMake2D\(firstVertex, firstInstance, vertexCount, 1\)/MTLRegionMake2D(0, firstInstance, vertexCount, 1)/' Commands/MVKCmdDraw.mm
 library mutation-first-instance-origin ON ON 's/MTLRegionMake2D\(firstVertex, firstInstance, vertexCount, 1\)/MTLRegionMake2D(firstVertex, 0, vertexCount, 1)/' Commands/MVKCmdDraw.mm
+library mutation-entry-default ON ON 's/^\treflect\.set_entry_point\(entryName, model\);$//' GPUObjects/MVKPipeline.mm
 library mutation-entry-main ON ON 's/spv::ExecutionModelTessellationControl, tessCtlEntry\)/spv::ExecutionModelTessellationControl, "main")/' GPUObjects/MVKPipeline.mm
 
 cases=0
@@ -122,6 +129,7 @@ for winding in ccw cw; do
 	for scenario in f1 f2 f3 next mixed nan fraction cull drawid seam1 seam2 seam3; do topology dev "$scenario" "$winding" 0 "TES_TOPOLOGY PASS"; done
 	topology dev resources "$winding" 0 "TES_TOPOLOGY PASS" "VS storage counter: expected=9 ordinary=9 pervertex=9"
 	topology dev entry-names "$winding" 0 "TES_TOPOLOGY PASS" "renamed entry points: covered=[1-9]"
+	topology dev entry-shared-module "$winding" 0 "TES_TOPOLOGY PASS" "renamed entry points: covered=[1-9]"
 	first_sums="vertex=33 instance=6 tag=42 base_vertex=18 base_instance=6"
 	topology dev first "$winding" 0 "TES_TOPOLOGY PASS" "VS storage sums: expected $first_sums; ordinary $first_sums; pervertex $first_sums"
 	for count in 1 2 4 5; do topology dev "vertices$count" "$winding" 0 "TES_TOPOLOGY PASS" "VS storage counter: expected=$count ordinary=$count pervertex=$count"; done
@@ -130,7 +138,7 @@ done
 PREFILL=1 topology dev mixed ccw 0 "TES_TOPOLOGY PASS"
 PREFILL=2 topology dev mixed cw 0 "TES_TOPOLOGY PASS"
 # 2. Deterministic refusals before submission; ordinary tessellation keeps these modes.
-for scenario in reject-quads reject-fractional reject-point-mode reject-lower-left reject-descriptor reject-push-constant reject-cache reject-instances reject-descriptor-named; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
+for scenario in reject-quads reject-fractional reject-point-mode reject-lower-left reject-descriptor reject-push-constant reject-cache reject-instances reject-descriptor-named reject-descriptor-shared; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
 for scenario in reject-indirect-tes reject-indexed-indirect-tes; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS" "vkEndCommandBuffer=-8"; done
 topology no-admission reject-no-admission ccw 0 "TES_TOPOLOGY PASS"
 topology shipping public-device-gate ccw 0 "TES_TOPOLOGY PASS"
@@ -173,6 +181,8 @@ topology mutation-first-vertex-origin first ccw 2 "FAIL PerVertex replay matches
 topology mutation-first-instance-origin first ccw 2 "FAIL PerVertex replay matches ordinary TES coverage" "pervertex vertex=33 instance=0 tag=36 base_vertex=18 base_instance=0"
 # Renamed entry points while the TCS resource check still reflects main: SPIRV-Cross's exception escapes pipeline creation.
 topology mutation-entry-main entry-names ccw 1 "ERROR: Entry point does not exist"
+# The resource check reflects the module's first TCS entry point instead of pName: the admitted tescMain is refused.
+topology mutation-entry-default entry-shared-module ccw 1 "ERROR: Create pipeline interp-named: -8"
 topology mutation-helper-missing ordinary-levels-direct ccw 1 "Could not find support compute shader function tessLevelsToHalfFactors" "ERROR: Create pipeline case0-levels: -3"
 # 5. The float32 level ABI is live in the PerVertex TCS and TES compute kernels.
 mkdir -p "$output/dump"
