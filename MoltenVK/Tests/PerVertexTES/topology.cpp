@@ -118,6 +118,9 @@ static float asFloat(uint32_t word) { float value; memcpy(&value, &word, 4); ret
 // Capture TES record: patch, u, v, w, pixel x, pixel y, then outer[0..2] and inner[0] as the TES read them.
 constexpr uint32_t kCaptureWords = 10;
 
+// A direct draw of count vertices from first, under a dynamic scissor.
+struct ScissorDraw { VkRect2D rect; uint32_t first, count; };
+
 struct Image { std::vector<uint8_t> rgba; VkResult submit = VK_SUCCESS, wait = VK_SUCCESS; uint32_t invocations = 0; std::array<uint32_t, 5> sums{}; std::vector<uint32_t> tesCapture, fragmentCapture; };
 
 int main(int argc, char** argv) {
@@ -147,6 +150,7 @@ int main(int argc, char** argv) {
 		scenarios["entry-names"] = {{uniform(two), uniform(three)}, {}};
 		scenarios["entry-shared-module"] = scenarios["entry-names"];
 		scenarios["cache-reuse"] = scenarios["entry-names"];
+		scenarios["dynamic-scissor"] = {{uniform(two), uniform(three), uniform(two)}, {}};
 		for (uint32_t level : {1u, 2u, 3u}) {
 			Scenario seam{{uniform(bits(float(level))), uniform(bits(float(level)))}};
 			seam.seam = true;
@@ -472,7 +476,7 @@ int main(int argc, char** argv) {
 			check(vkCreateShaderModule(device, &info, nullptr, &result), "Create shader module");
 			return modules[name] = result;
 		};
-		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; bool named = false; const char* tescEntry = nullptr; VkPipelineCache pipelineCache = VK_NULL_HANDLE; VkPipelineCreationFeedback* stageFeedback = nullptr; };
+		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; bool named = false; const char* tescEntry = nullptr; VkPipelineCache pipelineCache = VK_NULL_HANDLE; VkPipelineCreationFeedback* stageFeedback = nullptr; bool dynamicScissor = false, dynamicViewport = false; std::vector<ScissorDraw> scissorDraws; };
 		auto pipelineLayout = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureLayout : o.capture == 2 ? fragmentCaptureLayout : o.uniform ? uniformLayout : o.resources ? resourceLayout : o.push ? pushLayout : emptyLayout; };
 		auto descriptorSet = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureSet : o.capture == 2 ? fragmentCaptureSet : o.resources ? resourceSet : VK_NULL_HANDLE; };
 		auto createPipeline = [&](const PipelineOptions& o, VkPipeline& pipeline) {
@@ -528,11 +532,14 @@ int main(int argc, char** argv) {
 			info.pVertexInputState = &vertexInput;
 			info.pInputAssemblyState = &assembly;
 			info.pTessellationState = &tessellation;
-			const VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_PATCH_CONTROL_POINTS_EXT};
+			std::vector<VkDynamicState> dynamicStates;
+			if (o.dynamicControlPoints) dynamicStates.push_back(VK_DYNAMIC_STATE_PATCH_CONTROL_POINTS_EXT);
+			if (o.dynamicScissor) dynamicStates.push_back(VK_DYNAMIC_STATE_SCISSOR);
+			if (o.dynamicViewport) dynamicStates.push_back(VK_DYNAMIC_STATE_VIEWPORT);
 			VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-			dynamic.dynamicStateCount = 1;
-			dynamic.pDynamicStates = dynamicStates;
-			if (o.dynamicControlPoints) info.pDynamicState = &dynamic;
+			dynamic.dynamicStateCount = uint32_t(dynamicStates.size());
+			dynamic.pDynamicStates = dynamicStates.data();
+			if (!dynamicStates.empty()) info.pDynamicState = &dynamic;
 			info.pViewportState = &viewportState;
 			info.pRasterizationState = &raster;
 			info.pMultisampleState = &multisample;
@@ -619,7 +626,12 @@ int main(int argc, char** argv) {
 			if (o.vert == "first.vert.spv") vkCmdBindVertexBuffers(target, 1, 1, &instanceTags.buffer, &offset);
 			const uint32_t drawCount = scenario.vertexCount ? scenario.vertexCount : uint32_t(3 * patches.size());
 			const uint32_t parts = splitDraw ? 2 : 1, counts[2] = {splitDraw ? 3 : drawCount, drawCount - 3}, starts[2] = {0, 3};
-			if (drawMode == "direct") for (uint32_t part = 0; part < parts; ++part) vkCmdDraw(target, counts[part], instances, firstVertex + starts[part], scenario.firstInstance);
+			if (!o.scissorDraws.empty()) {
+				for (const auto& draw : o.scissorDraws) {
+					vkCmdSetScissor(target, 0, 1, &draw.rect);
+					vkCmdDraw(target, draw.count, instances, firstVertex + draw.first, scenario.firstInstance);
+				}
+			} else if (drawMode == "direct") for (uint32_t part = 0; part < parts; ++part) vkCmdDraw(target, counts[part], instances, firstVertex + starts[part], scenario.firstInstance);
 			else {
 				if (drawMode != "indirect") vkCmdBindIndexBuffer(target, indices.buffer, 0, VK_INDEX_TYPE_UINT32);
 				if (drawMode == "indexed") for (uint32_t part = 0; part < parts; ++part) vkCmdDrawIndexed(target, counts[part], instances, starts[part], int32_t(firstVertex), 0);
@@ -844,6 +856,8 @@ int main(int argc, char** argv) {
 			// The TCS module holds tescDescriptor, first, then tescMain: selecting tescDescriptor must still be refused.
 			else if (scenarioName == "reject-descriptor-shared") { o = {"shared-named.tesc.spv", ccw ? "ccw-named.tese.spv" : "cw-named.tese.spv", "interp-named.frag.spv"}; o.vert = "topology-named.vert.spv"; o.uniform = o.named = true; o.tescEntry = "tescDescriptor"; }
 			else if (scenarioName == "reject-push-constant") { o.tesc = "push.tesc.spv"; o.push = true; }
+			// Only VK_DYNAMIC_STATE_SCISSOR is qualified; a dynamic viewport stays refused.
+			else if (scenarioName == "reject-dynamic-viewport") { o.dynamicViewport = true; }
 			else if (scenarioName == "reject-no-admission") {}
 			else if (scenarioName == "reject-indirect-tes" || scenarioName == "reject-indexed-indirect-tes") {
 				check(createPipeline(o, pipeline), "Create admitted pipeline");
@@ -875,6 +889,49 @@ int main(int argc, char** argv) {
 		auto verdict = [&](bool ok, const char* what) { std::printf("  %s %s\n", ok ? "ok  " : "FAIL", what); pass &= ok; };
 		auto prior = [](const std::vector<uint8_t>& rgba) { return rgba[0] == 255 && rgba[1] == 0 && rgba[2] == 255 && rgba[3] == 255; };
 
+		if (scenarioName == "dynamic-scissor") {
+			// Three patches, one per 64-pixel cell. A and B scissor one draw differently; AB scissors two draws of the same
+			// patches in one render pass, so each draw's replay, after its compute stages restart the pass, must use its own
+			// scissor. Each PerVertex image must match the ordinary pipeline under the same commands.
+			const VkRect2D full{{0, 0}, {kWidth, kHeight}}, left{{0, 0}, {96, kHeight}}, right{{64, 0}, {128, kHeight}};
+			const VkRect2D first{{0, 0}, {kCell, kHeight}}, last{{2 * kCell, 0}, {kCell, kHeight}};
+			struct Case { const char* name; std::vector<ScissorDraw> draws; uint32_t minX, maxX; };
+			const Case cases[] = {{"full", {{full, 0, 9}}, 0, kWidth}, {"a", {{left, 0, 9}}, 0, 96}, {"b", {{right, 0, 9}}, 64, kWidth}, {"ab", {{first, 0, 9}, {last, 0, 9}}, 0, kWidth}};
+			std::map<std::string, Image> images;
+			Image staticImage = render({"topology.tesc.spv", tese, "interp.frag.spv"}, scenario.patches, "interp-static");
+			bool submitted = staticImage.submit == VK_SUCCESS && staticImage.wait == VK_SUCCESS;
+			for (const auto& c : cases) {
+				for (const char* frag : {"interp.frag.spv", "ordinary.frag.spv"}) {
+					PipelineOptions o{"topology.tesc.spv", tese, frag};
+					o.dynamicScissor = true;
+					o.scissorDraws = c.draws;
+					const std::string name = std::string(frag == std::string("interp.frag.spv") ? "interp-" : "ordinary-") + c.name;
+					images[name] = render(o, scenario.patches, name);
+					submitted &= images[name].submit == VK_SUCCESS && images[name].wait == VK_SUCCESS;
+				}
+			}
+			verdict(submitted, "all submissions and fences succeed");
+			for (const auto& c : cases) {
+				const Image& mine = images[std::string("interp-") + c.name];
+				const Image& theirs = images[std::string("ordinary-") + c.name];
+				uint32_t coverageMismatch = 0, valueMismatch = 0, coveredPixels = 0, outside = 0, cells[3] = {};
+				for (uint32_t i = 0; i < kWidth * kHeight; ++i) {
+					bool a = covered(theirs.rgba, i), b = covered(mine.rgba, i);
+					coveredPixels += a;
+					if (b) { uint32_t x = i % kWidth; outside += x < c.minX || x >= c.maxX; ++cells[x / kCell]; }
+					if (a != b) { ++coverageMismatch; continue; }
+					for (int k = 0; a && k < 3; ++k) valueMismatch += std::abs(int(theirs.rgba[4 * i + k]) - int(mine.rgba[4 * i + k])) > 2;
+				}
+				std::printf("  scissor %s: covered=%u coverage_mismatch=%u value_mismatch(>2)=%u outside_scissor=%u cells=%u/%u/%u\n", c.name, coveredPixels, coverageMismatch, valueMismatch, outside, cells[0], cells[1], cells[2]);
+				verdict(coveredPixels > 0 && coverageMismatch == 0 && valueMismatch == 0 && outside == 0, (std::string("scissor ") + c.name + ": PerVertex replay matches ordinary TES and stays inside its scissor").c_str());
+				if (std::string(c.name) == "ab") verdict(cells[0] > 0 && cells[1] == 0 && cells[2] > 0, "scissor ab: each draw of the render pass keeps its own scissor");
+			}
+			verdict(images["interp-full"].rgba == staticImage.rgba, "a full dynamic scissor gives the image of the static scissor");
+			verdict(images["interp-a"].rgba != images["interp-b"].rgba, "the image changes with the scissor");
+			std::printf("TES_TOPOLOGY %s %s %s\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), winding.c_str());
+			vkDeviceWaitIdle(device);
+			return pass ? 0 : 2;
+		}
 		if (scenarioName == "cache-reuse") {
 			// Creation fills an empty Vulkan pipeline cache; a second cache created from its data must then serve every stage,
 			// add no entry, and give the same image as a pipeline created without cache.
