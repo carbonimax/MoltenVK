@@ -6,6 +6,21 @@ Rien de ce qui est décrit ici n'est codé. Les références de lignes portent s
 
 **Révision 3.** La revue Astra indépendante de la révision 2 (`6dee5d90`) a conclu NO-GO pour l'implémenter telle qu'écrite. Cette révision répond à chacun de ses constats (§0). La publication anticipée de la perte (R6) n'est pas codée et ne le sera pas avant une nouvelle revue. Les reproducteurs des constats vérifiables aujourd'hui sont écrits (§5.1).
 
+**Révision 4.** La revue de la révision 3 (`7838e797`) conclut encore NO-GO pour coder R6, avec quatre P1 ; elle reconnaît les corrections de `destroyNow()` et le principe du jeton de R9. Cette révision répond aux quatre P1 et aux demandes sur les oracles (§0 bis). **R9 est implémenté seul** (`d24159ce`), comme la revue l'autorise. R6 reste non codé.
+
+## 0 bis. Réponse au NO-GO sur la révision 3 (revue de `7838e797`)
+
+| P1 ou demande | Vérifié | Correction | Section |
+| --- | --- | --- | --- |
+| R2 peut entrer dans une acquisition Metal bloquante entre la restitution du crédit MoltenVK et celle de la place par Metal | Oui. Mesuré (§3.12) : Metal rend la place **après** le retour du handler de fin, jamais pendant (80 essais sur 80, M4 Pro). Et l'application peut prendre la place libérée sur la file exportée | **Aucun fil d'encodage ni de l'application n'appelle plus l'acquisition Metal** : un fil d'acquisition par file Metal tient une réserve de command buffers pré-acquis ; l'encodage attend par tranches et sort sur perte | R2, §3.12 |
+| `nextDrawable` peut bloquer un encodage que R6 attend | Oui (§3.11) : jusqu'à `imageCount` × 1 s par défaut, **sans borne** si l'application désactive `allowsNextDrawableTimeout` sur sa couche | Acquisition du drawable par le même fil d'acquisition ; l'encodage attend par tranches et sort sur perte | R10, §3.11 |
+| Le retrait du device peut attendre un callback de présentation que seule la destruction différée du swapchain débloquerait | Oui : compter les handlers de présentation comme condition de départ du retrait crée le cycle | Retrait en **deux phases** : départ exclusif, vidage de la liste différée (qui force la fin des présentations), puis seulement l'attente des handlers de présentation, sur le fil de retrait | R5 |
+| Les chemins de destruction directe et différée n'ont pas de transition exclusive | Oui : cinq compteurs lus séparément laissent deux fils conclure « tout est à zéro » | **Un seul compte de vie atomique** : l'application et chaque travail en cours en tiennent une référence ; le fil dont `fetch_sub` rend 1 est le seul à retirer | R5 |
+| Oracles : démarrer les attentes avant la perte | Fait pour `-idle` et `-query` (`bc6bc7ad`) | O1, O5, O9 l'exigent | §5 |
+| Oracles : mieux vérifier la conservation des ressources, les descriptor pools, l'ABA | — | O2 : référence faible **et** contenu écrit par C ; O6 : crochet d'état du pool ; O12 : chaque attente jugée, 10 tours (`bc6bc7ad`), témoin négatif | §5 |
+| R8 abandonne le temps fini avec de la mémoire hôte importée | Oui, explicitement | Trois options chiffrées, une recommandation ; décision à la revue | R8, §7 |
+| Devices vivants partageant une file Metal | À trancher | Recommandation : une file Metal par device vivant | R2, §7 |
+
 ## 0. Réponse au NO-GO du 29 septembre (revue de `6dee5d90`)
 
 | Constat d'Astra | Vérifié dans le code | Correction | Section |
@@ -169,6 +184,24 @@ La spécification (section *Lost Device*) exige que `vkDeviceWaitIdle`, `vkQueue
 
 `MVKDescriptorPool::reset()` (`MVKDescriptorSet.mm:2231`) vide les listes libres et remet à zéro les allocateurs à bosse (`_cpuBufferUsed`, `_gpuBufferUsed`, `_numAllocatedDescriptorSets`). `freeDescriptorSets()` (`MVKDescriptorSet.mm:2203`) rend les régions aux listes libres. Une quarantaine qui ne toucherait qu'aux listes libres ne survivrait pas à un reset.
 
+### 3.11 Drawables
+
+- `MVKPresentableSwapchainImage::getCAMetalDrawable()` (`MVKImage.mm:1632-1656`) appelle `[CAMetalLayer nextDrawable]` jusqu'à `imageCount` fois. Il est appelé à l'encodage, quand une commande utilise la texture d'une image de swapchain (`getMTLTexture()`, `MVKImage.mm:1660`).
+- MoltenVK ne règle pas `allowsNextDrawableTimeout` : par défaut, chaque appel rend `nil` au bout de 1 s. L'encodage peut donc attendre `imageCount` secondes. La couche appartient à l'application (`VK_EXT_metal_surface`), qui peut désactiver ce délai : l'attente n'a alors pas de borne.
+- Les drawables sont retenus jusqu'à la fin de leur présentation. Si les présentations attendent le travail bloqué, `nextDrawable` attend aussi.
+- Les signalers d'acquisition retiennent déjà leur sémaphore et leur fence (`track()`, `MVKImage.mm:1570`), et le handler de présentation retient l'image (`beginPresentation()`). Le seul objet que ces callbacks touchent sans le retenir est le **device**, par les destructeurs que déclenchent leurs derniers `release()`.
+
+### 3.12 Quand Metal rend une place
+
+Sonde Metal seule `MetalSlotReleaseProbe.mm` (`build/astra/r6-slot-release/`, M4 Pro, macOS 27.2, avec et sans validation, 4 exécutions de 20 tours) :
+- une file d'**une** place ; un command buffer A commité ; depuis le handler de fin de A, un autre fil tente d'acquérir B, et le handler attend 200 ms avant de rendre la main ;
+- **B n'est jamais acquis pendant le handler** (0/80), et toujours peu après son retour (80/80, entre 0,1 et 2,2 ms plus tard).
+
+Conséquence :
+- un crédit que MoltenVK rendrait depuis un handler de fin précède toujours la restitution de la place par Metal ;
+- une acquisition qui suit ce crédit peut donc bloquer. Normalement, c'est seulement le temps que les handlers finissent. Mais si l'application prend la place libérée sur la file exportée, l'attente devient illimitée ;
+- la marge de la révision 3 ne ferme pas cette fenêtre, d'où la délégation de l'acquisition (R2).
+
 ## 4. Conception révisée
 
 ### R1. Destruction différée, avant toute libération
@@ -190,28 +223,27 @@ La spécification (section *Lost Device*) exige que `vkDeviceWaitIdle`, `vkQueue
 
 Destruction en course avec le début de la perte : un objet détruit juste avant, alors que du travail en attente l'utilise, reste un usage invalide de l'application. Ce cas est inchangé.
 
-### R2. Places Metal comptées par MoltenVK, par file Metal
+### R2. Acquisition Metal déléguée, par file Metal
 
-0. **Le compte appartient à la file Metal, pas à `MVKQueue`.** Il vit dans l'entrée du cache de `MVKQueueFamily`, à côté de la `MTLCommandQueue`, et tous les devices qui reçoivent cette file le partagent. `MVKQueue` retient sa file et une référence à cette entrée.
+0. **L'acquisition appartient à la file Metal, pas à `MVKQueue`.** Le fil d'acquisition et la réserve vivent dans l'entrée du cache de `MVKQueueFamily`, à côté de la `MTLCommandQueue`. `MVKQueue` retient sa file et une référence à cette entrée.
    - **File contaminée.** Quand la perte d'un device commence alors que du travail de MoltenVK est en cours sur une file Metal, cette file sort du cache : le prochain device qui demande cet index reçoit une file neuve. Le device perdu garde l'ancienne jusqu'à son retrait. Coût : une création de file Metal après une perte seulement.
-   - **Devices vivants en même temps.** Un device sain qui partage déjà la file d'un device perdu attend le travail bloqué de l'autre, par les places **et** par l'ordre d'exécution de la file (§3.6). Ce n'est pas nouveau : `shared-queue-block` (§5.1) le reproduit sur le runtime actuel. R2 ne règle que les places ; seule une file par device vivant réglerait l'ordre. C'est une **question pour la revue** (§7).
-1. Chaque file Metal compte ses command buffers Metal en cours.
-   - Une place est prise à l'acquisition.
-   - Elle est rendue à la fin du dernier handler d'un command buffer commité, ou à l'abandon d'un command buffer jamais mis en file.
-   - La place d'un command buffer commité est rendue par le handler de la file, enregistré à l'acquisition (`MVKQueue.mm:226`). Ce handler s'exécute dans la liste du device, donc **avant** le décrément de `_pendingMTLCommandBufferHandlers`. L'entrée du cache, retenue par ce handler, survit de toute façon au device.
-2. La `MTLCommandQueue` est créée avec **deux fois** `maxActiveMetalCommandBuffersPerQueue` places. MoltenVK n'en prend que `maxActiveMetalCommandBuffersPerQueue`.
-   - La marge couvre le délai entre la place rendue par MoltenVK et celle rendue par Metal, ainsi que les références autorelease en retard.
-   - Elle couvre aussi jusqu'à `maxActiveMetalCommandBuffersPerQueue` command buffers de l'application sur la file exportée.
-   - Le nombre de places étant fixé à la création de la file, tous les devices d'un processus doivent lire la même configuration ; c'est déjà le cas aujourd'hui.
-3. Quand toutes les places de MoltenVK sont prises, l'acquisition attend par tranches de 1 ms. Si `isLosing()`, elle rend `nil` **sans appeler Metal**.
-4. Les appelants traitent `nil` :
-   - la soumission, déjà : chemin nil, perte ;
-   - le préremplissage : le command buffer s'enregistre sans préremplissage. Il faut une garde pour l'encodeur immédiat, qui ne doit pas commencer sur `nil` ;
-   - `waitIdle()` : rien à attendre (R3) ;
-   - l'acquisition d'image et la présentation : déjà refusées pendant une perte par `MVKQueue::submit`.
-5. Coût : un décrément atomique à l'acquisition, un incrément à la libération.
+   - **Devices vivants en même temps.** Un device sain qui partage déjà la file d'un device perdu attend le travail bloqué de l'autre, par les places **et** par l'ordre d'exécution de la file (§3.6). Ce n'est pas nouveau : `shared-queue-block` (§5.1) le reproduit sur le runtime actuel. R2 empêche qu'un encodage attende dans Metal, pas que le travail d'un device attende celui d'un autre dans l'ordre de la file ; seule une file par device vivant le réglerait. C'est une **question pour la revue** (§7), avec une recommandation plus bas.
+1. **Aucun fil d'encodage ni de l'application n'appelle plus `commandBufferWithDescriptor:`.** Chaque file Metal a un fil d'acquisition (file de dispatch série de l'entrée du cache) et une petite réserve de command buffers **pré-acquis, jamais mis en file**, par sorte de descripteur (références retenues ou non, options d'erreur).
+   - Prendre un command buffer, c'est le retirer de la réserve : aucun appel à Metal. Le fil d'acquisition la remplit en tâche de fond ; lui seul peut bloquer dans Metal.
+   - Réserve vide (file saturée) : l'appelant attend par tranches de 1 ms. Si la perte commence, il rend `nil` **sans avoir appelé Metal**. Un encodage n'attend donc jamais Metal au-delà d'une tranche après le début de la perte.
+   - Un command buffer obtenu trop tard par le fil d'acquisition, ou resté en réserve au retrait du device, est relâché sans `enqueue` ni `commit`. La sonde `abandon-probe` a montré, sur M4 et sur iPhone 18 Pro, qu'il rend alors sa place et n'exécute rien. Sa liste de handlers MoltenVK passe par `abandonMTLCommandBuffer()`, qui l'exécute une seule fois (`7758838b`).
+   - Le libellé du command buffer est posé au moment où on le prend.
+2. La `MTLCommandQueue` est créée avec `maxActiveMetalCommandBuffersPerQueue` + taille de la réserve places. Il n'y a plus de crédit MoltenVK à accorder avec Metal : la seule attente dans Metal est celle du fil d'acquisition, qui ne retient ni encodage ni device.
+3. Le préremplissage (`vkBeginCommandBuffer`) passe aussi par la réserve : pendant une perte, le command buffer s'enregistre sans préremplissage. Il faut une garde pour l'encodeur immédiat, qui ne doit pas commencer sur `nil`.
+4. Les autres appelants traitent `nil` comme en révision 3 : chemin nil de la soumission (perte), `waitIdle()` (R3), acquisition d'image et présentation déjà refusées pendant une perte.
+5. **Vie.** Une requête d'acquisition en cours tient une référence au compte de vie du device (R5) tant qu'elle peut encore rendre un command buffer à l'appelant ; le fil d'acquisition lui-même ne tient que l'entrée du cache, qui survit au device.
+6. **Coût.** Retrait lock-free de la réserve et un `dispatch_async` de remplissage par command buffer. À mesurer (O8) : c'est le seul coût nouveau sur le chemin de chaque soumission.
 
 **Écarté : « garer » l'encodage** pendant l'appel à Metal, en le retirant de `_activeEncodings`. Au réveil, le fil reprendrait l'encodage de command buffers que l'application peut avoir libérés après le rapport de la perte.
+
+**Écarté : la marge de places de la révision 3.** Elle supposait que Metal rend la place peu après le crédit, et que l'application ne prend pas les places libres de la file exportée ; ni l'une ni l'autre hypothèse n'est garantie (§3.12).
+
+**Recommandation pour les devices vivants (point 0).** Une file Metal par device vivant : le cache ne rend une file qu'à un device qui ne la partage avec aucun autre device vivant, et une file que bloque le travail d'un device perdu ne revient au cache qu'une fois ce travail terminé. Coût : une création de file Metal par device vivant simultané (le cache garde son intérêt pour les suites de tests qui créent des devices l'un après l'autre). Décision à la revue (§7).
 
 ### R3. Toutes les attentes hôte sortent sur perte publiée
 
@@ -234,24 +266,26 @@ Une tranche de 1 ms ne coûte que quand l'attente dure ; le chemin sans attente 
 | Requêtes (`vkResetQueryPool`) | Inchangé. Un `finishQueries` en retard peut encore marquer des requêtes disponibles. Après une perte, les résultats sont indéfinis selon Vulkan ; la mémoire reste valide, puisque la destruction du pool est différée. |
 | Visibility buffers du device | Rendus au commit, comme en amont. **Non analysé** pour la perte : question ouverte. |
 
-### R5. Vie du device, et suppression hors des callbacks
+### R5. Vie du device : un seul compte, retrait exclusif en deux phases
 
-1. Le device se supprime quand cinq conditions sont réunies (les listeners `MTLSharedEvent` n'en font plus partie : R9) :
-   - l'application a appelé `vkDestroyDevice` ;
-   - aucun encodage n'est en cours (`_activeEncodings`) ;
-   - aucun handler n'est en attente (`_pendingMTLCommandBufferHandlers`) ;
-   - aucun handler de présentation (`addPresentedHandler`) n'est en attente (compteur nouveau, pris avant l'ajout, rendu comme dernier geste du handler). Hypothèse, à vérifier : Metal appelle ce handler quand le drawable est présenté **ou** abandonné. Si un drawable pouvait ne jamais le rappeler, le device fuirait, sans accès libéré ;
-   - aucun job de publication de la perte n'est en file ou en cours sur `_lossPublisher` (compteur nouveau, pris dans `markLost()` avant le `dispatch_async`). Sans cette condition, les quatre autres peuvent être à zéro pendant que le job attend. Or `publishLoss()` commit ensuite le command buffer de secours (`MVKDevice.mm:4073`) : le device serait supprimé sous un job en cours, avant les handlers de ce command buffer.
-2. `vkDestroyDevice` :
-   - si les compteurs sont à zéro, supprime le device sur place, comme aujourd'hui : une application normale garde une destruction synchrone ;
-   - sinon, rend la main.
-3. Le dernier décrément qui ramène tout à zéro met la suppression en file sur une **file de dispatch série de MoltenVK**, commune au processus. La suppression ne s'exécute jamais dans un handler Metal, ni sur le fil de l'application.
-4. Les deux chemins de retrait, sur place dans `vkDestroyDevice` comme sur la file de MoltenVK, font la même chose, dans cet ordre :
-   - ils passent en état de retrait (R1, point 1) ;
-   - ils vident la liste de R1 ;
-   - ils exécutent `~MVKDevice`, sans ses attentes, puisqu'elles sont tenues par construction. Son `dispatch_sync(_lossPublisher)` (`MVKDevice.mm:5855`) rend alors la main aussitôt.
-5. Le device retient son instance. `vkDestroyInstance` après `vkDestroyDevice` diffère donc la suppression de l'instance jusqu'à celle du device, sur la même file.
-6. Un handler ne touche plus le device après son décrément : le décrément est sa dernière instruction, comme aujourd'hui dans `commitMTLCommandBuffer()`.
+1. **Un seul compte de vie atomique** (`_lifetimeRefs`). L'application en tient une référence de la création à `vkDestroyDevice`. En tient aussi une, le temps de son existence :
+   - chaque command buffer Metal commité avec des handlers (prise dans `commitMTLCommandBuffer()`, rendue par son handler unique comme dernier geste) ;
+   - chaque encodage (`beginEncoding()` / `endEncoding()`) ;
+   - chaque job de publication de la perte (prise dans `markLost()` avant le `dispatch_async`) ;
+   - chaque requête d'acquisition qui peut encore rendre un command buffer ou un drawable (R2, R10).
+   - Les compteurs `_activeEncodings` et `_pendingMTLCommandBufferHandlers` restent, pour la publication et les crochets de test ; ils ne décident plus de la vie du device.
+2. **Transition exclusive.** Le fil dont `fetch_sub(1)` rend 1 est, par construction, **le seul** à retirer le device. `vkDestroyDevice` rend la référence de l'application :
+   - s'il est ce fil, il retire le device sur place, comme aujourd'hui pour une application normale ;
+   - sinon, il rend la main.
+   - Un autre fil qui rend la dernière référence (handler, fin d'encodage, job) met le retrait en file sur une **file série de MoltenVK** : jamais dans un handler Metal.
+   - Aucune lecture séparée de plusieurs compteurs ne décide plus du retrait : deux chemins ne peuvent plus conclure tous deux « tout est à zéro ».
+3. **Retrait en deux phases**, par le seul fil qui le possède :
+   - **Phase 1.** Passer en état de retrait (R1, point 1), puis vider la liste différée jusqu'au bout. Un swapchain différé y exécute `destroyNow()`, qui force la fin des présentations en cours (`forceUnpresentedImageCompletion()`) et détruit ses images présentables : les handlers de présentation encore dus sont alors déclenchés.
+   - **Phase 2.** Attendre, **par tranches, sur la file de retrait**, que le compteur des handlers de présentation revienne à zéro. Si le retrait a commencé sur le fil de l'application et que ce compteur n'est pas nul, la phase 2 passe sur la file de retrait et `vkDestroyDevice` rend la main.
+   - Puis `~MVKDevice`, sans ses attentes actuelles, tenues par construction. Son `dispatch_sync(_lossPublisher)` (`MVKDevice.mm:5855`) rend alors la main aussitôt.
+   - Les handlers de présentation ne tiennent **pas** de référence de vie : ce sont eux qui créaient le cycle. Ils retiennent déjà ce qu'ils touchent (image, sémaphore, fence : §3.11) et gardent leur propre pointeur vers le device, pour le décrément de leur compteur, qui est leur dernier geste après leurs `release()`.
+4. Le device retient son instance. `vkDestroyInstance` après `vkDestroyDevice` diffère donc la suppression de l'instance jusqu'à celle du device, sur la même file.
+5. Hypothèse, à vérifier par O15 : forcer la fin des présentations (phase 1) déclenche bien les handlers de présentation en attente. Sinon, la phase 2 attend sans fin : le device fuit, sans accès libéré.
 
 ### R6. Publication en temps fini
 
@@ -265,6 +299,11 @@ La publication ordonnée de `c78c0289` est inchangée. Une soumission bloquée r
 - S'il n'est pas nul, `publishLoss()` garde le comportement actuel : il attend les handlers, avec l'avertissement de `d869010d`. Le rapport vient après le retrait du travail, et l'application ne peut libérer ses pages qu'ensuite.
 - Une allocation importée **après** le début de la perte ne compte pas : aucun travail encodé avant la perte ne l'utilise.
 - **G1 n'est donc pas garanti pour une application qui importe de la mémoire hôte** et dont le travail attend une autre application. C'est une limite, à documenter : aucune conception fondée sur le report ne peut la lever, puisque MoltenVK ne possède pas ces pages.
+- **Options, pour la revue :**
+  - (a) *Celle-ci* : pas de publication anticipée pour ces devices. Les attentes hôte peuvent ne pas rendre la main : contraire à l'exigence de temps fini de la spécification.
+  - (b) Publication anticipée, mais `vkFreeMemory` d'une allocation importée attend que le travail commité avant la perte se retire. Les attentes de la spécification rendent la main en temps fini ; c'est `vkFreeMemory` qui peut attendre sans borne, et seulement quand l'application bloque elle-même son travail Metal. Coût : un compte, par allocation importée, du travail commité qui peut l'utiliser, ou, plus simple, le compte global des handlers en attente.
+  - (c) Refuser l'import de mémoire hôte sur un device qui exporte ses files Metal : trop restrictif, écarté.
+  - **Recommandation : (b)**, avec un avertissement à la première attente de `vkFreeMemory`. Décision à la revue (§7).
 
 ### R9. Listeners timeline : un jeton détachable
 
@@ -274,35 +313,47 @@ La publication ordonnée de `c78c0289` est inchangée. Une soumission bloquée r
 - Effets :
   - l'ABA de §3.9 disparaît : l'identité est celle du jeton, plus l'adresse d'un objet de pile ;
   - un listener qui ne rappelle jamais ne retient qu'un jeton, pas le sémaphore ni le device : il n'entre pas dans R5.
-- Cette pièce corrige aussi un défaut actuel, sans lien avec la perte. Elle peut être proposée seule, avec son reproducteur, si la revue le juge utile.
+- Cette pièce corrige aussi un défaut actuel, sans lien avec la perte.
+- **Implémenté seul, avec l'accord de la revue** : `d24159ce` sur `claude/pervertex-generic`, `90cef75a` sur `claude/device-loss-generic`. `vkWaitSemaphores()` ne relit **pas** la valeur au réveil : une relecture ferait passer `timeline-listener-aba` sans prouver le jeton. Elle reste une défense possible, en plus.
+
+### R10. Drawables acquis hors de l'encodage
+
+- `getCAMetalDrawable()` ne rappelle plus `nextDrawable` sur le fil d'encodage. Il le demande au fil d'acquisition de la file Metal de présentation (R2) et attend par tranches de 1 ms.
+- Si la perte commence, l'encodage sort sans drawable : la soumission est perdue, comme sur le chemin nil.
+- Un drawable obtenu après la sortie de l'encodage est relâché sans présentation ; il revient à la couche.
+- Hors perte, rien ne change pour l'application : le délai de `nextDrawable` et le nombre d'essais sont ceux d'aujourd'hui.
 
 ### R7. Hors garantie, à dire explicitement
 
 - Détruire un objet, ou le device, **avant** le début d'une perte, alors que du travail en attente l'utilise : usage invalide, inchangé.
-- Une application qui garde plus de `maxActiveMetalCommandBuffersPerQueue` command buffers en attente sur une file exportée : l'acquisition de MoltenVK peut encore bloquer dans Metal.
+- Une application qui sature elle-même une file exportée : le fil d'acquisition de cette file attend dans Metal ; aucun encodage ni la publication ne l'attendent (R2).
 - Un travail que l'application ne libère jamais : le device, et les objets différés, restent alloués jusqu'à la fin du processus. `vkDestroyDevice` rend la main. La fuite se limite au device perdu : aucun accès à de la mémoire libérée.
 - Mémoire hôte importée au début de la perte : pas de publication anticipée (R8).
 - Un device sain qui partage, au moment de la perte d'un autre, la file Metal que bloque le travail de celui-ci (R2, point 0).
-- Un handler de présentation que Metal ne rappellerait jamais : fuite du device (R5).
+- Un handler de présentation que Metal ne rappellerait jamais, même après la fin forcée des présentations : fuite du device (R5, point 5).
 
 ## 5. Oracles, à écrire avant l'implémentation
 
-Chaque oracle doit échouer sur `7758838b` (ou avec la pièce correspondante retirée) et passer après. Sur `7758838b`, O2 à O6 échouent d'abord par **délai dépassé** : la perte n'est pas rapportée en 2 s, et l'étape suivante n'est jamais atteinte. Leurs témoins de fond sont donc ceux de O7, pièce par pièce, sur la bibliothèque corrigée. Par exemple, pour O2, la référence faible devient nulle aussitôt après `vkDestroyBuffer` si R1 intercepte au point central, après les surcharges. Tous tournent sous validation Metal de l'API et des shaders, avec des handlers retardés comme les oracles actuels.
+Chaque oracle doit échouer sur `7758838b` (ou avec la pièce correspondante retirée) et passer après. **Toute attente hôte d'un oracle démarre avant la perte**, sur un fil, et reçoit 2 s à compter de la perte ; une attente qui rend la main avant la perte fait échouer l'oracle. Sur `7758838b`, O2 à O6 échouent d'abord par **délai dépassé** : la perte n'est pas rapportée en 2 s, et l'étape suivante n'est jamais atteinte. Leurs témoins de fond sont donc ceux de O7, pièce par pièce, sur la bibliothèque corrigée. Par exemple, pour O2, la référence faible devient nulle aussitôt après `vkDestroyBuffer` si R1 intercepte au point central, après les surcharges. Tous tournent sous validation Metal de l'API et des shaders, avec des handlers retardés comme les oracles actuels.
 
 | Oracle | Scénario | Réussite |
 | --- | --- | --- |
-| **O1** `external-queue-wait` | le reproducteur actuel | perte rapportée en moins de 2 s ; C s'exécute après le signal de l'application, sans erreur de validation |
-| **O2** destruction après le rapport | après le rapport, et pendant que C est bloqué, détruire tout ce que C utilise : `VkBuffer` (surcharge `destroyNow`), vue de buffer, vue d'image, sampler, mémoire, pipeline, pool de commandes, descriptor pool. Libérer ensuite l'événement, puis détruire le device | aucune erreur de validation, aucun plantage. Le test **ne retient pas** le `MTLBuffer` exporté (`VK_EXT_metal_objects`) de la cible de C ; il n'en garde qu'une référence faible (`objc_storeWeak`). Celle-ci doit rester non nulle après les destructions, et montrer l'écriture de C après le signal. Elle doit être nulle après le retrait du device. Un crochet de test, `mvkTestGetDeferredDestroyCount`, compte les objets différés : c'est le repli si Metal refuse les références faibles |
+| **O1** `external-queue-wait` | le reproducteur actuel, plus une variante dont l'attente de fence démarre avant la perte | perte rapportée en moins de 2 s ; C s'exécute après le signal de l'application, sans erreur de validation |
+| **O2** destruction après le rapport | après le rapport, et pendant que C est bloqué, détruire tout ce que C utilise : `VkBuffer` (surcharge `destroyNow`), vue de buffer, vue d'image, sampler, mémoire, pipeline, pool de commandes, descriptor pool. Libérer ensuite l'événement, puis détruire le device | aucune erreur de validation, aucun plantage. **Conservation vérifiée par trois preuves indépendantes** : (1) le test ne retient pas le `MTLBuffer` exporté (`VK_EXT_metal_objects`) de la cible de C, il n'en garde qu'une référence faible (`objc_storeWeak`) : non nulle après les destructions, nulle après le retrait du device ; (2) la valeur écrite par C après le signal se lit par cette référence ; (3) le crochet `mvkTestGetDeferredDestroyCount` compte exactement les objets détruits pendant la perte, puis zéro après le retrait. Un objet de chacune des 7 classes à surcharge est détruit (O13) |
 | **O3** device et instance détruits pendant le blocage | `vkDestroyDevice` puis `vkDestroyInstance` juste après le rapport | les deux rendent la main en moins de 100 ms ; après le signal, le device est supprimé une seule fois, hors d'un fil Metal, puis l'instance (crochet de test) |
+| **O14** retrait exclusif | 200 itérations : `vkDestroyDevice` en course avec le dernier handler, retardé de 0 à 2 ms selon l'itération | crochet `mvkTestGetDeviceReapCount` : exactement un retrait par device ; aucun plantage |
+| **O15** présentation et retrait | swapchain sur une `CAMetalLayer` hors fenêtre, s'il en existe un chemin qui présente ; présentation en attente, perte, destruction du swapchain et du device | le retrait se termine ; le compteur des handlers de présentation revient à zéro après la phase 1. Sans chemin de présentation hors fenêtre, O15 est **non couvert**, et le rapport le dit |
+| **O16** réserve d'acquisition | file Metal saturée par l'application sur la file exportée (4 places) ; une soumission qui attend la réserve ; perte | rapport en moins de 2 s ; aucun fil d'encodage dans Metal (échantillonnage des piles) ; le command buffer obtenu plus tard est relâché sans exécution |
+| **O17** drawable | la couche de l'application avec `allowsNextDrawableTimeout = NO`, tous ses drawables retenus par des présentations bloquées ; une soumission qui rend dans une image de swapchain ; perte | rapport en moins de 2 s. Même condition de chemin hors fenêtre que O15 |
 | **O4** file saturée | `maxActiveMetalCommandBuffersPerQueue=4` ; l'application garde 2 command buffers en attente sur la file exportée ; MoltenVK remplit les places restantes ; perte | rapport en temps fini ; `vkBeginCommandBuffer` avec préremplissage, appelé pendant la perte, rend la main |
 | **O5** attentes idle | `vkQueueWaitIdle` et `vkDeviceWaitIdle` après la perte, pendant que C est bloqué | `VK_ERROR_DEVICE_LOST` en moins de 2 s |
-| **O6** pools pendant la perte | après le rapport : reset, libération, réallocation et réenregistrement des command buffers et des descriptor sets de C ; puis signal | pas d'erreur de validation ; allocations temporaires rendues exactement une fois (`mvkTestGetOutstandingCommandPoolAllocations`) ; la quarantaine rend `VK_ERROR_OUT_OF_POOL_MEMORY` quand le pool est plein |
+| **O6** pools pendant la perte | après le rapport : `vkFreeDescriptorSets` puis `vkResetDescriptorPool` sur le pool des descriptor sets de C, puis une allocation ; reset, libération, réallocation et réenregistrement des command buffers de C ; puis signal | pas d'erreur de validation ; l'allocation après le reset rend `VK_ERROR_OUT_OF_POOL_MEMORY` ; le crochet `mvkTestGetDescriptorPoolState` montre les allocateurs **non rembobinés** (même `_gpuBufferUsed` qu'avant le reset) ; la région d'argument buffer de C garde son contenu jusqu'au signal ; allocations temporaires rendues exactement une fois (`mvkTestGetOutstandingCommandPoolAllocations`) |
 | **O9** attentes sans délai | `external-queue-wait-idle` et `external-queue-wait-query` (§5.1) ; `vkWaitForPresentKHR` si un chemin de présentation sans fenêtre est disponible | perte rapportée en moins de 2 s, puis C après le signal |
 | **O10** files Metal | `shared-queue-block` (§5.1) ; puis un troisième device, créé après la perte du premier alors que son travail est bloqué | le troisième reçoit une autre file Metal, et sa soumission se termine ; `shared-queue-block` reste `BLOCKER` tant que la question du §7 n'est pas tranchée |
 | **O11** mémoire hôte importée | C écrit dans un buffer lié à de la mémoire importée ; perte pendant le blocage | l'avertissement est émis, le rapport attend le retrait de C (R8), puis l'application peut libérer ses pages |
-| **O12** listeners | `timeline-listener-aba` (§5.1) ; puis, après une perte, destruction du sémaphore et du device pendant qu'un listener sur un événement importé attend, et signal ensuite | aucun faux succès ; aucun plantage sous Guard Malloc |
+| **O12** listeners | `timeline-listener-aba` (§5.1), chaque attente jugée sur 10 tours ; puis, après une perte, destruction du sémaphore et du device pendant qu'un listener sur un événement importé attend, et signal ensuite | aucun faux succès ; aucun plantage sous Guard Malloc. **Fait pour l'ABA** : 6/6 rouges avant R9 (18 à 19 attentes fausses sur 20), 6/6 verts après |
 | **O13** récursion de `destroyNow()` | contrôle statique de R1 ; O2 détruit un objet de chacune des 7 classes, dont un swapchain et ses images si un chemin sans fenêtre existe | contrôle vert ; aucune récursion, aucun plantage |
-| **O7** témoins négatifs | chaque pièce retirée à tour de rôle (R1 sans `final`, avec interception au point central, ou avec un appel à la base resté à `destroy()` ; R2 sans marge, ou compté par `MVKQueue` ; R3 avec `waitUntilCompleted` ; R5 avec suppression inline ; R8 désactivé ; R9 avec l'adresse du sitter) | l'oracle correspondant échoue |
+| **O7** témoins négatifs | chaque pièce retirée à tour de rôle (R1 sans `final`, avec interception au point central, ou avec un appel à la base resté à `destroy()` ; R2 avec un appel direct à Metal sur le fil d'encodage ; R10 avec `nextDrawable` sur le fil d'encodage ; R5 avec deux lectures de compteurs au lieu du compte unique, ou avec les handlers de présentation comptés au départ du retrait ; R3 avec `waitUntilCompleted` ; R5 avec suppression inline ; R8 désactivé ; R9 avec l'adresse du sitter) | l'oracle correspondant échoue |
 | **O8** non-régression et coût | oracles de perte, binaires, de continuation, suite M4, CTS de synchronisation ; `QueueRetirementBench` et `BinarySemaphoreBench` | tout vert ; coût mesuré avant/après, sur une charge identique |
 
 ### 5.1 Reproducteurs écrits dès maintenant
@@ -314,15 +365,15 @@ Ces modes de `PerVertexLossTests.mm` reproduisent, sur le runtime actuel, les co
 | `external-queue-wait-idle` | `vkQueueWaitIdle` ne rend pas la main derrière le travail bloqué |
 | `external-queue-wait-query` | `vkGetQueryPoolResults` avec `VK_QUERY_RESULT_WAIT_BIT` non plus |
 | `shared-queue-block` | deux devices reçoivent la même file Metal ; un device sain attend le travail d'un device perdu, par les places (file pleine) ou par l'ordre d'exécution (témoin à 64 places) |
-| `timeline-listener-aba` | sans perte : un ancien listener réveille une attente plus récente, qui rend `VK_SUCCESS` sous sa valeur |
+| `timeline-listener-aba` | sans perte : un ancien listener réveille une attente plus récente, qui rend `VK_SUCCESS` sous sa valeur. **Corrigé par R9** (`d24159ce`) |
 
 ## 6. Ordre d'implémentation proposé, après la revue
 
-0. R9 et O12 : défaut actuel, indépendant de la publication anticipée.
+0. R9 et O12 : fait (`d24159ce`).
 1. R1, avec la surface retenue, puis O2 et O13.
 2. R3, puis O5.
-3. R2, puis O4 et O10.
-4. R5, puis O3.
+3. R2 et R10, puis O4, O10, O16 et O17.
+4. R5, puis O3, O14 et O15.
 5. R8, puis O11.
 6. R6 : O1 et O9 passent de `BLOCKER` à `PASS`, seulement si O2 à O6 et O10 à O13 sont verts sur la même bibliothèque.
 7. R4, puis O6.
@@ -330,12 +381,13 @@ Ces modes de `PerVertexLossTests.mm` reproduisent, sur le runtime actuel, les co
 
 ## 7. Questions pour la revue
 
-1. La marge de places (deux fois la configuration) est-elle acceptable, ou faut-il une option ?
+1. La réserve d'acquisition (R2) : quelle taille par sorte de descripteur ? Proposition : 2.
 2. Le report limité aux objets du device, la surface étant retenue par le swapchain, suffit-il ?
 3. La fuite d'un device dont le travail n'est jamais libéré est-elle acceptable, faute de mieux ?
 4. La quarantaine des descriptor pools peut rendre `VK_ERROR_OUT_OF_POOL_MEMORY` pendant une perte. Est-ce acceptable ?
 5. Faut-il analyser les visibility buffers du device (R4) avant l'implémentation, ou pendant ?
-6. **Files Metal partagées entre devices vivants** (R2, point 0) : faut-il que la famille cesse de donner une même file à deux devices vivants, au prix d'une création de file par device ? Le reproducteur montre que le partage lie aussi l'ordre d'exécution des deux devices, perte ou non. Ou bien un device sain peut-il rester bloqué tant que le travail d'un autre device, perdu, ne se termine pas ?
-7. **Mémoire hôte importée** (R8) : le repli sur la publication actuelle est-il acceptable, G1 n'étant alors pas garanti pour ces applications ?
+6. **Files Metal partagées entre devices vivants** (R2, point 0) : faut-il que la famille cesse de donner une même file à deux devices vivants, au prix d'une création de file par device ? Le reproducteur montre que le partage lie aussi l'ordre d'exécution des deux devices, perte ou non. Ou bien un device sain peut-il rester bloqué tant que le travail d'un autre device, perdu, ne se termine pas ? Recommandation : une file par device vivant (R2).
+7. **Mémoire hôte importée** (R8) : option (a), (b) ou (c) ? Recommandation : (b).
 8. **Handlers de présentation** (R5) : l'hypothèse « appelé à la présentation ou à l'abandon » suffit-elle, ou faut-il un reproducteur avant l'implémentation ?
-9. **R9** peut-il être proposé seul, avant la refonte, puisqu'il corrige un défaut actuel ?
+9. **R9** : accordé par la revue ; fait.
+10. **Retrait en deux phases** (R5) : l'attente des handlers de présentation après la phase 1, sur la file de retrait, suffit-elle, ou faut-il O15 avant l'implémentation ?
