@@ -71,6 +71,7 @@ struct Scenario {
 	uint32_t vertexCount = 0;  // Draw size when it is not three vertices per patch.
 	bool seam = false;  // The second patch shares an edge with the first one.
 	uint32_t firstVertex = 0, firstInstance = 0;  // Direct draw parameters; the vertex data starts at firstVertex.
+	bool lowerLeft = false;  // VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT, which reverses the generated triangles' corner order.
 };
 
 // Vulkan levels after clamp and round-up, or 0 for a discarded patch.
@@ -153,6 +154,10 @@ int main(int argc, char** argv) {
 		scenarios["dynamic-scissor"] = {{uniform(two), uniform(three), uniform(two)}, {}};
 		scenarios["dynamic-viewport"] = scenarios["dynamic-scissor"];
 		scenarios["dynamic-both"] = scenarios["dynamic-scissor"];
+		// Every proven level under the lower-left domain origin, with the full set of checks.
+		Scenario lowerLeft{{uniform(one), uniform(two), uniform(three)}, {}};
+		lowerLeft.lowerLeft = true;
+		scenarios["lower-left"] = lowerLeft;
 		for (uint32_t level : {1u, 2u, 3u}) {
 			Scenario seam{{uniform(bits(float(level))), uniform(bits(float(level)))}};
 			seam.seam = true;
@@ -483,7 +488,7 @@ int main(int argc, char** argv) {
 			check(vkCreateShaderModule(device, &info, nullptr, &result), "Create shader module");
 			return modules[name] = result;
 		};
-		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; bool named = false; const char* tescEntry = nullptr; VkPipelineCache pipelineCache = VK_NULL_HANDLE; VkPipelineCreationFeedback* stageFeedback = nullptr; bool dynamicScissor = false, dynamicViewport = false, dynamicLineWidth = false; std::vector<DynamicDraw> dynamicDraws; uint32_t viewportCount = 1; };
+		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, upperLeftStruct = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; bool named = false; const char* tescEntry = nullptr; VkPipelineCache pipelineCache = VK_NULL_HANDLE; VkPipelineCreationFeedback* stageFeedback = nullptr; bool dynamicScissor = false, dynamicViewport = false, dynamicLineWidth = false; std::vector<DynamicDraw> dynamicDraws; uint32_t viewportCount = 1; };
 		auto pipelineLayout = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureLayout : o.capture == 2 ? fragmentCaptureLayout : o.uniform ? uniformLayout : o.resources ? resourceLayout : o.push ? pushLayout : emptyLayout; };
 		auto descriptorSet = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureSet : o.capture == 2 ? fragmentCaptureSet : o.resources ? resourceSet : VK_NULL_HANDLE; };
 		auto createPipeline = [&](const PipelineOptions& o, VkPipeline& pipeline) {
@@ -510,9 +515,9 @@ int main(int argc, char** argv) {
 			VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
 			assembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
 			VkPipelineTessellationDomainOriginStateCreateInfo origin{VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO};
-			origin.domainOrigin = VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
+			origin.domainOrigin = o.lowerLeft ? VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT : VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT;
 			VkPipelineTessellationStateCreateInfo tessellation{VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO};
-			tessellation.pNext = o.lowerLeft ? &origin : nullptr;
+			tessellation.pNext = o.lowerLeft || o.upperLeftStruct ? &origin : nullptr;
 			tessellation.patchControlPoints = 3;
 			VkViewport viewport{0, 0, float(kWidth), float(kHeight), 0, 1};
 			VkRect2D scissor{{0, 0}, {kWidth, kHeight}};
@@ -1147,6 +1152,7 @@ int main(int argc, char** argv) {
 			PipelineOptions o{"topology.tesc.spv", tese, frag, scenario.cull};
 			o.vert = scenario.vertex;
 			o.resources = scenario.resources;
+			o.lowerLeft = scenario.lowerLeft;
 			return o;
 		};
 		const std::string suffix = scenario.resources ? "-resources.frag.spv" : ".frag.spv";
@@ -1224,7 +1230,7 @@ int main(int argc, char** argv) {
 			provenTopology(level, points, topology);
 			auto control = controlPoints(p, scenario.patches[p].mirrored, scenario.seam);
 			for (auto triangle : topology) {
-				if (ccw) std::swap(triangle[1], triangle[2]);
+				if (ccw != scenario.lowerLeft) std::swap(triangle[1], triangle[2]);
 				double cx = 0, cy = 0, expected[3] = {};
 				double screen[3][2];
 				for (int c = 0; c < 3; ++c) {
@@ -1250,6 +1256,17 @@ int main(int argc, char** argv) {
 		verdict(triangles > 0 && orderedWrong == 0, "ordered PerVertex values match the CPU model at every triangle");
 		verdict(swappedWrong > 0, "negative control: swapped corners fail the CPU model");
 		verdict(prior(ordinaryImage.rgba) && prior(interp.rgba), "earlier attachment write preserved");
+		if (scenario.lowerLeft) {
+			// An explicit upper-left origin structure renders the default image; the lower-left one reverses the corner order.
+			PipelineOptions upper = options("flat-ordered.frag.spv");
+			upper.lowerLeft = false;
+			Image defaultOrdered = render(upper, scenario.patches, "ordered-upper-left");
+			upper.upperLeftStruct = true;
+			Image explicitOrdered = render(upper, scenario.patches, "ordered-upper-left-explicit");
+			verdict(defaultOrdered.submit == VK_SUCCESS && defaultOrdered.wait == VK_SUCCESS && explicitOrdered.submit == VK_SUCCESS && explicitOrdered.wait == VK_SUCCESS &&
+			        explicitOrdered.rgba == defaultOrdered.rgba, "an explicit upper-left domain origin renders the default image");
+			verdict(ordered.rgba != defaultOrdered.rgba, "the lower-left domain origin changes the PerVertex corner order");
+		}
 
 		// 4. Tessellation coordinates: the PerVertex fragment stores its three TES vertices per pixel and an
 		// ordinary TES appends the hardware coordinates. Fragment gl_PrimitiveID is checked on the same pixels.
