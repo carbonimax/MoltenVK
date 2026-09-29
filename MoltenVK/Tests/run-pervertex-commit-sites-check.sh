@@ -7,10 +7,13 @@
 # - commitMTLCommandBuffer() must add, whenever the inventory is open, a completed handler that decrements the inventory
 #   count after the other completed handlers have run, even when the command buffer has no other completed handler;
 # - every function that calls it, member or free, in any source or header of the runtime, is classified:
-#   "submission" (bracketed by MVKQueue::submit()), "bracket" (brackets itself: beginEncoding(), then the acquisition of
-#   the Metal command buffer, then the commit, then endEncoding(), and any completion wait only after endEncoding(), so
-#   that the publication, which waits for encodings, never waits for that completion), or "no-memory" (creates no blit,
-#   compute or render encoder).
+#   "submission" (bracketed by MVKQueue::submit(), and admitted by the submission's own loss check), "bracket" (brackets
+#   itself: the acquisition of the Metal command buffer, then beginEncoding(), then an admission check of isLosing(),
+#   then the commit, then endEncoding(), and any completion wait only after endEncoding()), or "no-memory" (creates no
+#   blit, compute or render encoder). The loss publication waits for encodings: an acquisition, which blocks while the
+#   Metal queue is full, or a completion wait inside the bracket would hold it back. Without the admission check, a
+#   bracket that begins once the inventory is closed would commit uncounted work;
+# - the functions a bracket calls to encode, pullFromDevice(), never acquire a Metal command buffer themselves;
 # - no function but commitMTLCommandBuffer() commits a Metal command buffer directly ([x commit] is allowed only on a
 #   residency set), since such a commit would escape the inventory.
 # An unclassified site, a missing classified site, a bracket out of order, a "no-memory" site with an encoder, or a
@@ -31,8 +34,9 @@ classes = {
 	"MVKPresentableSwapchainImage::acquireAndSignalWhenAvailable": "no-memory",
 	"MVKDevice::releaseSemaphoreWaitsAfterLoss": "no-memory",
 }
-# Where a bracketed site acquires its Metal command buffer: directly, or through the function it calls.
-acquisitions = ("getMTLCommandBuffer(", "pullFromDevice(")
+# How a bracketed site acquires its Metal command buffer, and the functions it calls within its bracket to encode.
+acquisition = re.compile(r"getMTLCommandBuffer\(|commandBufferWithDescriptor|\bcommandBuffer\]|commandBufferWithUnretainedReferences")
+encoding_callees = "::pullFromDevice"
 keywords = {"if", "for", "while", "switch", "return", "sizeof", "catch", "else", "do", "try"}
 
 def blank(text):
@@ -106,14 +110,23 @@ for folder, _, files in os.walk(runtime):
 				problems.append(f"{function}: unclassified commit site")
 			elif kind == "bracket":
 				begin, commit, end = body.find("beginEncoding()"), body.find("commitMTLCommandBuffer("), body.rfind("endEncoding()")
-				acquire = min([p for p in (body.find(a) for a in acquisitions) if p >= 0], default=-1)
+				acquires = [m.start() for m in acquisition.finditer(body)]
+				admission = body.find("isLosing()", begin) if begin >= 0 else -1
 				waits = [m.start() for m in re.finditer(r"waitUntilCompleted|waitForMTLCommandBuffer", body)]
-				if min(begin, acquire, commit, end) < 0 or not (begin < acquire < commit < end):
-					problems.append(f"{function}: not bracketed as beginEncoding(), acquisition, commit, endEncoding(); it may write imported host memory outside the inventory")
+				if min(begin, commit, end) < 0 or not acquires or not (begin < commit < end):
+					problems.append(f"{function}: not bracketed as acquisition, beginEncoding(), commit, endEncoding(); it may write imported host memory outside the inventory")
+				elif any(a > begin for a in acquires):
+					problems.append(f"{function}: acquires its Metal command buffer inside its bracket, which the loss publication would then wait for while the queue is full")
+				elif not (begin < admission < commit):
+					problems.append(f"{function}: no isLosing() admission check between beginEncoding() and its commit; begun once the inventory is closed, it would commit uncounted work")
 				elif any(w < end for w in waits):
 					problems.append(f"{function}: waits for completion inside its bracket, which the loss publication would then wait for")
 			elif kind == "no-memory" and re.search(r"(blit|compute|render)CommandEncoder|getMTL(Blit|Compute|Render)Encoder", body, re.I):
 				problems.append(f"{function}: classified as encoding no memory access, but creates an encoder")
+
+for function, body in bodies.items():
+	if function.endswith(encoding_callees) and acquisition.search(body):
+		problems.append(f"{function}: acquires a Metal command buffer, inside the bracket of the site that calls it")
 
 # The inventory is counted by commitMTLCommandBuffer()'s completed handler: it must exist whenever the inventory is open.
 commit_body = bodies.get("MVKDevice::commitMTLCommandBuffer", "")
