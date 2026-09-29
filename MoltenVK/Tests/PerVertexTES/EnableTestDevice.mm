@@ -3,6 +3,7 @@
 // Linked only by the TES and mesh test drivers, never by shipping CMake/Xcode targets.
 #include "MVKDevice.h"
 #include "MVKCommandPool.h"
+#include "MVKSwapchain.h"
 struct TestPhysicalDevice : MVKPhysicalDevice {
     static void enable(MVKPhysicalDevice* device) {
         // Use the same initialization convention as MVKPhysicalDevice::initExtensions.
@@ -71,4 +72,12 @@ struct TestEncodingPool : MVKCommandEncodingPool {
 // that each one returns exactly once.
 extern "C" uint64_t mvkTestGetOutstandingCommandPoolAllocations(VkCommandPool commandPool) {
     return TestEncodingPool::outstanding(((MVKCommandPool*)commandPool)->getCommandEncodingPool());
+}
+struct TestSwapchain : MVKSwapchain {
+    static uint32_t unpresented(MVKSwapchain* swapchain) { return (swapchain->* &TestSwapchain::_unpresentedImageCount).load(); }
+};
+// The presentations of a swapchain that have begun and not ended: a presentation test checks that its presentations
+// have begun before it destroys the swapchain.
+extern "C" uint32_t mvkTestGetUnpresentedImageCount(VkSwapchainKHR swapchain) {
+    return TestSwapchain::unpresented((MVKSwapchain*)swapchain);
 }

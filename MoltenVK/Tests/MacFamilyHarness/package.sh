@@ -107,7 +107,7 @@ fixture probe "$harness/probe.mm" -fobjc-arc -framework Foundation -framework Me
 fixture pervertex-indirect-gpu "$tests/PerVertexIndirectGPUTests.cpp" -lobjc
 fixture topology "$T/topology.cpp" -Wl,-U,_mvkEnableTESFixtureDevice
 fixture mesh-draw "$M/mesh-draw.cpp" -Wl,-U,_mvkEnableMeshTestDevice -Wl,-U,_mvkEnableTESFixtureDevice
-fixture pervertex-loss "$tests/PerVertexLossTests.mm" -framework Metal -framework Foundation
+fixture pervertex-loss "$tests/PerVertexLossTests.mm" -framework Metal -framework QuartzCore -framework Foundation
 # The Metal mesh limits probe uses neither Vulkan nor MoltenVK.
 xcrun clang++ -arch arm64 -std=c++17 -fobjc-arc -O1 -mmacosx-version-min=13.0 -Wall -Wextra -Werror "$tests/PerVertexMeshLimits.mm" -framework Metal -framework Foundation -o "$bundle/bin/mesh-limits"
 codesign --force --sign - "$bundle/bin/mesh-limits"

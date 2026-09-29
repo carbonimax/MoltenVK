@@ -73,8 +73,25 @@
 //   queue (-calls). Only batch 2 has the fence, and signals the imported binary semaphore. Batch 1's handlers run
 //   200 ms after batch 2's. A fence covers every batch submitted before it to its queue: exit 0 when it reports the
 //   loss and the semaphore is never signalled; 1 when batch 2 reports complete work that batch 1's failure precedes.
+// present-scheduled-after-destroy, present-destroy-race: no device loss. A swapchain on a CAMetalLayer detached from
+//   any window (VK_EXT_metal_surface), whose first image is acquired with a binary semaphore imported from an
+//   MTLSharedEvent that the test then holds only weakly. MoltenVK retains that semaphore until the presentation of the
+//   image ends (MVKPresentableSwapchainImage::endPresentation()), so the event is freed only if every presentation ends.
+//   Each image is presented; the test waits for the queue to be idle, which completes the presentations' command
+//   buffers, then destroys the swapchain, as Vulkan allows. Metal may still deliver those command buffers' scheduled
+//   handlers, which begin the presentations, after the command buffers complete: the handler hooks make them late.
+//   Exit 0 when the event is freed once the swapchain, the semaphore and the work are gone; 1 when it leaks; or a crash:
+//   - present-scheduled-after-destroy: every MoltenVK Metal handler runs 300 ms late, so that the scheduled handlers
+//     run after the swapchain is destroyed;
+//   - present-destroy-race: 20 rounds, the handlers 0 to 3 ms late, so that they race with the destruction.
+//   Both pass on the current runtime: Metal runs a command buffer's scheduled handlers before it reports it complete.
+// present-pending-destroy: the same, but each presentation waits, through a submission, for an event the test signals
+//   only after destroying the swapchain. Without a device loss this is invalid usage (the presentations have not
+//   completed); it is the situation that a loss reported in finite time would make legal (PerVertexExternalWait-DESIGN.md,
+//   R5 and R6), where a scheduled handler begins a presentation after its swapchain is gone.
 // Exit 2 for a setup failure, 3 when the device lacks a capability.
 #import <Metal/Metal.h>
+#import <QuartzCore/QuartzCore.h>
 #include <objc/runtime.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_metal.h>
@@ -98,6 +115,8 @@ void check(VkResult result, const char* step) {
 }
 
 void sleepMs(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
+
+bool gPresentationModes = false;	// the present-* modes enable VK_EXT_metal_surface and VK_KHR_swapchain
 
 struct Buffer {
 	VkBuffer buffer = VK_NULL_HANDLE;
@@ -167,12 +186,12 @@ VkDevice createLogicalDevice(const Context& c, VkQueue* qa, VkQueue* qb) {
 	VkPhysicalDeviceSynchronization2Features synchronization2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES};
 	synchronization2.synchronization2 = VK_TRUE;
 	timeline.pNext = &synchronization2;	// vkQueueSubmit2 in the metal-error-batches2 mode
-	const char* extensions[] = {VK_EXT_METAL_OBJECTS_EXTENSION_NAME, "VK_KHR_portability_subset"};
+	const char* extensions[] = {VK_EXT_METAL_OBJECTS_EXTENSION_NAME, "VK_KHR_portability_subset", VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 	VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
 	deviceInfo.pNext = &timeline;
 	deviceInfo.queueCreateInfoCount = c.familyA == c.familyB ? 1 : 2;
 	deviceInfo.pQueueCreateInfos = queues;
-	deviceInfo.enabledExtensionCount = 2;
+	deviceInfo.enabledExtensionCount = gPresentationModes ? 3 : 2;
 	deviceInfo.ppEnabledExtensionNames = extensions;
 	VkDevice device;
 	check(vkCreateDevice(c.physical, &deviceInfo, nullptr, &device), "vkCreateDevice");
@@ -204,8 +223,11 @@ Context createContext() {
 	VkInstanceCreateInfo instanceInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
 	instanceInfo.flags = hasPortability ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0;
 	instanceInfo.pApplicationInfo = &app;
-	instanceInfo.enabledExtensionCount = hasPortability ? 1 : 0;
-	instanceInfo.ppEnabledExtensionNames = hasPortability ? &portability : nullptr;
+	std::vector<const char*> enabled;
+	if (hasPortability) { enabled.push_back(portability); }
+	if (gPresentationModes) { enabled.push_back(VK_KHR_SURFACE_EXTENSION_NAME); enabled.push_back(VK_EXT_METAL_SURFACE_EXTENSION_NAME); }
+	instanceInfo.enabledExtensionCount = uint32_t(enabled.size());
+	instanceInfo.ppEnabledExtensionNames = enabled.data();
 	check(vkCreateInstance(&instanceInfo, nullptr, &c.instance), "vkCreateInstance");
 	uint32_t count = 1;
 	VkResult enumerated = vkEnumeratePhysicalDevices(c.instance, &count, &c.physical);
@@ -1090,6 +1112,163 @@ int timelineListenerAba(Context& c) {
 	return spurious ? 1 : 0;
 }
 
+// A swapchain of 3 images on a CAMetalLayer detached from any window.
+struct Presentation {
+	CAMetalLayer* layer = nil;
+	VkSurfaceKHR surface = VK_NULL_HANDLE;
+	VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+	uint32_t imageCount = 0;
+};
+
+Presentation createPresentation(Context& c) {
+	Presentation p;
+	p.layer = [[CAMetalLayer layer] retain];
+	p.layer.device = c.mtlDevice;
+	p.layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+	p.layer.drawableSize = CGSizeMake(64, 64);
+	VkMetalSurfaceCreateInfoEXT surfaceInfo{VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT};
+	surfaceInfo.pLayer = p.layer;
+	check(vkCreateMetalSurfaceEXT(c.instance, &surfaceInfo, nullptr, &p.surface), "vkCreateMetalSurfaceEXT");
+	VkBool32 supported = VK_FALSE;
+	check(vkGetPhysicalDeviceSurfaceSupportKHR(c.physical, c.familyB, p.surface, &supported), "vkGetPhysicalDeviceSurfaceSupportKHR");
+	if (!supported) { std::fprintf(stderr, "Queue B cannot present\n"); std::exit(3); }
+	VkSwapchainCreateInfoKHR info{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+	info.surface = p.surface;
+	info.minImageCount = 3;
+	info.imageFormat = VK_FORMAT_B8G8R8A8_UNORM;
+	info.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+	info.imageExtent = {64, 64};
+	info.imageArrayLayers = 1;
+	info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	info.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+	info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+	info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+	info.clipped = VK_TRUE;
+	check(vkCreateSwapchainKHR(c.device, &info, nullptr, &p.swapchain), "vkCreateSwapchainKHR");
+	check(vkGetSwapchainImagesKHR(c.device, p.swapchain, &p.imageCount, nullptr), "vkGetSwapchainImagesKHR");
+	return p;
+}
+
+// One round: every image presented, the first one acquired with the watched semaphore, then the queue idle and the
+// swapchain destroyed. Reports how many presentations had begun when the swapchain was destroyed
+// (mvkTestGetUnpresentedImageCount, -1 without it), and whether the watched event was freed within 5 s.
+struct PresentRound {
+	int begunAtDestroy = -1;
+	bool eventFreed = false;
+};
+
+PresentRound presentRound(Context& c, Presentation& p, bool gated) {
+	PresentRound round;
+	auto unpresented = reinterpret_cast<uint32_t (*)(VkSwapchainKHR)>(dlsym(RTLD_DEFAULT, "mvkTestGetUnpresentedImageCount"));
+	id<MTLSharedEvent> watchedEvent = [c.mtlDevice newSharedEvent];
+	VkSemaphore watched = importedSemaphore(c, watchedEvent, false);
+	id weakEvent = nil;
+	objc_storeWeak(&weakEvent, watchedEvent);
+	[watchedEvent release];		// only MoltenVK's semaphore keeps it now
+	VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+	VkFence acquired;
+	check(vkCreateFence(c.device, &fenceInfo, nullptr, &acquired), "vkCreateFence");
+	id<MTLSharedEvent> gate = [c.mtlDevice newSharedEvent];
+	gate.signaledValue = 0;
+	VkSemaphore timeline = gated ? importedSemaphore(c, gate, true) : VK_NULL_HANDLE;
+	VkCommandPool pool = commandPool(c);
+	std::vector<VkSemaphore> rendered(p.imageCount, VK_NULL_HANDLE);
+	for (uint32_t i = 0; i < p.imageCount; ++i) {
+		uint32_t index = 0;
+		// A layer outside any window is suboptimal, which still acquires the image.
+		VkResult acquire = vkAcquireNextImageKHR(c.device, p.swapchain, UINT64_MAX, i == 0 ? watched : VK_NULL_HANDLE, acquired, &index);
+		if (acquire != VK_SUCCESS && acquire != VK_SUBOPTIMAL_KHR) { std::fprintf(stderr, "vkAcquireNextImageKHR: %d\n", int(acquire)); std::exit(2); }
+		check(vkWaitForFences(c.device, 1, &acquired, VK_TRUE, UINT64_MAX), "acquire fence");
+		check(vkResetFences(c.device, 1, &acquired), "vkResetFences");
+		VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+		present.swapchainCount = 1;
+		present.pSwapchains = &p.swapchain;
+		present.pImageIndices = &index;
+		if (gated) {
+			VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+			check(vkCreateSemaphore(c.device, &semaphoreInfo, nullptr, &rendered[i]), "vkCreateSemaphore");
+			VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+			allocation.commandPool = pool;
+			allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+			allocation.commandBufferCount = 1;
+			VkCommandBuffer commands;
+			check(vkAllocateCommandBuffers(c.device, &allocation, &commands), "vkAllocateCommandBuffers");
+			VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+			check(vkBeginCommandBuffer(commands, &begin), "vkBeginCommandBuffer");
+			check(vkEndCommandBuffer(commands), "vkEndCommandBuffer");
+			uint64_t waitValue = 1, signalValue = 0;
+			VkTimelineSemaphoreSubmitInfo values{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+			values.waitSemaphoreValueCount = 1;
+			values.pWaitSemaphoreValues = &waitValue;
+			values.signalSemaphoreValueCount = 1;
+			values.pSignalSemaphoreValues = &signalValue;
+			VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+			VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+			submit.pNext = &values;
+			submit.waitSemaphoreCount = 1;
+			submit.pWaitSemaphores = &timeline;
+			submit.pWaitDstStageMask = &stage;
+			submit.commandBufferCount = 1;
+			submit.pCommandBuffers = &commands;
+			submit.signalSemaphoreCount = 1;
+			submit.pSignalSemaphores = &rendered[i];
+			check(vkQueueSubmit(c.qb, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit");
+			present.waitSemaphoreCount = 1;
+			present.pWaitSemaphores = &rendered[i];
+		}
+		VkResult presented = vkQueuePresentKHR(c.qb, &present);
+		if (presented != VK_SUCCESS && presented != VK_SUBOPTIMAL_KHR) { std::fprintf(stderr, "vkQueuePresentKHR: %d\n", int(presented)); std::exit(2); }
+	}
+	if (gated) {
+		sleepMs(200);
+	} else {
+		// Every presentation's command buffer has completed: destroying the swapchain is now valid.
+		check(vkQueueWaitIdle(c.qb), "vkQueueWaitIdle");
+	}
+	if (unpresented) { round.begunAtDestroy = int(unpresented(p.swapchain)); }
+	vkDestroySwapchainKHR(c.device, p.swapchain, nullptr);
+	p.swapchain = VK_NULL_HANDLE;
+	vkDestroySemaphore(c.device, watched, nullptr);
+	if (gated) {
+		gate.signaledValue = 1;
+		check(vkQueueWaitIdle(c.qb), "vkQueueWaitIdle");
+	}
+	for (VkSemaphore semaphore : rendered) { if (semaphore) { vkDestroySemaphore(c.device, semaphore, nullptr); } }
+	if (timeline) { vkDestroySemaphore(c.device, timeline, nullptr); }
+	vkDestroyCommandPool(c.device, pool, nullptr);
+	vkDestroyFence(c.device, acquired, nullptr);
+	[gate release];
+	// Late handlers, delayed by the hooks, may still release it: wait up to 5 s.
+	auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+	do {
+		@autoreleasepool { round.eventFreed = objc_loadWeak(&weakEvent) == nil; }
+		if (!round.eventFreed) { sleepMs(10); }
+	} while (!round.eventFreed && std::chrono::steady_clock::now() < deadline);
+	objc_storeWeak(&weakEvent, nil);
+	return round;
+}
+
+int presentation(Context& c, const std::string& mode) {
+	bool isGated = mode == "present-pending-destroy";
+	if (!isGated) { installHandlerHooks(c); }
+	bool isRace = mode == "present-destroy-race";
+	int rounds = isRace ? 20 : 1, leaks = 0;
+	for (int i = 0; i < rounds; ++i) {
+		gHandlerDelayUs = isGated ? 0 : isRace ? useconds_t((i * 157) % 3000) : 300000;
+		Presentation p = createPresentation(c);
+		PresentRound round = presentRound(c, p, isGated);
+		leaks += !round.eventFreed;
+		std::printf("round=%d handler_delay_us=%u begun_at_destroy=%d watched_event_freed=%d\n", i, unsigned(gHandlerDelayUs), round.begunAtDestroy,
+					int(round.eventFreed));
+		vkDestroySurfaceKHR(c.instance, p.surface, nullptr);
+		[p.layer release];
+	}
+	std::printf("PRESENTATION %s\n", leaks ? "FAIL: a presentation never ended: its image and acquire semaphore stayed retained"
+				: "PASS: every presentation ended, and released its image and acquire semaphore");
+	return leaks ? 1 : 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1102,11 +1281,14 @@ int main(int argc, char** argv) {
 	bool isMetalError = mode == "metal-error" || mode == "metal-error-multi";
 	bool isMetalErrorBatches = mode == "metal-error-batches" || mode == "metal-error-batches2" || mode == "metal-error-calls";
 	bool isExternalWait = mode == "external-queue-wait" || mode == "external-queue-wait-idle" || mode == "external-queue-wait-query";
+	bool isPresentation = mode == "present-scheduled-after-destroy" || mode == "present-destroy-race" || mode == "present-pending-destroy";
+	gPresentationModes = isPresentation;
 	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss" && mode != "event-wait" && !isExternalWait
-		&& mode != "shared-queue-block" && mode != "timeline-listener-aba" && !isTeardown && !isPrefill && !isMetalError && !isMetalErrorBatches) {
+		&& mode != "shared-queue-block" && mode != "timeline-listener-aba" && !isPresentation && !isTeardown && !isPrefill && !isMetalError
+		&& !isMetalErrorBatches) {
 		std::fprintf(stderr, "usage: %s counter-race|binary-generation|destroy-after-loss|event-wait|external-queue-wait[-idle|-query]|shared-queue-block"
 					 "|timeline-listener-aba|teardown[-multi|-nil|-nil-transient]|prefill-abandon-{reset,free,pool}[-lost]"
-					 "|metal-error[-multi|-batches|-batches2|-calls]\n", argv[0]);
+					 "|metal-error[-multi|-batches|-batches2|-calls]|present-scheduled-after-destroy|present-destroy-race|present-pending-destroy\n", argv[0]);
 		return 64;
 	}
 	@autoreleasepool {
@@ -1120,6 +1302,7 @@ int main(int argc, char** argv) {
 			: mode == "event-wait" ? eventWait(c)
 			: isExternalWait ? externalQueueWait(c, mode == "external-queue-wait" ? "fence" : mode.substr(std::strlen("external-queue-wait-")))
 			: mode == "shared-queue-block" ? sharedQueueBlock(c) : mode == "timeline-listener-aba" ? timelineListenerAba(c)
+			: isPresentation ? presentation(c, mode)
 			: isPrefill ? prefillAbandon(c, mode) : isMetalError ? metalError(c, mode)
 			: isMetalErrorBatches ? metalErrorBatches(c, mode) : destroyAfterLoss(c);
 		std::fflush(stdout);

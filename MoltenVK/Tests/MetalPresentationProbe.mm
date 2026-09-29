@@ -13,7 +13,9 @@
 // - exhaustion: every drawable held unpresented, whether nextDrawable returns nil after its timeout, or blocks when
 //   allowsNextDrawableTimeout is NO (checked on a helper thread for 3 s);
 // - pending behind blocked work: every drawable presented from command buffers that wait on an event, whether
-//   nextDrawable waits, with and without its timeout.
+//   nextDrawable waits, with and without its timeout;
+// - completed work (valid usage): presentations whose command buffers have completed, pending only on the display,
+//   followed at once by the forced completion, and a control without it: whether the presented handlers run.
 // Each section uses a new layer. The lines are data; exit 0 when the probe completed.
 // Usage: MetalPresentationProbe detached|window
 #import <AppKit/AppKit.h>
@@ -231,6 +233,30 @@ int main(int argc, char** argv) {
 				std::printf("PRESENT_PROBE DATA pending_behind_blocked_work allowsNextDrawableTimeout=%d returned_after_release=%d took_ms=%.0f got_drawable=%d\n",
 							timeoutAllowed, int(late), tookMs, int(gotDrawable));
 			}
+		}
+		// 5. Valid usage: presentations whose command buffers have completed, pending only on the display, then the forced
+		// completion at once (as when an application recreates its swapchain), and a control without it.
+		static std::atomic<int> gDisplayPresented{0};
+		for (int forced = 1; forced >= 0; --forced) {
+			layer = makeLayer(device);
+			gDisplayPresented = 0;
+			int presentedCount = 0;
+			for (int frame = 0; frame < 3; ++frame) {
+				id<CAMetalDrawable> drawable = [layer nextDrawable];
+				if (!drawable) { continue; }
+				++presentedCount;
+				[drawable addPresentedHandler: ^(id<MTLDrawable>) { gDisplayPresented++; }];
+				id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
+				clear(commandBuffer, drawable.texture);
+				[commandBuffer addScheduledHandler: ^(id<MTLCommandBuffer>) { [drawable present]; }];
+				[commandBuffer commit];
+				[commandBuffer waitUntilCompleted];
+			}
+			int beforeForce = gDisplayPresented.load();
+			if (forced) { layer.drawableSize = CGSizeMake(1, 1); }
+			bool all = pumpUntil(^{ return gDisplayPresented.load() >= presentedCount; }, 2000);
+			std::printf("PRESENT_PROBE DATA completed_work forced=%d presented=%d presented_when_work_completed=%d presented_within_2s=%d all=%d\n",
+						forced, presentedCount, beforeForce, gDisplayPresented.load(), int(all));
 		}
 		std::printf("PRESENT_PROBE DONE mode=%s\n", argv[1]);
 		[gWindow close];
