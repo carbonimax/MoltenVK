@@ -14,7 +14,8 @@
 # reported; after: the loss is not reported within 2 s), and the summary names it. So do external-queue-wait-idle and
 # -query, the same blocker through vkQueueWaitIdle and vkGetQueryPoolResults, and shared-queue-block (a healthy second
 # device blocked on the Metal queue it shares with a lost one; MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE=4),
-# on both sides. timeline-listener-aba reproduces a defect without a device loss (before: 7758838b).
+# on both sides. timeline-listener-aba reproduces a defect without a device loss (before: 7758838b). The present-* modes
+# are not in the default list: two pass on the current runtime, and present-pending-destroy is invalid without a loss.
 # Usage: run-pervertex-loss-tests.sh <libMoltenVK test build> <output directory> <before|after> [repeats [modes...]]
 set -euo pipefail
 test_dir=$(cd "$(dirname "$0")" && pwd)
@@ -41,7 +42,7 @@ ln -sf "$library" "$output/bin/lib/libMoltenVK.1.dylib"
 # The sources are copied into the output and hashed there: the evidence stays checkable after they change.
 mkdir -p "$output/source" && cp "$test_dir/PerVertexLossTests.mm" "$output/source/"
 xcrun clang++ -arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -I"$root/External/Vulkan-Headers/include" "$test_dir/PerVertexLossTests.mm" \
-	"$library" -Wl,-rpath,@executable_path/lib -framework Metal -framework Foundation -o "$output/bin/pervertex-loss"
+	"$library" -Wl,-rpath,@executable_path/lib -framework Metal -framework QuartzCore -framework Foundation -o "$output/bin/pervertex-loss"
 shasum -a 256 "$library" "$output/bin/pervertex-loss" "$output/source/PerVertexLossTests.mm" > "$output/INPUTS.sha256"
 echo 'case,mode,run,expected,actual,verdict' > "$output/results.csv"
 failures=0
