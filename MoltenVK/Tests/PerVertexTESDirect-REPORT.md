@@ -236,10 +236,10 @@ Le rejeu reste compilé à chaque création, comme pour les autres pipelines Per
 
 | Appel non protégé | Ce qui le précède sur le même module | Conclusion |
 | --- | --- | --- |
-| `mvkUsesResources()` sur le TCS et le TES | `getTessReflectionData()` (sous `try`) a déjà analysé les deux modules et vérifié leurs points d'entrée. | Non reproduit. Il ne reste que `get_active_interface_variables()` et `get_shader_resources()`, pour lesquels aucune entrée valide qui lève n'a été trouvée. |
-| `mvkUsesResources()` sur le mesh | C'est la première analyse du module mesh. | Non reproduit. L'analyseur ne lève, sur un module valide, que pour des extensions que MoltenVK n'expose pas (encodages bfloat16 et FP8). |
-| `mvkMeshShaderIncompatibility()` | `mvkUsesResources()` sur le même module. | **Reproduit et corrigé** (voir ci-dessous). |
-| `getMeshPerVertexCornerLocations()` sur le fragment | `getFragmentShaderUsesPerVertexInput()` (sous `try`) a déjà analysé le module et vérifié son point d'entrée. | Non reproduit. |
+| `mvkUsesResources()` sur le TCS et le TES | `getTessReflectionData()` (sous `try`) a déjà analysé les deux modules et vérifié leurs points d'entrée. | Non reproduit, par analyse seulement : aucun essai sur le runtime. Il ne reste que `get_active_interface_variables()` et `get_shader_resources()`, et aucune entrée valide qui les fasse lever n'a été trouvée. |
+| `mvkUsesResources()` sur le mesh | C'est la première analyse du module mesh. | Non reproduit, par analyse seulement : aucun essai sur le runtime. Parmi les points de levée de `spirv_parser.cpp` examinés, aucun ne se déclenche sur un module valide pour les fonctions que MoltenVK expose. Ceux qui restent visent des modules invalides ou des extensions non exposées, comme les encodages bfloat16 et FP8. L'examen n'est pas exhaustif. |
+| `mvkMeshShaderIncompatibility()` | `mvkUsesResources()` sur le même module. | **Reproduit sur le runtime et corrigé** (voir ci-dessous). |
+| `getMeshPerVertexCornerLocations()` sur le fragment | `getFragmentShaderUsesPerVertexInput()` (sous `try`) a déjà analysé le module et vérifié son point d'entrée. | Non reproduit, par analyse seulement : aucun essai sur le runtime. |
 
 **Le chemin reproduit.**
 - `mvkMeshShaderIncompatibility()` lit la taille de groupe par `get_execution_mode_argument(LocalSize)`. Avec `LocalSizeId`, SPIRV-Cross lit l'opérande comme une constante simple (`get<SPIRConstant>`, `spirv_cross.cpp:2593`).
@@ -274,7 +274,7 @@ Le rejeu reste compilé à chaque création, comme pour les autres pipelines Per
   - `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` avec le cache.
 - **Dessins.** Les dessins indexés, indirects et indexés indirects ; plus d'une instance ; DrawID ≠ 0 (multi-draw).
 - **Niveaux.** Les niveaux non uniformes, au-dessus de 3, ou avec un niveau intérieur NaN : le device est perdu à la soumission.
-- **Mesh.** Un `LocalSizeId` qui n'est pas une constante simple est refusé, pas pris en charge.
+- **Mesh.** Un `LocalSizeId` dont un opérande est un `OpSpecConstantOp` est refusé, pas pris en charge. Les opérandes `OpConstant` et `OpSpecConstant` restent admis ; le message de refus (« not a plain constant ») est plus large que le cas réellement refusé.
 - **Non prouvé.**
   - Un cache relu sur un autre device ou un autre processus : l'oracle réutilise le cache dans le même device.
   - La mesure du coût du dispatch supplémentaire.
