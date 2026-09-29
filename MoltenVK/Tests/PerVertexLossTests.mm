@@ -140,6 +140,16 @@
 //   Lost Device section of the Vulkan specification requires the wait to return in finite time. Exit 0 when it returns
 //   within 2 s of the loss report, with VK_SUCCESS or VK_ERROR_DEVICE_LOST, 1 otherwise (the process then exits without destroying the query pool the wait
 //   still uses).
+// drawable-wait-loss (O17, PerVertexExternalWait-DESIGN.md): an encoding that waits in nextDrawable across a device loss.
+//   On a CAMetalLayer detached from any window, an old swapchain presents two images behind the application's blocked
+//   work and keeps a third one acquired. A replacement of the same extent is created while those presentations wait
+//   (they have not begun, so MoltenVK has none to force), then the application releases its work. The replacement's
+//   three images are cleared, which takes and holds three drawables, and a clear of the kept image then asks for a
+//   fourth: on macOS 27.2, Core Animation makes that call wait about one second. The device is lost 50 ms after the call
+//   entered, if it has not returned. nextDrawable is timed through a swizzle, and mvkTestGetLossCounters gives the encodings in progress.
+//   Exit 0 when nextDrawable was entered before the loss and returned after it, no encoding still waits 20 ms after the
+//   loss, the loss is reported before nextDrawable returns, and the late drawable is released to the layer; 1
+//   otherwise. Before R10 an encoding waits in nextDrawable, and holds the loss report back until it returns.
 // Exit 2 for a setup failure, 3 when the device lacks a capability.
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
@@ -1832,6 +1842,256 @@ PresentRound presentRound(Context& c, Presentation& p, bool gated) {
 	return round;
 }
 
+// drawable-wait-loss: nextDrawable, as MoltenVK calls it on the layer of a swapchain, is timed through a swizzle.
+std::atomic<int> gNextDrawableCalls{0}, gNextDrawableInside{0};
+std::atomic<double> gNextDrawableEnteredMs{-1}, gNextDrawableReturnedMs{-1};
+std::atomic<uint64_t> gNextDrawableThread{0};
+std::chrono::steady_clock::time_point gDrawableClock = std::chrono::steady_clock::now();
+id gLateDrawable = nil;		// weak: the drawable the timed call returned
+int gTimedNextDrawableCall = 0;	// the call to time, counted from 1
+IMP gNextDrawable = nullptr;
+
+double drawableClockMs() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gDrawableClock).count(); }
+
+id nextDrawableTimed(id self, SEL command) {
+	int call = ++gNextDrawableCalls;
+	bool isTimed = call == gTimedNextDrawableCall;
+	if (isTimed) {
+		uint64_t thread = 0;
+		pthread_threadid_np(nullptr, &thread);
+		gNextDrawableThread = thread;
+		gNextDrawableEnteredMs = drawableClockMs();
+		gNextDrawableInside = 1;
+	}
+	id drawable = reinterpret_cast<id (*)(id, SEL)>(gNextDrawable)(self, command);
+	if (isTimed) {
+		objc_storeWeak(&gLateDrawable, drawable);
+		gNextDrawableReturnedMs = drawableClockMs();
+		gNextDrawableInside = 0;
+	}
+	return drawable;
+}
+
+VkSwapchainKHR createSwapchain(Context& c, VkSurfaceKHR surface, VkSwapchainKHR oldSwapchain) {
+	VkSwapchainCreateInfoKHR info{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+	info.surface = surface;
+	info.minImageCount = 3;
+	info.imageFormat = VK_FORMAT_B8G8R8A8_UNORM;
+	info.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+	info.imageExtent = {64, 64};	// the same extent, so that MoltenVK forces the old swapchain's presentations to complete
+	info.imageArrayLayers = 1;
+	info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	info.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+	info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+	info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+	info.clipped = VK_TRUE;
+	info.oldSwapchain = oldSwapchain;
+	VkSwapchainKHR swapchain;
+	check(vkCreateSwapchainKHR(c.device, &info, nullptr, &swapchain), "vkCreateSwapchainKHR");
+	return swapchain;
+}
+
+uint32_t acquireImage(Context& c, VkSwapchainKHR swapchain, VkFence fence) {
+	uint32_t index = 0;
+	// A layer outside any window is suboptimal, which still acquires the image. A finite timeout lets the application
+	// hold more images than the swapchain has beyond its minimum count.
+	VkResult acquired = vkAcquireNextImageKHR(c.device, swapchain, 1000000000, VK_NULL_HANDLE, fence, &index);
+	if (acquired != VK_SUCCESS && acquired != VK_SUBOPTIMAL_KHR) { std::fprintf(stderr, "vkAcquireNextImageKHR: %d\n", int(acquired)); std::exit(2); }
+	check(vkWaitForFences(c.device, 1, &fence, VK_TRUE, UINT64_MAX), "acquire fence");
+	check(vkResetFences(c.device, 1, &fence), "vkResetFences");
+	return index;
+}
+
+// Records a command buffer that clears the given images, which makes MoltenVK take each one's drawable while encoding.
+VkCommandBuffer clearImages(Context& c, VkCommandPool pool, const std::vector<VkImage>& images) {
+	VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+	allocation.commandPool = pool;
+	allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	allocation.commandBufferCount = 1;
+	VkCommandBuffer commands;
+	check(vkAllocateCommandBuffers(c.device, &allocation, &commands), "vkAllocateCommandBuffers");
+	VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+	check(vkBeginCommandBuffer(commands, &begin), "vkBeginCommandBuffer");
+	VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+	for (VkImage image : images) {
+		VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+		barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = image;
+		barrier.subresourceRange = range;
+		vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+		VkClearColorValue color{{0.2f, 0.4f, 0.6f, 1.0f}};
+		vkCmdClearColorImage(commands, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &color, 1, &range);
+	}
+	check(vkEndCommandBuffer(commands), "vkEndCommandBuffer");
+	return commands;
+}
+
+int drawableWaitLoss(Context& c) {
+	auto getLossCounters = reinterpret_cast<void (*)(VkDevice, int64_t*, uint32_t*)>(dlsym(RTLD_DEFAULT, "mvkTestGetLossCounters"));
+	auto unpresented = reinterpret_cast<uint32_t (*)(VkSwapchainKHR)>(dlsym(RTLD_DEFAULT, "mvkTestGetUnpresentedImageCount"));
+	if (!getLossCounters || !unpresented) { std::fprintf(stderr, "Needs a MoltenVK test build with mvkTestGetLossCounters and mvkTestGetUnpresentedImageCount\n"); return 3; }
+	gNextDrawable = replace([CAMetalLayer class], @selector(nextDrawable), reinterpret_cast<IMP>(nextDrawableTimed));
+	CAMetalLayer* layer = [[CAMetalLayer layer] retain];	// detached from any window
+	layer.device = c.mtlDevice;
+	layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+	layer.drawableSize = CGSizeMake(64, 64);
+	VkMetalSurfaceCreateInfoEXT surfaceInfo{VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT};
+	surfaceInfo.pLayer = layer;
+	VkSurfaceKHR surface;
+	check(vkCreateMetalSurfaceEXT(c.instance, &surfaceInfo, nullptr, &surface), "vkCreateMetalSurfaceEXT");
+	VkBool32 supported = VK_FALSE;
+	check(vkGetPhysicalDeviceSurfaceSupportKHR(c.physical, c.familyB, surface, &supported), "vkGetPhysicalDeviceSurfaceSupportKHR");
+	if (!supported) { std::fprintf(stderr, "Queue B cannot present\n"); return 3; }
+	VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+	VkFence fence;
+	check(vkCreateFence(c.device, &fenceInfo, nullptr, &fence), "vkCreateFence");
+	VkCommandPool pool = commandPool(c);
+
+	// 1. The old swapchain: two images presented behind the application's blocked work, a third acquired and kept.
+	VkSwapchainKHR oldSwapchain = createSwapchain(c, surface, VK_NULL_HANDLE);
+	uint32_t count = 0;
+	check(vkGetSwapchainImagesKHR(c.device, oldSwapchain, &count, nullptr), "vkGetSwapchainImagesKHR");
+	std::vector<VkImage> oldImages(count);
+	check(vkGetSwapchainImagesKHR(c.device, oldSwapchain, &count, oldImages.data()), "vkGetSwapchainImagesKHR");
+	if (count < 3) { std::fprintf(stderr, "The swapchain has fewer than 3 images\n"); return 3; }
+	id<MTLSharedEvent> gate = [c.mtlDevice newSharedEvent];
+	VkSemaphore timeline = importedSemaphore(c, gate, true);
+	VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+	std::vector<VkSemaphore> rendered(2, VK_NULL_HANDLE);
+	VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+	allocation.commandPool = pool;
+	allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	allocation.commandBufferCount = 1;
+	VkCommandBuffer empty;
+	check(vkAllocateCommandBuffers(c.device, &allocation, &empty), "vkAllocateCommandBuffers");
+	VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+	check(vkBeginCommandBuffer(empty, &begin), "vkBeginCommandBuffer");
+	check(vkEndCommandBuffer(empty), "vkEndCommandBuffer");
+	for (int i = 0; i < 2; ++i) {
+		uint32_t index = acquireImage(c, oldSwapchain, fence);
+		check(vkCreateSemaphore(c.device, &semaphoreInfo, nullptr, &rendered[i]), "vkCreateSemaphore");
+		uint64_t waitValue = 1, signalValue = 0;
+		VkTimelineSemaphoreSubmitInfo values{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO};
+		values.waitSemaphoreValueCount = 1;
+		values.pWaitSemaphoreValues = &waitValue;
+		values.signalSemaphoreValueCount = 1;
+		values.pSignalSemaphoreValues = &signalValue;
+		VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+		VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+		submit.pNext = &values;
+		submit.waitSemaphoreCount = 1;
+		submit.pWaitSemaphores = &timeline;
+		submit.pWaitDstStageMask = &stage;
+		submit.commandBufferCount = 1;
+		submit.pCommandBuffers = &empty;
+		submit.signalSemaphoreCount = 1;
+		submit.pSignalSemaphores = &rendered[i];
+		check(vkQueueSubmit(c.qb, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit");
+		VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+		present.waitSemaphoreCount = 1;
+		present.pWaitSemaphores = &rendered[i];
+		present.swapchainCount = 1;
+		present.pSwapchains = &oldSwapchain;
+		present.pImageIndices = &index;
+		VkResult presented = vkQueuePresentKHR(c.qb, &present);
+		if (presented != VK_SUCCESS && presented != VK_SUBOPTIMAL_KHR) { std::fprintf(stderr, "vkQueuePresentKHR: %d\n", int(presented)); return 2; }
+	}
+	uint32_t keptIndex = acquireImage(c, oldSwapchain, fence);
+	sleepMs(200);
+	uint32_t pendingAtRecreate = unpresented(oldSwapchain);
+
+	// 2. The replacement, of the same extent: MoltenVK forces the old swapchain's pending presentations to complete, then
+	// the application releases its work. The dropped presentations keep their drawables.
+	VkSwapchainKHR newSwapchain = createSwapchain(c, surface, oldSwapchain);
+	gate.signaledValue = 1;
+	check(vkQueueWaitIdle(c.qb), "vkQueueWaitIdle");
+
+	// 3. Three drawables held: every image of the new swapchain cleared, none presented.
+	check(vkGetSwapchainImagesKHR(c.device, newSwapchain, &count, nullptr), "vkGetSwapchainImagesKHR");
+	std::vector<VkImage> newImages(count);
+	check(vkGetSwapchainImagesKHR(c.device, newSwapchain, &count, newImages.data()), "vkGetSwapchainImagesKHR");
+	std::vector<VkImage> held;
+	for (uint32_t i = 0; i < count; ++i) { held.push_back(newImages[acquireImage(c, newSwapchain, fence)]); }
+	VkCommandBuffer clearHeld = clearImages(c, pool, held);
+	VkSubmitInfo submitHeld{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+	submitHeld.commandBufferCount = 1;
+	submitHeld.pCommandBuffers = &clearHeld;
+	check(vkQueueSubmit(c.qb, 1, &submitHeld, VK_NULL_HANDLE), "vkQueueSubmit (held)");
+	check(vkQueueWaitIdle(c.qb), "vkQueueWaitIdle");
+	int callsBefore = gNextDrawableCalls.load();
+
+	// 4. The kept image of the old swapchain cleared: its encoding asks for the next drawable. The device is lost 50 ms
+	// after that call entered, if it has not returned by then.
+	gTimedNextDrawableCall = callsBefore + 1;
+	VkCommandBuffer clearKept = clearImages(c, pool, {oldImages[keptIndex]});
+	double lossMs = -1, reportMs = -1;
+	uint32_t activeEncodingsAtLoss = 0, activeEncodingsAfterLoss = 0;
+	int insideAtLoss = 0, insideAfterLoss = 0;
+	int64_t pendingHandlers = 0;
+	VkResult reported = VK_NOT_READY;
+	uint64_t submitterThread = 0;
+	std::thread watcher([&] {
+		auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+		while (std::chrono::steady_clock::now() < deadline
+			   && !(gNextDrawableInside && gNextDrawableEnteredMs >= 0 && drawableClockMs() - gNextDrawableEnteredMs >= 50)) { sleepMs(1); }
+		insideAtLoss = gNextDrawableInside;
+		getLossCounters(c.device, &pendingHandlers, &activeEncodingsAtLoss);
+		lossMs = drawableClockMs();
+		c.markLost(c.device);
+		sleepMs(20);
+		insideAfterLoss = gNextDrawableInside;
+		getLossCounters(c.device, &pendingHandlers, &activeEncodingsAfterLoss);
+		reported = vkDeviceWaitIdle(c.device);
+		reportMs = drawableClockMs();
+	});
+	pthread_threadid_np(nullptr, &submitterThread);
+	VkSubmitInfo submitKept{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+	submitKept.commandBufferCount = 1;
+	submitKept.pCommandBuffers = &clearKept;
+	VkResult submitted = vkQueueSubmit(c.qb, 1, &submitKept, VK_NULL_HANDLE);
+	watcher.join();
+	auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+	while (gNextDrawableInside && std::chrono::steady_clock::now() < deadline) { sleepMs(1); }
+	// The drawable the late call returned goes back to the layer once nothing retains it.
+	bool lateReleased = false;
+	deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	do {
+		@autoreleasepool { lateReleased = objc_loadWeak(&gLateDrawable) == nil; }
+		if (!lateReleased) { sleepMs(10); }
+	} while (!lateReleased && std::chrono::steady_clock::now() < deadline);
+	double enteredMs = gNextDrawableEnteredMs, returnedMs = gNextDrawableReturnedMs;
+	bool isSubmitterThread = gNextDrawableThread == submitterThread;
+	bool forced = enteredMs >= 0 && enteredMs < lossMs && insideAtLoss;	// entered before the loss, not returned at it
+	bool encodingWaits = insideAfterLoss && activeEncodingsAfterLoss > 0;
+	bool reportedBeforeReturn = reportMs >= 0 && (returnedMs < 0 || reportMs < returnedMs);
+	bool pass = forced && !encodingWaits && reportedBeforeReturn && lateReleased;
+	std::printf("pending_at_recreate=%u next_drawable_calls=%d timed_call=%d entered=%.0f ms loss=%.0f ms returned=%.0f ms reported=%.0f ms (wait=%d) "
+				"submit=%d\n", pendingAtRecreate, gNextDrawableCalls.load(), gTimedNextDrawableCall, enteredMs, lossMs, returnedMs, reportMs, int(reported),
+				int(submitted));
+	std::printf("at_loss: inside_next_drawable=%d active_encodings=%u; 20_ms_later: inside_next_drawable=%d active_encodings=%u; "
+				"next_drawable_on_submitting_thread=%d late_drawable_released=%d\n", insideAtLoss, activeEncodingsAtLoss, insideAfterLoss,
+				activeEncodingsAfterLoss, int(isSubmitterThread), int(lateReleased));
+	std::printf("DRAWABLE_WAIT %s\n", pass ? "PASS: no encoding waits in nextDrawable; the loss is reported before it returns, and the late drawable is released"
+				: !forced ? "FAIL: the interleaving was not forced: nextDrawable did not wait across the loss"
+				: encodingWaits ? "FAIL: an encoding waits in nextDrawable after the loss began, and holds the loss report back"
+				: !reportedBeforeReturn ? "FAIL: the loss was reported only after nextDrawable returned"
+				: "FAIL: the late drawable was not released to the layer");
+	vkDestroySwapchainKHR(c.device, newSwapchain, nullptr);
+	vkDestroySwapchainKHR(c.device, oldSwapchain, nullptr);
+	vkDestroySurfaceKHR(c.instance, surface, nullptr);
+	for (VkSemaphore semaphore : rendered) { vkDestroySemaphore(c.device, semaphore, nullptr); }
+	vkDestroySemaphore(c.device, timeline, nullptr);
+	vkDestroyCommandPool(c.device, pool, nullptr);
+	vkDestroyFence(c.device, fence, nullptr);
+	[gate release];
+	[layer release];
+	return pass ? 0 : 1;
+}
+
 int presentation(Context& c, const std::string& mode) {
 	bool isGated = mode == "present-pending-destroy";
 	if (!isGated) { installHandlerHooks(c); }
@@ -1865,7 +2125,7 @@ int main(int argc, char** argv) {
 	bool isMetalErrorBatches = mode == "metal-error-batches" || mode == "metal-error-batches2" || mode == "metal-error-calls";
 	bool isExternalWait = mode == "external-queue-wait" || mode == "external-queue-wait-idle" || mode == "external-queue-wait-query";
 	bool isPresentation = mode == "present-scheduled-after-destroy" || mode == "present-destroy-race" || mode == "present-pending-destroy";
-	gPresentationModes = isPresentation;
+	gPresentationModes = isPresentation || mode == "drawable-wait-loss";
 	bool isFreeImported = mode == "free-imported-waits" || mode == "free-imported-waits-late-commit" || mode == "free-imported-waits-slow-handler"
 		|| mode == "free-imported-late-allocation" || mode == "free-imported-failed-allocation";
 	gImportedMemoryModes = isFreeImported;
@@ -1879,11 +2139,12 @@ int main(int argc, char** argv) {
 	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss" && mode != "event-wait" && !isExternalWait
 		&& mode != "shared-queue-block" && mode != "timeline-listener-aba" && !isPresentation && !isFreeImported && !isTeardown && !isPrefill && !isMetalError
 		&& !isMetalErrorBatches && !isHostSync && mode != "device-destroy-after-report" && mode != "device-destroy-before-report"
-		&& mode != "query-wait-abandoned") {
+		&& mode != "query-wait-abandoned" && mode != "drawable-wait-loss") {
 		std::fprintf(stderr, "usage: %s counter-race|binary-generation|destroy-after-loss|event-wait|external-queue-wait[-idle|-query]|shared-queue-block"
 					 "|timeline-listener-aba|teardown[-multi|-nil|-nil-transient]|prefill-abandon-{reset,free,pool}[-lost]"
 					 "|metal-error[-multi|-batches|-batches2|-calls]|present-scheduled-after-destroy|present-destroy-race|present-pending-destroy|free-imported-waits[-late-commit|-slow-handler]|free-imported-{late,failed}-allocation"
-					 "|host-sync-{progress,admission}-{invalidate,copy}|device-destroy-{after,before}-report|query-wait-abandoned\n", argv[0]);
+					 "|host-sync-{progress,admission}-{invalidate,copy}|device-destroy-{after,before}-report|query-wait-abandoned"
+					 "|drawable-wait-loss\n", argv[0]);
 		return 64;
 	}
 	@autoreleasepool {
@@ -1903,7 +2164,7 @@ int main(int argc, char** argv) {
 			: isExternalWait ? externalQueueWait(c, mode == "external-queue-wait" ? "fence" : mode.substr(std::strlen("external-queue-wait-")))
 			: mode == "shared-queue-block" ? sharedQueueBlock(c) : mode == "timeline-listener-aba" ? timelineListenerAba(c)
 			: isPresentation ? presentation(c, mode) : isFreeImported ? freeImportedWaits(c, mode) : isHostSync ? hostSync(c, mode)
-			: mode == "query-wait-abandoned" ? queryWaitAbandoned(c)
+			: mode == "query-wait-abandoned" ? queryWaitAbandoned(c) : mode == "drawable-wait-loss" ? drawableWaitLoss(c)
 			: isPrefill ? prefillAbandon(c, mode) : isMetalError ? metalError(c, mode)
 			: isMetalErrorBatches ? metalErrorBatches(c, mode) : destroyAfterLoss(c);
 		std::fflush(stdout);
