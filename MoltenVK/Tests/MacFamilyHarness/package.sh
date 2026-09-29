@@ -16,7 +16,7 @@ tests=$(cd "$harness/.." && pwd)
 root=$(cd "$tests/../.." && pwd)
 base=$(git -C "$root" rev-parse --verify "${1:?library base commit}^{commit}")
 output=$(mkdir -p "${2:?output directory}" && cd "$2" && pwd)
-name=${3:-mac-family-harness-r13}
+name=${3:-mac-family-harness-r14}
 head=$(git -C "$root" rev-parse HEAD)
 git -C "$root" diff --quiet HEAD -- MoltenVK MoltenVKShaderConverter Common ExternalRevisions || { echo 'Commit the sources first: the bundle is built from committed sources'; exit 1; }
 git -C "$root" diff --quiet "$base" HEAD -- MoltenVK/MoltenVK MoltenVKShaderConverter Common ExternalRevisions MoltenVK/Tests/PerVertexTES/EnableTestDevice.mm MoltenVK/Tests/PerVertexTES/build-library.sh \
@@ -107,15 +107,19 @@ fixture probe "$harness/probe.mm" -fobjc-arc -framework Foundation -framework Me
 fixture pervertex-indirect-gpu "$tests/PerVertexIndirectGPUTests.cpp" -lobjc
 fixture topology "$T/topology.cpp" -Wl,-U,_mvkEnableTESFixtureDevice
 fixture mesh-draw "$M/mesh-draw.cpp" -Wl,-U,_mvkEnableMeshTestDevice -Wl,-U,_mvkEnableTESFixtureDevice
+fixture pervertex-loss "$tests/PerVertexLossTests.mm" -framework Metal -framework Foundation
 # The Metal mesh limits probe uses neither Vulkan nor MoltenVK.
 xcrun clang++ -arch arm64 -std=c++17 -fobjc-arc -O1 -mmacosx-version-min=13.0 -Wall -Wextra -Werror "$tests/PerVertexMeshLimits.mm" -framework Metal -framework Foundation -o "$bundle/bin/mesh-limits"
 codesign --force --sign - "$bundle/bin/mesh-limits"
+# The abandon probe, Metal only too: what MoltenVK assumes when it releases a prefilled command buffer uncommitted.
+xcrun clang++ -arch arm64 -std=c++17 -fobjc-arc -O1 -mmacosx-version-min=11.0 -Wall -Wextra -Werror "$harness/abandon-probe.mm" -framework Metal -framework Foundation -o "$bundle/bin/abandon-probe"
+codesign --force --sign - "$bundle/bin/abandon-probe"
 
 # 5. Runner, documentation and sources.
 cp "$harness/run.sh" "$harness/timeout.pl" "$harness/README.md" "$bundle/"
 chmod +x "$bundle/run.sh" "$bundle/timeout.pl"
-cp "$harness/probe.mm" "$harness/run.sh" "$harness/timeout.pl" "$harness/package.sh" "$bundle/source/harness/"
-cp "$tests/PerVertexIndirectGPUTests.cpp" "$T/topology.cpp" "$M/mesh-draw.cpp" "$T/EnableTestDevice.mm" "$tests/PerVertexMeshLimits.mm" "$bundle/source/fixtures/"
+cp "$harness/probe.mm" "$harness/abandon-probe.mm" "$harness/run.sh" "$harness/timeout.pl" "$harness/package.sh" "$bundle/source/harness/"
+cp "$tests/PerVertexIndirectGPUTests.cpp" "$tests/PerVertexLossTests.mm" "$T/topology.cpp" "$M/mesh-draw.cpp" "$T/EnableTestDevice.mm" "$tests/PerVertexMeshLimits.mm" "$bundle/source/fixtures/"
 cp "$tests"/pervertex-indirect.vert "$tests"/pervertex-indirect.frag "$tests"/pervertex-indirect-args.comp "$bundle/source/shaders/indirect/"
 cp "$T"/*.vert "$T"/*.tesc "$T"/*.tese "$T"/*.frag "$T"/*.comp "$bundle/source/shaders/tes/"
 cp "$M"/*.mesh "$M"/*.frag "$bundle/source/shaders/mesh/"
