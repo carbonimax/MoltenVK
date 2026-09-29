@@ -244,7 +244,12 @@ int main(int argc, char** argv) {
 		if (ordinaryOnly) features.pNext = &drawParameters;
 		vkGetPhysicalDeviceFeatures2(physical, &features);
 		if (!drawParameters.shaderDrawParameters || !features.features.vertexPipelineStoresAndAtomics || !features.features.fragmentStoresAndAtomics || !features.features.multiDrawIndirect) throw std::runtime_error("Draw parameters, multi-draw indirect, vertex or fragment stores unavailable");
+		const bool multiViewport = features.features.multiViewport;
 		features.features = {};
+		if (scenarioName == "reject-multi-viewport") {
+			if (!multiViewport) throw std::runtime_error("multiViewport unavailable");
+			features.features.multiViewport = VK_TRUE;
+		}
 		features.features.tessellationShader = VK_TRUE;
 		features.features.vertexPipelineStoresAndAtomics = VK_TRUE;
 		features.features.fragmentStoresAndAtomics = VK_TRUE;
@@ -476,7 +481,7 @@ int main(int argc, char** argv) {
 			check(vkCreateShaderModule(device, &info, nullptr, &result), "Create shader module");
 			return modules[name] = result;
 		};
-		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; bool named = false; const char* tescEntry = nullptr; VkPipelineCache pipelineCache = VK_NULL_HANDLE; VkPipelineCreationFeedback* stageFeedback = nullptr; bool dynamicScissor = false, dynamicViewport = false; std::vector<ScissorDraw> scissorDraws; };
+		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; bool named = false; const char* tescEntry = nullptr; VkPipelineCache pipelineCache = VK_NULL_HANDLE; VkPipelineCreationFeedback* stageFeedback = nullptr; bool dynamicScissor = false, dynamicViewport = false; std::vector<ScissorDraw> scissorDraws; uint32_t viewportCount = 1; };
 		auto pipelineLayout = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureLayout : o.capture == 2 ? fragmentCaptureLayout : o.uniform ? uniformLayout : o.resources ? resourceLayout : o.push ? pushLayout : emptyLayout; };
 		auto descriptorSet = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureSet : o.capture == 2 ? fragmentCaptureSet : o.resources ? resourceSet : VK_NULL_HANDLE; };
 		auto createPipeline = [&](const PipelineOptions& o, VkPipeline& pipeline) {
@@ -510,10 +515,12 @@ int main(int argc, char** argv) {
 			VkViewport viewport{0, 0, float(kWidth), float(kHeight), 0, 1};
 			VkRect2D scissor{{0, 0}, {kWidth, kHeight}};
 			VkPipelineViewportStateCreateInfo viewportState{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-			viewportState.viewportCount = 1;
-			viewportState.pViewports = &viewport;
-			viewportState.scissorCount = 1;
-			viewportState.pScissors = &scissor;
+			// Several identical viewports and scissors need the multiViewport feature.
+			const VkViewport viewports[2] = {viewport, viewport};
+			const VkRect2D scissors[2] = {scissor, scissor};
+			viewportState.viewportCount = viewportState.scissorCount = o.viewportCount;
+			viewportState.pViewports = viewports;
+			viewportState.pScissors = scissors;
 			VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
 			raster.polygonMode = VK_POLYGON_MODE_FILL;
 			raster.cullMode = o.cull ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
@@ -858,6 +865,8 @@ int main(int argc, char** argv) {
 			else if (scenarioName == "reject-push-constant") { o.tesc = "push.tesc.spv"; o.push = true; }
 			// Only VK_DYNAMIC_STATE_SCISSOR is qualified; a dynamic viewport stays refused.
 			else if (scenarioName == "reject-dynamic-viewport") { o.dynamicViewport = true; }
+			// The admission covers one viewport and one scissor.
+			else if (scenarioName == "reject-multi-viewport") { o.viewportCount = 2; }
 			else if (scenarioName == "reject-no-admission") {}
 			else if (scenarioName == "reject-indirect-tes" || scenarioName == "reject-indexed-indirect-tes") {
 				check(createPipeline(o, pipeline), "Create admitted pipeline");
