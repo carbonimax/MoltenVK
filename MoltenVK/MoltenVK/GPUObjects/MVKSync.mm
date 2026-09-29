@@ -291,16 +291,19 @@ bool MVKTimelineSemaphoreMTLEvent::registerWait(MVKFenceSitter* sitter, const Vk
 	if (_mtlEvent.signaledValue >= pWaitInfo->pValues[index]) { return true; }
 	lock_guard<mutex> lock(_lock);
 	sitter->await();
-	auto addRslt = _sitters.insert(sitter);
+	auto addRslt = _sitters.emplace(sitter, nullptr);
 	if (addRslt.second) {
-		retain();
+		// Metal may run the listener after this wait has ended, or never. It holds only a token, which the wait detaches
+		// when it ends, never the waiter or this semaphore: the waiter's address may be that of a later wait by then.
+		auto token = std::make_shared<MVKTimelineWaitToken>();
+		token->sitter = sitter;
+		addRslt.first->second = token;
 		_device->addSemaphore(&sitter->_blocker);
 		[_mtlEvent notifyListener: sitter->getMTLSharedEventListener()
 						  atValue: pWaitInfo->pValues[index]
 							block: ^(id<MTLSharedEvent>, uint64_t) {
-			lock_guard<mutex> blockLock(_lock);
-			if (_sitters.count(sitter)) { sitter->signaled(); }
-			release();
+			lock_guard<mutex> tokenLock(token->lock);
+			if (token->sitter) { token->sitter->signaled(); }
 		}];
 	}
 	return false;
@@ -309,7 +312,12 @@ bool MVKTimelineSemaphoreMTLEvent::registerWait(MVKFenceSitter* sitter, const Vk
 void MVKTimelineSemaphoreMTLEvent::unregisterWait(MVKFenceSitter* sitter) {
 	lock_guard<mutex> lock(_lock);
 	_device->removeSemaphore(&sitter->_blocker);
-	_sitters.erase(sitter);
+	auto found = _sitters.find(sitter);
+	if (found == _sitters.end()) { return; }
+	auto token = found->second;
+	_sitters.erase(found);
+	lock_guard<mutex> tokenLock(token->lock);
+	token->sitter = nullptr;
 }
 
 MVKTimelineSemaphoreMTLEvent::MVKTimelineSemaphoreMTLEvent(MVKDevice* device,
