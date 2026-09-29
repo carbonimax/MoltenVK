@@ -4855,7 +4855,8 @@ void MVKDevice::freeMemory(MVKDeviceMemory* mvkDevMem,
 						   const VkAllocationCallbacks* pAllocator) {
 	if ( !mvkDevMem ) { return; }
 	// Once this returns, the application may reuse host memory it imported: no Metal work may write it any more.
-	if (mvkDevMem->isHostMemoryImported()) { waitForLossInventory(); }
+	// Memory imported during the loss, or whose import failed, has no such work.
+	if (mvkDevMem->isHostMemoryImportedBeforeLoss()) { waitForLossInventory(); }
 	mvkDevMem->destroy();
 }
 
@@ -5118,9 +5119,21 @@ VkResult MVKDevice::invalidateMappedMemoryRanges(uint32_t memRangeCount, const V
 	@autoreleasepool {
 		VkResult rslt = VK_SUCCESS;
 		MVKMTLBlitEncoder mvkBlitEnc;
-		// Bracketed like a queue submission until its commit: its synchronization may write imported host memory, which a
-		// device loss must count before reporting. The completion wait comes after, so that a loss does not wait for it.
+		// A synchronization from the GPU may write imported host memory, which a device loss must count before reporting:
+		// it is admitted and committed within an encoding bracket, like a queue submission. Its Metal command buffer is
+		// acquired before the bracket, since the acquisition blocks while the queue is full, and the loss report waits for
+		// the bracket. The completion wait comes after the bracket too. Once the device is being lost, nothing is admitted:
+		// the contents of device memory are undefined after a loss.
+		for (uint32_t i = 0; i < memRangeCount && !mvkBlitEnc.mtlCmdBuffer && !isLosing(); i++) {
+			if (((MVKDeviceMemory*)pMemRanges[i].memory)->needsDeviceSynchronization()) {
+				mvkBlitEnc.mtlCmdBuffer = getAnyQueue()->getMTLCommandBuffer(kMVKCommandUseInvalidateMappedMemoryRanges);
+			}
+		}
 		beginEncoding();
+		if (isLosing()) {
+			abandonMTLCommandBuffer(mvkBlitEnc.mtlCmdBuffer);
+			mvkBlitEnc.mtlCmdBuffer = nil;
+		}
 		for (uint32_t i = 0; i < memRangeCount; i++) {
 			const VkMappedMemoryRange* pMem = &pMemRanges[i];
 			MVKDeviceMemory* mvkMem = (MVKDeviceMemory*)pMem->memory;
