@@ -263,7 +263,7 @@ Le rejeu reste compilé à chaque création, comme pour les autres pipelines Per
 
 **Preuves** : `build/astra/mesh-local-size-before-2391ced8/`, `build/astra/mesh-local-size-after-008fa845/`.
 
-## 14. Ce qui reste hors du contrat (à `008fa845`)
+## 14. Ce qui reste hors du contrat (à `008fa845` ; état courant au § 16)
 
 - **Pipeline.**
   - Les domaines quads et isolines, les espacements fractionnaires, le mode point et plus de 3 points de contrôle.
@@ -277,6 +277,59 @@ Le rejeu reste compilé à chaque création, comme pour les autres pipelines Per
 - **Mesh.** Un `LocalSizeId` dont un opérande est un `OpSpecConstantOp` est refusé, pas pris en charge. Les opérandes `OpConstant` et `OpSpecConstant` restent admis ; le message de refus (« not a plain constant ») est plus large que le cas réellement refusé.
 - **Non prouvé.**
   - Un cache relu sur un autre device ou un autre processus : l'oracle réutilise le cache dans le même device.
+  - La mesure du coût du dispatch supplémentaire.
+- **Autres GPU.** Seul un M4 Pro est prouvé. M1, M3 et Intel restent pour la fin.
+
+L'extension reste fermée par défaut et n'est pas prête pour upstream.
+
+## 15. L'état dynamique de ciseaux (oracle `2be0e1fb`, correctif `198aee8a`)
+
+Astra a validé le cache et le correctif mesh de façon bornée. Elle a demandé l'état dynamique de ciseaux, `VK_DYNAMIC_STATE_SCISSOR`, et lui seul. Un oracle avec deux valeurs de ciseaux et des pixels qui changent devait précéder le retrait de la garde.
+
+**L'oracle `dynamic-scissor`.**
+- Trois patchs, un par cellule de 64 pixels, dessinés sous quatre cas de ciseaux :
+  - l'image entière ;
+  - un ciseau à gauche (x < 96) ;
+  - un ciseau à droite (64 ≤ x < 192) ;
+  - `ab` : deux dessins des mêmes patchs dans une même passe, le premier limité à la première cellule, le second à la dernière. Chaque rejeu, après que ses étages de calcul ont relancé la passe, doit appliquer son propre ciseau.
+- Pour chaque cas, l'image PerVertex doit concorder avec le pipeline ordinaire soumis aux mêmes commandes, et aucun pixel ne doit sortir du ciseau.
+- Pour `ab`, la cellule du milieu doit rester vide et les deux autres couvertes.
+- Les images doivent changer avec le ciseau, et un ciseau dynamique sur l'image entière doit donner l'image du ciseau statique.
+- Le refus `reject-dynamic-viewport` garde refusé un viewport dynamique.
+
+**Le correctif.**
+- La porte TES ne refuse plus tout état dynamique. Elle parcourt la liste Vulkan et n'admet que `VK_DYNAMIC_STATE_SCISSOR`.
+- Elle lit la liste Vulkan plutôt que les drapeaux de MoltenVK, parce que `VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT` donne le même drapeau `Scissors` et doit rester refusé.
+- Le ciseau passe par l'état commun de l'encodeur (`MVKCommandEncoderState.mm:1397`), que la tessellation ordinaire utilise aussi.
+
+| Bibliothèque | `dynamic-scissor` ccw et cw | `reject-dynamic-viewport` |
+| --- | --- | --- |
+| **Avant** : `lib-008fa845-tes` (`fb4d60d4…`). Son runtime est identique à `2be0e1fb`. | Sortie 1 : le pipeline est refusé (« requires static … »). | PASS, refusé par la garde générale. |
+| **Après** : `lib-198aee8a-tes` (`00efc36b…`) | **PASS**. Ciseau entier : 4 704 pixels (1 568 par cellule). À gauche : 1 568, 784, 0. À droite : 0, 1 568, 1 568. `ab` : 1 568, 0, 1 568. Aucun écart face au pipeline ordinaire, aucun pixel hors du ciseau. | PASS, refusé par la nouvelle garde (« no dynamic state other than VK_DYNAMIC_STATE_SCISSOR »). |
+
+**Pas de mutation.** Le chemin TES n'applique pas lui-même le ciseau, puisque c'est l'état commun de l'encodeur qui s'en charge. Une mutation de cet état toucherait aussi la tessellation ordinaire. Les contrôles explicites (aucun pixel hors du ciseau, cellules de `ab`) ne dépendent pas du pipeline ordinaire.
+
+**Régression.** Runner TES complet à `198aee8a` : **115/115 PASS**, `EVIDENCE.sha256` de 933 entrées (sha256 du manifeste `285fcba8…`, dans `build/astra/tes-runner-198aee8a/`).
+
+**Preuves** : `build/astra/tes-scissor-before-2be0e1fb/`, `build/astra/tes-scissor-after-198aee8a/`.
+
+## 16. Ce qui reste hors du contrat (à `198aee8a`)
+
+- **Pipeline.**
+  - Les domaines quads et isolines, les espacements fractionnaires, le mode point et plus de 3 points de contrôle.
+  - L'origine de domaine en bas à gauche.
+  - Les descripteurs et push constants du TCS ou du TES.
+  - La spécialisation, et le `pNext` ou les `flags` d'étage.
+  - Tout état dynamique autre que `VK_DYNAMIC_STATE_SCISSOR`, y compris `VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT` et le viewport.
+  - Le multiview, le multi-échantillonnage et les diviseurs de sommets.
+  - `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` avec le cache.
+- **Dessins.** Les dessins indexés, indirects et indexés indirects ; plus d'une instance ; DrawID ≠ 0 (multi-draw).
+- **Niveaux.** Les niveaux non uniformes, au-dessus de 3, ou avec un niveau intérieur NaN : le device est perdu à la soumission.
+- **Mesh.** Un `LocalSizeId` dont un opérande est un `OpSpecConstantOp` est refusé, pas pris en charge.
+- **Non prouvé.**
+  - Plusieurs ciseaux (multi-viewport) : un seul ciseau est testé.
+  - Un cache relu dans un autre device ou un autre processus.
+  - Les trois appels de réflexion non protégés du § 13, examinés par analyse seulement.
   - La mesure du coût du dispatch supplémentaire.
 - **Autres GPU.** Seul un M4 Pro est prouvé. M1, M3 et Intel restent pour la fin.
 
