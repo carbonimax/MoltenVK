@@ -22,6 +22,8 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include <memory>
+#include <unordered_map>
 #include <unordered_set>
 
 class MVKFenceSitter;
@@ -377,6 +379,12 @@ public:
 #pragma mark -
 #pragma mark MVKTimelineSemaphoreMTLEvent
 
+/** Links the Metal event listener of a host wait to that wait, until the wait ends and detaches it. */
+struct MVKTimelineWaitToken {
+	std::mutex lock;
+	MVKFenceSitter* sitter;
+};
+
 /** An MVKTimelineSemaphore that uses MTLSharedEvent to provide synchronization. */
 class MVKTimelineSemaphoreMTLEvent : public MVKTimelineSemaphore {
 
@@ -403,7 +411,7 @@ public:
 protected:
 	id<MTLSharedEvent> _mtlEvent = nil;
 	std::mutex _lock;
-	std::unordered_set<MVKFenceSitter*> _sitters;
+	std::unordered_map<MVKFenceSitter*, std::shared_ptr<MVKTimelineWaitToken>> _sitters;
 	std::atomic<uint64_t> _maxEncodedWaitValue{0};
 	std::atomic<bool> _isLossReleased{false};
 };
