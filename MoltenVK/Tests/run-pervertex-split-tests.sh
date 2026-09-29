@@ -32,9 +32,11 @@ for stage in vert frag; do
 	glslangValidator -V --target-env vulkan1.1 "$test_dir/pervertex-split.$stage" -o "$output/shaders/split.$stage.spv" > /dev/null
 	spirv-val --target-env vulkan1.1 "$output/shaders/split.$stage.spv"
 done
+# The sources are copied into the output and hashed there: the evidence stays checkable after they change.
+mkdir -p "$output/source" && cp "$test_dir/PerVertexAttachmentSplitTests.mm" "$output/source/"
 xcrun clang++ -arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -I"$root/External/Vulkan-Headers/include" \
 	"$test_dir/PerVertexAttachmentSplitTests.mm" "$library" -Wl,-rpath,@executable_path/lib -framework Metal -framework Foundation -o "$output/bin/pervertex-split"
-shasum -a 256 "$library" "$output/bin/pervertex-split" "$output"/shaders/*.spv "$test_dir/PerVertexAttachmentSplitTests.mm" > "$output/INPUTS.sha256"
+shasum -a 256 "$library" "$output/bin/pervertex-split" "$output"/shaders/*.spv "$output/source/PerVertexAttachmentSplitTests.mm" > "$output/INPUTS.sha256"
 echo 'variant,expected,actual,verdict' > "$output/results.csv"
 failures=0
 for variant in "${variants[@]}"; do

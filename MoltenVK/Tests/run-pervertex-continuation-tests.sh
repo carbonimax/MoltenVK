@@ -48,9 +48,11 @@ tes ordered.tese tes-ordered.tese.spv
 tes ordered.frag tes-ordered.frag.spv
 tes wrong-patch.frag tes-wrong-patch.frag.spv
 flags=(-arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -I"$root/External/Vulkan-Headers/include")
+# The sources are copied into the output and hashed there: the evidence stays checkable after they change.
+mkdir -p "$output/source" && cp "$test_dir/PerVertexIndirectGPUTests.cpp" "$test_dir/PerVertexBinarySemaphoreOrderTests.mm" "$output/source/"
 xcrun clang++ "${flags[@]}" "$test_dir/PerVertexIndirectGPUTests.cpp" "$library" -lobjc -Wl,-rpath,@executable_path/lib -o "$output/bin/pervertex-indirect-gpu"
 xcrun clang++ "${flags[@]}" "$test_dir/PerVertexBinarySemaphoreOrderTests.mm" "$library" -Wl,-rpath,@executable_path/lib -framework Metal -framework Foundation -o "$output/bin/pervertex-binary-order"
-shasum -a 256 "$library" "$output"/shaders/*.spv "$output"/bin/pervertex-* "$test_dir/PerVertexIndirectGPUTests.cpp" "$test_dir/PerVertexBinarySemaphoreOrderTests.mm" > "$output/INPUTS.sha256"
+shasum -a 256 "$library" "$output"/shaders/*.spv "$output"/bin/pervertex-* "$output/source/PerVertexIndirectGPUTests.cpp" "$output/source/PerVertexBinarySemaphoreOrderTests.mm" > "$output/INPUTS.sha256"
 echo 'case,expected_exit,actual_exit,verdict' > "$output/results.csv"
 validation=(MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1)
 common=(MVK_CONFIG_LOG_LEVEL=2 PERVERTEX_TEST_SPLIT_PRODUCER=1 PERVERTEX_TEST_LATE_SIGNAL=1 PERVERTEX_TEST_DEPENDENT_SUBMISSION=1 PERVERTEX_TEST_WAIT_IDLE=1)

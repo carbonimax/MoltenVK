@@ -14,7 +14,7 @@
 # reported; after: the loss is not reported within 2 s), and the summary names it. So do external-queue-wait-idle and
 # -query, the same blocker through vkQueueWaitIdle and vkGetQueryPoolResults, and shared-queue-block (a healthy second
 # device blocked on the Metal queue it shares with a lost one; MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE=4),
-# on both sides. timeline-listener-aba reproduces a defect without a device loss; it is not in the default list.
+# on both sides. timeline-listener-aba reproduces a defect without a device loss (before: 7758838b).
 # Usage: run-pervertex-loss-tests.sh <libMoltenVK test build> <output directory> <before|after> [repeats [modes...]]
 set -euo pipefail
 test_dir=$(cd "$(dirname "$0")" && pwd)
@@ -27,7 +27,7 @@ modes=("${@:5}")
 (( ${#modes[@]} )) || modes=(counter-race binary-generation destroy-after-loss event-wait teardown teardown-multi teardown-nil teardown-nil-transient
 	prefill-abandon-reset prefill-abandon-free prefill-abandon-pool prefill-abandon-reset-lost prefill-abandon-free-lost prefill-abandon-pool-lost
 	metal-error metal-error-multi metal-error-batches metal-error-batches2 metal-error-calls
-	external-queue-wait external-queue-wait-idle external-queue-wait-query shared-queue-block)
+	external-queue-wait external-queue-wait-idle external-queue-wait-query shared-queue-block timeline-listener-aba)
 [[ $side == before || $side == after ]] || { echo 'side must be before or after'; exit 64; }
 # The runner runs again as a child whose output tee records, so that the log is complete when this parent hashes it.
 if [[ -z ${PERVERTEX_RUNNER_CHILD:-} ]]; then
@@ -38,9 +38,11 @@ if [[ -z ${PERVERTEX_RUNNER_CHILD:-} ]]; then
 fi
 mkdir -p "$output/bin/lib" "$output/runs"
 ln -sf "$library" "$output/bin/lib/libMoltenVK.1.dylib"
+# The sources are copied into the output and hashed there: the evidence stays checkable after they change.
+mkdir -p "$output/source" && cp "$test_dir/PerVertexLossTests.mm" "$output/source/"
 xcrun clang++ -arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -I"$root/External/Vulkan-Headers/include" "$test_dir/PerVertexLossTests.mm" \
 	"$library" -Wl,-rpath,@executable_path/lib -framework Metal -framework Foundation -o "$output/bin/pervertex-loss"
-shasum -a 256 "$library" "$output/bin/pervertex-loss" "$test_dir/PerVertexLossTests.mm" > "$output/INPUTS.sha256"
+shasum -a 256 "$library" "$output/bin/pervertex-loss" "$output/source/PerVertexLossTests.mm" > "$output/INPUTS.sha256"
 echo 'case,mode,run,expected,actual,verdict' > "$output/results.csv"
 failures=0
 blockers=()
@@ -74,7 +76,7 @@ for name in "${modes[@]}"; do
 			[[ $verdict == BLOCKER ]] && blockers+=("$name-$mode-$run")
 			[[ $verdict == PASS || $verdict == BLOCKER ]] || failures=$((failures + 1))
 			echo "$name,$mode,$run,$expected,$rc,$verdict" >> "$output/results.csv"
-			printf '%-20s %-5s %s exit=%s %s | %s\n' "$name" "$mode" "$run" "$rc" "$verdict" "$(grep -E '^(COUNTER_RACE|BINARY_GENERATION|DESTROY_AFTER_LOSS|EVENT_WAIT|TEARDOWN|EXTERNAL_QUEUE_WAIT|SHARED_QUEUE|TIMELINE_LISTENER|PREFILL_ABANDON|METAL_ERROR)|^submit=|^C_before_loss|^shared_mtl_queue|^cleanup=|^wait=' "$log" | tr '\n' ' ' | cut -c1-200)"
+			printf '%-20s %-5s %s exit=%s %s | %s\n' "$name" "$mode" "$run" "$rc" "$verdict" "$(grep -E '^(spurious_waits|COUNTER_RACE|BINARY_GENERATION|DESTROY_AFTER_LOSS|EVENT_WAIT|TEARDOWN|EXTERNAL_QUEUE_WAIT|SHARED_QUEUE|TIMELINE_LISTENER|PREFILL_ABANDON|METAL_ERROR)|^submit=|^C_before_loss|^shared_mtl_queue|^cleanup=|^wait=' "$log" | tr '\n' ' ' | cut -c1-200)"
 		done
 	done
 done
