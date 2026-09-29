@@ -97,6 +97,7 @@ VkResult MVKQueue::submit(MVKQueueSubmission* qSubmit) {
 	}
 
 	if ( !qSubmit ) { return VK_SUCCESS; }     // Ignore nils
+	qSubmit->queueForPublication();
 
 	// Extract result before submission to avoid race condition with early destruction
 	// Submit regardless of config result, to ensure submission semaphores and fences are signalled.
@@ -555,7 +556,7 @@ VkResult MVKQueueCommandBufferSubmission::execute() {
 	// While the device is being lost, a submission accepted earlier encodes nothing, and never reads its command
 	// buffers: host waits report the loss once no submission is encoding. Its Metal waiters are released by the device.
 	if (getDevice()->isLosing()) {
-		finish();
+		_queue->publishInOrder(this);
 		return VK_ERROR_DEVICE_LOST;
 	}
 
@@ -696,7 +697,29 @@ VkResult MVKQueueCommandBufferSubmission::commitActiveMTLCommandBuffer(bool sign
 }
 
 void MVKQueueCommandBufferSubmission::releaseMTLCommandBuffer() {
-	if (--_pendingMTLCommandBuffers == 0) { finish(); }
+	if (--_pendingMTLCommandBuffers == 0) { _queue->publishInOrder(this); }
+}
+
+void MVKQueueCommandBufferSubmission::queueForPublication() {
+	lock_guard<mutex> lock(_queue->_publicationLock);
+	_queue->_unpublishedSubmissions.push_back(this);
+}
+
+// Only one thread publishes at a time, outside the lock: another that completes a submission meanwhile leaves it to
+// that thread. finish() destroys the submission; the queue lives on, since its device waits for this handler.
+void MVKQueue::publishInOrder(MVKQueueCommandBufferSubmission* submission) {
+	unique_lock<mutex> lock(_publicationLock);
+	submission->_isComplete = true;
+	if (_isPublishing) { return; }
+	_isPublishing = true;
+	while ( !_unpublishedSubmissions.empty() && _unpublishedSubmissions.front()->_isComplete ) {
+		MVKQueueCommandBufferSubmission* next = _unpublishedSubmissions.front();
+		_unpublishedSubmissions.pop_front();
+		lock.unlock();
+		next->finish();
+		lock.lock();
+	}
+	_isPublishing = false;
 }
 
 // Be sure to retain() any API objects referenced in this function, and release() them in the
