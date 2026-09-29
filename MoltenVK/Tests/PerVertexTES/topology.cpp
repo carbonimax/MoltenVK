@@ -70,6 +70,7 @@ struct Scenario {
 	bool resources = false;  // VS storage-buffer counter and fragment uniform scale.
 	uint32_t vertexCount = 0;  // Draw size when it is not three vertices per patch.
 	bool seam = false;  // The second patch shares an edge with the first one.
+	uint32_t firstVertex = 0, firstInstance = 0;  // Direct draw parameters; the vertex data starts at firstVertex.
 };
 
 // Vulkan levels after clamp and round-up, or 0 for a discarded patch.
@@ -117,7 +118,7 @@ static float asFloat(uint32_t word) { float value; memcpy(&value, &word, 4); ret
 // Capture TES record: patch, u, v, w, pixel x, pixel y, then outer[0..2] and inner[0] as the TES read them.
 constexpr uint32_t kCaptureWords = 10;
 
-struct Image { std::vector<uint8_t> rgba; VkResult submit = VK_SUCCESS, wait = VK_SUCCESS; uint32_t invocations = 0; std::vector<uint32_t> tesCapture, fragmentCapture; };
+struct Image { std::vector<uint8_t> rgba; VkResult submit = VK_SUCCESS, wait = VK_SUCCESS; uint32_t invocations = 0, vertexSum = 0, instanceSum = 0; std::vector<uint32_t> tesCapture, fragmentCapture; };
 
 int main(int argc, char** argv) {
 	try {
@@ -149,6 +150,12 @@ int main(int argc, char** argv) {
 			scenarios["seam" + std::to_string(level)] = seam;
 		}
 		// Vulkan runs the VS for every vertex of a draw, including vertices that do not complete a patch.
+		// Nonzero firstVertex and firstInstance: zeroed decoy vertices precede the data, the VS adds gl_InstanceIndex - 1
+		// to the levels, and its counter also sums gl_VertexIndex and gl_InstanceIndex.
+		Scenario first{{uniform(two), uniform(three)}, {}, false, false, "first.vert.spv", true};
+		first.firstVertex = 3;
+		first.firstInstance = 1;
+		scenarios["first"] = first;
 		for (uint32_t vertexCount : {1u, 2u, 4u, 5u}) {
 			Scenario partial{vertexCount < 3 ? std::vector<Patch>{} : std::vector<Patch>{uniform(two)}, {}, false, false, "resources.vert.spv", true};
 			partial.vertexCount = vertexCount;
@@ -550,8 +557,8 @@ int main(int argc, char** argv) {
 				auto points = controlPoints(p, patches[p].mirrored, scenario.seam);
 				for (uint32_t c = 0; c < 3; ++c) {
 					float position[2] = {float(points[c][0]), float(points[c][1])};
-					memcpy(staging.data + (3 * p + c) * kVertexStride, position, 8);
-					memcpy(staging.data + (3 * p + c) * kVertexStride + 16, patches[p].levels.data(), 16);
+					memcpy(staging.data + (firstVertex + 3 * p + c) * kVertexStride, position, 8);
+					memcpy(staging.data + (firstVertex + 3 * p + c) * kVertexStride + 16, patches[p].levels.data(), 16);
 				}
 			}
 			check(vkResetCommandBuffer(command, 0), "Reset command buffer");
@@ -596,7 +603,7 @@ int main(int argc, char** argv) {
 			vkCmdBindVertexBuffers(target, 0, 1, &vertices.buffer, &offset);
 			const uint32_t drawCount = scenario.vertexCount ? scenario.vertexCount : uint32_t(3 * patches.size());
 			const uint32_t parts = splitDraw ? 2 : 1, counts[2] = {splitDraw ? 3 : drawCount, drawCount - 3}, starts[2] = {0, 3};
-			if (drawMode == "direct") for (uint32_t part = 0; part < parts; ++part) vkCmdDraw(target, counts[part], instances, firstVertex + starts[part], 0);
+			if (drawMode == "direct") for (uint32_t part = 0; part < parts; ++part) vkCmdDraw(target, counts[part], instances, firstVertex + starts[part], scenario.firstInstance);
 			else {
 				if (drawMode != "indirect") vkCmdBindIndexBuffer(target, indices.buffer, 0, VK_INDEX_TYPE_UINT32);
 				if (drawMode == "indexed") for (uint32_t part = 0; part < parts; ++part) vkCmdDrawIndexed(target, counts[part], instances, starts[part], int32_t(firstVertex), 0);
@@ -640,7 +647,7 @@ int main(int argc, char** argv) {
 		auto render = [&](const PipelineOptions& o, const std::vector<Patch>& patches, const std::string& name) {
 			VkPipeline pipeline = VK_NULL_HANDLE;
 			check(createPipeline(o, pipeline), ("Create pipeline " + name).c_str());
-			check(record(pipeline, patches, 0, 1, o), ("Record " + name).c_str());
+			check(record(pipeline, patches, scenario.firstVertex, 1, o), ("Record " + name).c_str());
 			memset(vertices.data, 0, vertices.size);
 			memset(counter.data, 0, counter.size);
 			memset(tesCapture.data, 0, tesCapture.size);
@@ -656,6 +663,8 @@ int main(int argc, char** argv) {
 			result.rgba.assign(readback.data, readback.data + readback.size);
 			std::ofstream(prefix + "-" + name + ".rgba", std::ios::binary).write(reinterpret_cast<const char*>(result.rgba.data()), result.rgba.size());
 			memcpy(&result.invocations, counter.data, 4);
+			memcpy(&result.vertexSum, counter.data + 4, 4);
+			memcpy(&result.instanceSum, counter.data + 8, 4);
 			result.tesCapture.resize(tesCapture.size / 4);
 			memcpy(result.tesCapture.data(), tesCapture.data, tesCapture.size);
 			result.fragmentCapture.resize(fragmentCapture.size / 4);
@@ -896,6 +905,14 @@ int main(int argc, char** argv) {
 			for (const Image* image : {&ordinaryImage, &interp, &ordered, &swapped, &consistency}) exact &= image->invocations == vertexCount;
 			std::printf("  VS storage counter: expected=%u ordinary=%u pervertex=%u\n", vertexCount, ordinaryImage.invocations, interp.invocations);
 			verdict(exact, "VS side effects run once per vertex in ordinary and PerVertex pipelines, discarded patch included");
+			if (scenario.firstVertex || scenario.firstInstance) {
+				uint32_t vertexSum = 0, instanceSum = vertexCount * scenario.firstInstance;
+				for (uint32_t i = 0; i < vertexCount; ++i) vertexSum += scenario.firstVertex + i;
+				bool sums = true;
+				for (const Image* image : {&ordinaryImage, &interp, &ordered, &swapped, &consistency}) sums &= image->vertexSum == vertexSum && image->instanceSum == instanceSum;
+				std::printf("  VS storage sums: expected vertex=%u instance=%u; ordinary vertex=%u instance=%u; pervertex vertex=%u instance=%u\n", vertexSum, instanceSum, ordinaryImage.vertexSum, ordinaryImage.instanceSum, interp.vertexSum, interp.instanceSum);
+				verdict(sums, "gl_VertexIndex and gl_InstanceIndex start at firstVertex and firstInstance in ordinary and PerVertex pipelines");
+			}
 		}
 
 		// 1. Coverage and interpolated values against the ordinary hardware TES pipeline.
