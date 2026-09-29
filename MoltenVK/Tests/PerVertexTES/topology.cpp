@@ -154,6 +154,7 @@ int main(int argc, char** argv) {
 		scenarios["dynamic-scissor"] = {{uniform(two), uniform(three), uniform(two)}, {}};
 		scenarios["dynamic-viewport"] = scenarios["dynamic-scissor"];
 		scenarios["dynamic-both"] = scenarios["dynamic-scissor"];
+		scenarios["drawid-multi"] = {{uniform(two), uniform(two)}, {}};
 		// Every proven level under the lower-left domain origin, with the full set of checks.
 		Scenario lowerLeft{{uniform(one), uniform(two), uniform(three)}, {}};
 		lowerLeft.lowerLeft = true;
@@ -275,6 +276,14 @@ int main(int argc, char** argv) {
 		std::vector<const char*> deviceExtensions{VK_KHR_MAINTENANCE_2_EXTENSION_NAME};
 		if (!ordinaryOnly) deviceExtensions.push_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
 		if (scenarioName == "cache-reuse") deviceExtensions.push_back(VK_EXT_PIPELINE_CREATION_FEEDBACK_EXTENSION_NAME);
+		VkPhysicalDeviceMultiDrawFeaturesEXT multiDrawFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTI_DRAW_FEATURES_EXT};
+		if (scenarioName == "drawid-multi") {
+			if (!hasExtension(extensions, VK_EXT_MULTI_DRAW_EXTENSION_NAME)) throw std::runtime_error("VK_EXT_multi_draw unavailable");
+			deviceExtensions.push_back(VK_EXT_MULTI_DRAW_EXTENSION_NAME);
+			multiDrawFeatures.multiDraw = VK_TRUE;
+			multiDrawFeatures.pNext = features.pNext;
+			features.pNext = &multiDrawFeatures;
+		}
 		if (hasExtension(extensions, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) deviceExtensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
 		VkPhysicalDeviceExtendedDynamicState2FeaturesEXT dynamicState2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT};
 		if (dynamicScratchLimit) {
@@ -294,6 +303,8 @@ int main(int argc, char** argv) {
 		VkQueue queue = VK_NULL_HANDLE;
 		vkGetDeviceQueue(device, family, 0, &queue);
 		auto setPatchControlPoints = reinterpret_cast<PFN_vkCmdSetPatchControlPointsEXT>(vkGetDeviceProcAddr(device, "vkCmdSetPatchControlPointsEXT"));
+		auto drawMulti = reinterpret_cast<PFN_vkCmdDrawMultiEXT>(vkGetDeviceProcAddr(device, "vkCmdDrawMultiEXT"));
+		if (scenarioName == "drawid-multi" && !drawMulti) throw std::runtime_error("vkCmdDrawMultiEXT unavailable");
 		if (dynamicScratchLimit && !setPatchControlPoints) throw std::runtime_error("vkCmdSetPatchControlPointsEXT unavailable");
 		VkPhysicalDeviceProperties properties{};
 		vkGetPhysicalDeviceProperties(physical, &properties);
@@ -494,7 +505,7 @@ int main(int argc, char** argv) {
 			check(vkCreateShaderModule(device, &info, nullptr, &result), "Create shader module");
 			return modules[name] = result;
 		};
-		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, upperLeftStruct = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; bool named = false; const char* tescEntry = nullptr; VkPipelineCache pipelineCache = VK_NULL_HANDLE; VkPipelineCreationFeedback* stageFeedback = nullptr; bool dynamicScissor = false, dynamicViewport = false, dynamicLineWidth = false; std::vector<DynamicDraw> dynamicDraws; uint32_t viewportCount = 1; };
+		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, upperLeftStruct = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; bool named = false; const char* tescEntry = nullptr; VkPipelineCache pipelineCache = VK_NULL_HANDLE; VkPipelineCreationFeedback* stageFeedback = nullptr; bool dynamicScissor = false, dynamicViewport = false, dynamicLineWidth = false; std::vector<DynamicDraw> dynamicDraws; uint32_t viewportCount = 1; std::vector<VkMultiDrawInfoEXT> multiDraws; };
 		auto pipelineLayout = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureLayout : o.capture == 2 ? fragmentCaptureLayout : o.uniform ? uniformLayout : o.resources ? resourceLayout : o.push ? pushLayout : emptyLayout; };
 		auto descriptorSet = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureSet : o.capture == 2 ? fragmentCaptureSet : o.resources ? resourceSet : VK_NULL_HANDLE; };
 		auto createPipeline = [&](const PipelineOptions& o, VkPipeline& pipeline) {
@@ -647,7 +658,9 @@ int main(int argc, char** argv) {
 			if (o.vert == "first.vert.spv") vkCmdBindVertexBuffers(target, 1, 1, &instanceTags.buffer, &offset);
 			const uint32_t drawCount = scenario.vertexCount ? scenario.vertexCount : uint32_t(3 * patches.size());
 			const uint32_t parts = splitDraw ? 2 : 1, counts[2] = {splitDraw ? 3 : drawCount, drawCount - 3}, starts[2] = {0, 3};
-			if (!o.dynamicDraws.empty()) {
+			if (!o.multiDraws.empty()) {
+				drawMulti(target, uint32_t(o.multiDraws.size()), o.multiDraws.data(), instances, scenario.firstInstance, sizeof(VkMultiDrawInfoEXT));
+			} else if (!o.dynamicDraws.empty()) {
 				for (const auto& draw : o.dynamicDraws) {
 					if (o.dynamicScissor) vkCmdSetScissor(target, 0, 1, &draw.scissor);
 					if (o.dynamicViewport) vkCmdSetViewport(target, 0, 1, &draw.viewport);
@@ -912,6 +925,47 @@ int main(int argc, char** argv) {
 		auto verdict = [&](bool ok, const char* what) { std::printf("  %s %s\n", ok ? "ok  " : "FAIL", what); pass &= ok; };
 		auto prior = [](const std::vector<uint8_t>& rgba) { return rgba[0] == 255 && rgba[1] == 0 && rgba[2] == 255 && rgba[3] == 255; };
 
+		if (scenarioName == "drawid-multi") {
+			// One vkCmdDrawMultiEXT of two patches whose vertex data both hold level 2: the VS adds gl_DrawID, so draws 0 and 1
+			// tessellate at levels 2 and 3. Each image must equal two plain draws of data already at levels 2 and 3, which
+			// restart gl_PrimitiveID the same way, and differ from two plain draws of the level-2 data. PerVertex must also match
+			// ordinary TES under the same multi-draw.
+			const VkRect2D full{{0, 0}, {kWidth, kHeight}};
+			const std::vector<Patch> levels{uniform(two), uniform(three)};
+			std::map<std::string, Image> images;
+			bool submitted = true;
+			for (const char* frag : {"interp", "ordinary", "flat-ordered"}) {
+				PipelineOptions multi{"topology.tesc.spv", tese, std::string(frag) + ".frag.spv"};
+				multi.vert = "drawid.vert.spv";
+				multi.multiDraws = {{0, 3}, {3, 3}};
+				PipelineOptions plain{"topology.tesc.spv", tese, std::string(frag) + ".frag.spv"};
+				plain.dynamicDraws = {{full, 0, 3}, {full, 3, 3}};
+				images[std::string("multi-") + frag] = render(multi, scenario.patches, std::string("multi-") + frag);
+				images[std::string("plain-") + frag] = render(plain, levels, std::string("plain-") + frag);
+				images[std::string("same-") + frag] = render(plain, scenario.patches, std::string("same-") + frag);
+			}
+			for (const auto& entry : images) submitted &= entry.second.submit == VK_SUCCESS && entry.second.wait == VK_SUCCESS;
+			verdict(submitted, "all submissions and fences succeed");
+			uint32_t coverageMismatch = 0, valueMismatch = 0, coveredPixels = 0;
+			const auto& mine = images["multi-interp"].rgba;
+			const auto& theirs = images["multi-ordinary"].rgba;
+			for (uint32_t i = 0; i < kWidth * kHeight; ++i) {
+				bool a = covered(theirs, i), b = covered(mine, i);
+				coveredPixels += a;
+				if (a != b) { ++coverageMismatch; continue; }
+				for (int k = 0; a && k < 3; ++k) valueMismatch += std::abs(int(theirs[4 * i + k]) - int(mine[4 * i + k])) > 2;
+			}
+			std::printf("  multi-draw ordinary vs PerVertex: covered=%u coverage_mismatch=%u value_mismatch(>2)=%u\n", coveredPixels, coverageMismatch, valueMismatch);
+			verdict(coveredPixels > 0 && coverageMismatch == 0 && valueMismatch == 0, "multi-draw PerVertex replay matches ordinary TES");
+			for (const char* frag : {"interp", "ordinary", "flat-ordered"}) {
+				const auto& multi = images[std::string("multi-") + frag].rgba;
+				std::printf("  %s: multi-draw equals the level 2 and 3 draws=%d, differs from the level 2 and 2 draws=%d\n", frag, multi == images[std::string("plain-") + frag].rgba, multi != images[std::string("same-") + frag].rgba);
+				verdict(multi == images[std::string("plain-") + frag].rgba && multi != images[std::string("same-") + frag].rgba, (std::string(frag) + ": gl_DrawID 1 reaches the second draw").c_str());
+			}
+			std::printf("TES_TOPOLOGY %s %s %s\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), winding.c_str());
+			vkDeviceWaitIdle(device);
+			return pass ? 0 : 2;
+		}
 		if (scenarioName == "dynamic-both") {
 			// Dynamic viewport and scissor together: in one render pass, the first draw goes through the left half clipped to
 			// the first cell, the second through the right half clipped to the last cell. The result must equal the left image
