@@ -136,6 +136,7 @@ for winding in ccw cw; do
 	topology dev dynamic-scissor "$winding" 0 "TES_TOPOLOGY PASS" "scissor ab: .*cells=[1-9][0-9]*/0/[1-9]"
 	topology dev dynamic-viewport "$winding" 0 "TES_TOPOLOGY PASS" "viewport lr: pixels differing from left on the left half and right on the right half=0"
 	topology dev lower-left "$winding" 0 "TES_TOPOLOGY PASS" "ok   an explicit upper-left domain origin renders the default image"
+	for scenario in lower-left-cull lower-left-seam1 lower-left-seam2 lower-left-seam3; do topology dev "$scenario" "$winding" 0 "TES_TOPOLOGY PASS"; done
 	topology dev dynamic-both "$winding" 0 "TES_TOPOLOGY PASS" "first cell differing from left=0, covered middle=0, last cell differing from right=0"
 	first_sums="vertex=33 instance=6 tag=42 base_vertex=18 base_instance=6"
 	topology dev first "$winding" 0 "TES_TOPOLOGY PASS" "VS storage sums: expected $first_sums; ordinary $first_sums; pervertex $first_sums"

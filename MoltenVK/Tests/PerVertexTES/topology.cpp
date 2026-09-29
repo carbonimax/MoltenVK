@@ -163,6 +163,12 @@ int main(int argc, char** argv) {
 			seam.seam = true;
 			scenarios["seam" + std::to_string(level)] = seam;
 		}
+		// The lower-left origin with back-face culling and with patches sharing an edge, which both depend on triangle order.
+		for (const char* name : {"cull", "seam1", "seam2", "seam3"}) {
+			Scenario variant = scenarios[name];
+			variant.lowerLeft = true;
+			scenarios[std::string("lower-left-") + name] = variant;
+		}
 		// Vulkan runs the VS for every vertex of a draw, including vertices that do not complete a patch.
 		// Nonzero firstVertex and firstInstance: zeroed decoy vertices precede the data, the VS adds gl_InstanceIndex - 1 and a
 		// per-instance tag - 7 to the levels, and its counter also sums gl_VertexIndex, gl_InstanceIndex, the tag,
@@ -1324,7 +1330,8 @@ int main(int argc, char** argv) {
 		for (uint32_t p = 0; p < scenario.patches.size(); ++p) {
 			uint32_t level = vulkanLevel(scenario.patches[p]);
 			// Back-face culling keeps the mirrored patch with ccw and the others with cw.
-			bool culled = scenario.cull && scenario.patches[p].mirrored != ccw;
+			// The lower-left origin reverses the generated triangles, and so which patch faces away.
+			bool culled = scenario.cull && scenario.patches[p].mirrored != (ccw != scenario.lowerLeft);
 			uint32_t expected = culled ? 0 : level == 1 ? 3 : level == 2 ? 7 : level == 3 ? 12 : 0;
 			Coordinates mine, theirs;
 			for (const auto& entry : perVertex) if (entry.first[0] == p) mine.insert(entry);
