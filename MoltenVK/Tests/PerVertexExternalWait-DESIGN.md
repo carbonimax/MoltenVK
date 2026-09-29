@@ -20,6 +20,8 @@ Seuls R9 (`d24159ce`) et R8 (`67dd59d4`, complété en `1deebd18` et `d4110762`)
 
 **Révision 10.** La revue de R8 bis (`975961a2`) confirme ses trois corrections dans le code ; R8 reste à qualifier sans mémoire unifiée (le kit de §0 septies attend un Mac Intel à Radeon, en fin de parcours avec M1 et M3). Avant de coder R5, sous le GO limité, trois questions sont soumises à la revue, avec les faits mesurés qui les fondent (§0 octies). R5 n'est pas commencé.
 
+**Révision 11.** La revue des questions R5 retient l'**option C** : R1 et R5 restent gelés jusqu'à leur intégration avec R6 ; leurs témoins de mécanisme en usage aujourd'hui invalide seront à rejouer sur la bibliothèque qui intègre R1, R5 et R6, où la séquence devient valide. Elle accepte O17 au niveau Metal (fait, §3.13), puis la reproduction du constat 3 et la correction de ce seul chemin de R3 : **reproduit et corrigé** (`275b5226`, `630b183e`, §0 octies). L'activation du reste de R3 reste soumise à ses propres oracles. La question 4 (critère d'O17) attend sa réponse. R6 reste fermé.
+
 ## 0 octies. R5 : questions à la revue avant toute implémentation
 
 **Fait 1 : R5 suppose R1.** Le retrait de R5 « passe en état de retrait (R1, point 1), puis vide la liste différée » (point 3), et le jeton de présentation est terminé par `MVKSwapchain::destroyNow()` (point 6), deux pièces de R1. R1 n'est pas codé ; l'ordre d'implémentation (§6) place R1 avant R5. Le GO limité ne couvre que R5 et R8.
@@ -35,7 +37,7 @@ Seuls R9 (`d24159ce`) et R8 (`67dd59d4`, complété en `1deebd18` et `d4110762`)
 - Les rouges de R5 ne peuvent donc être, avant R6, que des **témoins de mécanisme en usage aujourd'hui invalide**, comme ceux de R8. O14 et O18 sont des gardes de non-régression : vraisemblablement verts avant comme après.
 - R1 est dans la même situation : O2 à O6 échouent aujourd'hui par délai dépassé, faute de R6 (§5).
 
-**Fait 3 : du travail à rouge en usage valide existe hors de R5 (constat statique, non reproduit).** `MVKQueryPool::getResults()` avec `VK_QUERY_RESULT_WAIT_BIT` attend sur `_availabilityBlocker`, dont le prédicat lit la perte (`MVKQueryPool.mm:86`, `117`). Mais la publication de la perte (`MVKDevice.mm:4049`) ne le réveille pas. Or une requête encodée passe à « DeviceAvailable » dès l'encodage (`MVKQueryPool.mm:38`), et ne devient jamais disponible si son command buffer est abandonné (`MVKCommandBuffer.mm:1712`), par exemple une soumission préremplie acceptée puis refusée à l'exécution par la perte. Une attente commencée avant la publication peut alors ne jamais rendre la main, contrairement à la section « Lost Device ». Cela relève de R3, sans dépendre de R6. Pour le reproduire, il faut forcer l'ordre « soumission acceptée, perte, exécution refusée » ; aucun crochet actuel ne le permet.
+**Fait 3 : du travail à rouge en usage valide existe hors de R5.** *Reproduit puis corrigé en révision 11 (ci-dessous).* Constat d'origine : `MVKQueryPool::getResults()` avec `VK_QUERY_RESULT_WAIT_BIT` attend sur `_availabilityBlocker`, dont le prédicat lit la perte (`MVKQueryPool.mm:86`, `117`). Mais la publication de la perte (`MVKDevice.mm:4049`) ne le réveille pas. Or une requête encodée passe à « DeviceAvailable » dès l'encodage (`MVKQueryPool.mm:38`), et ne devient jamais disponible si son command buffer est abandonné (`MVKCommandBuffer.mm:1712`), par exemple une soumission préremplie acceptée puis refusée à l'exécution par la perte. Une attente commencée avant la publication peut alors ne jamais rendre la main, contrairement à la section « Lost Device ». Cela relève de R3, sans dépendre de R6. Pour le reproduire, il faut forcer l'ordre « soumission acceptée, perte, exécution refusée » ; aucun crochet actuel ne le permet.
 
 **Options.**
 - **A.** R1 puis R5 maintenant, comme mécanismes, avec des oracles témoins en usage aujourd'hui invalide et des gardes de non-régression. C'est la plus grosse refonte de la série (vie du device, sept surcharges de `destroy()`, présentation), sans correctif visible avant R6. Relecteurs upstream : difficile à valider.
@@ -43,6 +45,13 @@ Seuls R9 (`d24159ce`) et R8 (`67dd59d4`, complété en `1deebd18` et `d4110762`)
 - **C.** Geler R1 et R5 avec R6, et les livrer ensemble quand O17 permettra d'ouvrir R6. En attendant, travailler ce qui a des rouges en usage valide et ce qui bloque R6 : reproduire O17 (`nextDrawable` bloqué), puis R3 (attentes hôte, dont le constat 3).
 
 **Recommandation : C.** Chaque pièce de R1 et R5 n'a d'effet qu'une fois la perte rapportée en temps fini. Les livrer avant R6 ajoute une refonte de la durée de vie que rien d'observable n'exerce, que les oracles ne prouveraient que par des séquences aujourd'hui invalides, et qu'une revue upstream ne pourrait pas juger sur pièces. O17 est la vraie porte de R6.
+
+**Constat 3 reproduit et corrigé (révision 11).** Mode `query-wait-abandoned` (`275b5226`) :
+- **Scénario.** Sous préremplissage différé, C réinitialise puis écrit une requête timestamp, encodée dès `vkEndCommandBuffer`. Les soumissions sont asynchrones. Une soumission vide avec fence occupe le fil de la file, car son acquisition Metal est retenue 300 ms. C est acceptée derrière elle, une attente `VK_QUERY_RESULT_WAIT_BIT` démarre, et la perte arrive 100 ms plus tard : l'exécution de C est refusée.
+- **Sur `d4110762` : 6/6 rouges.** La perte est rapportée vers 305 ms, et l'attente attend toujours 2 s plus tard.
+- **Correctif** (`630b183e`, `MVKQueryPool::getResults()`). L'attente vérifie son prédicat, qui lit déjà la perte, toutes les millisecondes au lieu d'attendre une notification qui ne vient pas.
+- **Après : 6/6 verts.** L'attente rend `VK_ERROR_DEVICE_LOST` 0 à 1 ms après le rapport.
+- Série générique : même correctif (`df4584d2`) et même oracle (`2a53f65f`).
 
 **Questions à la revue.**
 1. R5 : A, B ou C ?
@@ -409,6 +418,8 @@ Destruction en course avec le début de la perte : un objet détruit juste avant
 ### R3. Toutes les attentes hôte sortent sur perte publiée
 
 Règle unique pour chaque attente de l'inventaire §3.8 qui ne sort pas aujourd'hui : elle attend **par tranches de 1 ms**, et sort quand la perte est publiée. Elle rend alors `VK_ERROR_DEVICE_LOST`. Les attentes déjà inscrites au device (fences, sémaphores, événements) ne changent pas.
+
+**Fait pour l'attente des résultats de requête** (`630b183e`), sous son oracle `query-wait-abandoned` (§0 octies). Le reste de R3 n'est pas codé ; son activation reste soumise à ses propres oracles.
 
 - `MVKQueue::waitIdle()` : l'attente de `_execQueueJobCount` et celle du command buffer vide passent par tranches ; le command buffer vide signale un sémaphore depuis son handler, que le bloc retient, comme dans `continueOnNewMTLCommandBuffer()`. Pendant une perte, aucune acquisition (R2).
 - `MVKQueryPool::getResults()` avec `VK_QUERY_RESULT_WAIT_BIT` : `wait_for` par tranches, avec la perte publiée dans le prédicat.
