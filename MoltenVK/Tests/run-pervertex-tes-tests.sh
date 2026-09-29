@@ -94,6 +94,7 @@ library mutation-winding ON ON 's/uint slot = p\[2\] && corner \? 3 - corner : c
 library mutation-interior ON ON 's/14563 \* q/16384 * q/g'
 library mutation-offset ON ON 's/uint key = offsets\[i\] \+ triangle;/uint key = triangle;/'
 library mutation-lower-left-order ON ON 's/ != _perVertexTessLowerLeft; \}/; }/' GPUObjects/MVKPipeline.h
+library mutation-drawid-zero ON ON 's/(encodePerVertexTessEval\(cmdEncoder, pipeline, _vertexCount, _firstVertex, _firstInstance, )_drawIndex\);/${1}0);/' Commands/MVKCmdDraw.mm
 library mutation-helper-missing ON ON 's/kernel void tessLevelsToHalfFactors\(/kernel void tessLevelsToHalfFactorsUnavailable(/'
 library mutation-first-vertex-origin ON ON 's/MTLRegionMake2D\(firstVertex, firstInstance, vertexCount, 1\)/MTLRegionMake2D(0, firstInstance, vertexCount, 1)/' Commands/MVKCmdDraw.mm
 library mutation-first-instance-origin ON ON 's/MTLRegionMake2D\(firstVertex, firstInstance, vertexCount, 1\)/MTLRegionMake2D(firstVertex, 0, vertexCount, 1)/' Commands/MVKCmdDraw.mm
@@ -137,6 +138,7 @@ for winding in ccw cw; do
 	topology dev dynamic-viewport "$winding" 0 "TES_TOPOLOGY PASS" "viewport lr: pixels differing from left on the left half and right on the right half=0"
 	topology dev lower-left "$winding" 0 "TES_TOPOLOGY PASS" "ok   an explicit upper-left domain origin renders the default image"
 	for scenario in lower-left-cull lower-left-seam1 lower-left-seam2 lower-left-seam3; do topology dev "$scenario" "$winding" 0 "TES_TOPOLOGY PASS"; done
+	topology dev drawid-multi "$winding" 0 "TES_TOPOLOGY PASS" "flat-ordered: multi-draw equals the level 2 and 3 draws=1, differs from the level 2 and 2 draws=1"
 	topology dev dynamic-both "$winding" 0 "TES_TOPOLOGY PASS" "first cell differing from left=0, covered middle=0, last cell differing from right=0"
 	first_sums="vertex=33 instance=6 tag=42 base_vertex=18 base_instance=6"
 	topology dev first "$winding" 0 "TES_TOPOLOGY PASS" "VS storage sums: expected $first_sums; ordinary $first_sums; pervertex $first_sums"
@@ -195,6 +197,8 @@ topology mutation-entry-main entry-names ccw 1 "ERROR: Entry point does not exis
 topology mutation-entry-default entry-shared-module ccw 1 "ERROR: Create pipeline interp-named: -8"
 # The lower-left origin no longer reverses the generator's corner order: the CPU model must fail.
 topology mutation-lower-left-order lower-left ccw 2 "FAIL ordered PerVertex values match the CPU model"
+# The multi-draw is admitted but the VS still reads DrawID 0: the second draw keeps level 2.
+topology mutation-drawid-zero drawid-multi ccw 2 "FAIL interp: gl_DrawID 1 reaches the second draw"
 topology mutation-helper-missing ordinary-levels-direct ccw 1 "Could not find support compute shader function tessLevelsToHalfFactors" "ERROR: Create pipeline case0-levels: -3"
 # 5. The float32 level ABI is live in the PerVertex TCS and TES compute kernels.
 mkdir -p "$output/dump"
