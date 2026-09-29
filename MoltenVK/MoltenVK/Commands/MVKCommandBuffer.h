@@ -191,6 +191,10 @@ public:
 	uint32_t getRecordedPatchControlPoints() const;
 	void recordPatchControlPoints(uint32_t count) { _recordedPatchControlPoints = static_cast<uint8_t>(count); }
 
+	/** The topology the recorded portable PerVertexKHR pipeline draws with: the recorded dynamic value when the pipeline declares it dynamic, as while encoding. */
+	VkPrimitiveTopology getRecordedPerVertexTopology() const;
+	void recordPrimitiveTopology(VkPrimitiveTopology topology) { _recordedPrimitiveTopology = topology; }
+
 
 #pragma mark Construction
 
@@ -234,6 +238,7 @@ protected:
 	MVKGraphicsPipeline* _recordedTessellationPipeline = nullptr;
 	MVKGraphicsPipeline* _recordedMeshPipeline = nullptr;
 	uint8_t _recordedPatchControlPoints = 0;
+	VkPrimitiveTopology _recordedPrimitiveTopology = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
 
 	bool _recordedAttachmentsKnown = false;
 	const char* _recordedRenderingError = nullptr;

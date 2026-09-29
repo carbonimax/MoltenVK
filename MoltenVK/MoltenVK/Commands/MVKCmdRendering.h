@@ -630,6 +630,7 @@ protected:
 class MVKCmdSetPrimitiveTopology : public MVKSingleValueCommand<VkPrimitiveTopology> {
 
 public:
+	VkResult setContent(MVKCommandBuffer* cmdBuff, VkPrimitiveTopology topology);
 	void encode(MVKCommandEncoder* cmdEncoder) override;
 
 protected:

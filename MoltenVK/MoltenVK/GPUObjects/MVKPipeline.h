@@ -273,6 +273,11 @@ public:
 	bool perVertexTessReversesCorners() const { return (_tessReflectData.windingOrder == spv::ExecutionModeVertexOrderCcw) != _perVertexTessLowerLeft; }
 	const SPIRV_CROSS_NAMESPACE::MSLCapturedOutputReplayBarycentricBinding& getPerVertexReplayBarycentricBinding() const { return _perVertexReplayBarycentricBinding; }
 	bool usesPortableBarycentrics() const { return _usesPerspectiveBarycentrics || _usesNoPerspectiveBarycentrics; }
+	/**
+	 * Whether the non-indexed capture draws triangles. Other topologies, and every topology of a pipeline whose topology
+	 * is dynamic, capture their vertices as points; a dynamic topology stays within the pipeline's topology class.
+	 */
+	bool capturesPerVertexTriangleLists() const { return _perVertexCapturesTriangleLists; }
 	id<MTLRenderPipelineState> getPerVertexCapturePipelineState(uint32_t viewCount) const {
 		auto itr = _perVertexCapturePipelineStates.find(viewCount);
 		return itr == _perVertexCapturePipelineStates.end() ? nil : itr->second.direct;
@@ -457,6 +462,7 @@ protected:
 	uint32_t _outputControlPointCount;
 	mvk::SPIRVTessReflectionData _tessReflectData;
 	bool _perVertexTessLowerLeft = false;
+	bool _perVertexCapturesTriangleLists = false;
 
 	MVKShaderModule* _vertexModule = nullptr;
 	MVKShaderModule* _tessCtlModule = nullptr;

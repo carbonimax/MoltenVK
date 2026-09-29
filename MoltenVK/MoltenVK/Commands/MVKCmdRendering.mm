@@ -566,8 +566,16 @@ void MVKCmdSetLineWidth::encode(MVKCommandEncoder* cmdEncoder) {
 #pragma mark -
 #pragma mark MVKCmdSetPrimitiveTopology
 
+// Recorded too, so that portable PerVertexKHR draws can size their scratch while recording.
+VkResult MVKCmdSetPrimitiveTopology::setContent(MVKCommandBuffer* cmdBuff, VkPrimitiveTopology topology) {
+	cmdBuff->recordPrimitiveTopology(topology);
+	return MVKSingleValueCommand::setContent(cmdBuff, topology);
+}
+
 void MVKCmdSetPrimitiveTopology::encode(MVKCommandEncoder* cmdEncoder) {
-	cmdEncoder->getState().updateDynamicState(MVKRenderStateFlag::PrimitiveTopology)._renderState.primitiveType = mvkMTLPrimitiveTypeFromVkPrimitiveTopology(_value);
+	auto& renderState = cmdEncoder->getState().updateDynamicState(MVKRenderStateFlag::PrimitiveTopology)._renderState;
+	renderState.primitiveType = mvkMTLPrimitiveTypeFromVkPrimitiveTopology(_value);
+	renderState.vkPrimitiveTopology = static_cast<uint8_t>(_value);
 }
 
 
