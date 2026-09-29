@@ -472,7 +472,7 @@ int main(int argc, char** argv) {
 			check(vkCreateShaderModule(device, &info, nullptr, &result), "Create shader module");
 			return modules[name] = result;
 		};
-		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, cache = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; bool named = false; const char* tescEntry = nullptr; VkPipelineCache pipelineCache = VK_NULL_HANDLE; VkPipelineCreationFeedback* stageFeedback = nullptr; };
+		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; bool named = false; const char* tescEntry = nullptr; VkPipelineCache pipelineCache = VK_NULL_HANDLE; VkPipelineCreationFeedback* stageFeedback = nullptr; };
 		auto pipelineLayout = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureLayout : o.capture == 2 ? fragmentCaptureLayout : o.uniform ? uniformLayout : o.resources ? resourceLayout : o.push ? pushLayout : emptyLayout; };
 		auto descriptorSet = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureSet : o.capture == 2 ? fragmentCaptureSet : o.resources ? resourceSet : VK_NULL_HANDLE; };
 		auto createPipeline = [&](const PipelineOptions& o, VkPipeline& pipeline) {
@@ -546,12 +546,7 @@ int main(int argc, char** argv) {
 			feedback.pipelineStageCreationFeedbackCount = 4;
 			feedback.pPipelineStageCreationFeedbacks = o.stageFeedback;
 			if (o.stageFeedback) info.pNext = &feedback;
-			VkPipelineCache cache = o.pipelineCache;
-			if (o.cache) {
-				VkPipelineCacheCreateInfo cacheInfo{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
-				check(vkCreatePipelineCache(device, &cacheInfo, nullptr, &cache), "Create pipeline cache");
-			}
-			return vkCreateGraphicsPipelines(device, cache, 1, &info, nullptr, &pipeline);
+			return vkCreateGraphicsPipelines(device, o.pipelineCache, 1, &info, nullptr, &pipeline);
 		};
 
 		VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -848,7 +843,6 @@ int main(int argc, char** argv) {
 			else if (scenarioName == "reject-descriptor-named") { o = {"descriptor-named.tesc.spv", ccw ? "ccw-named.tese.spv" : "cw-named.tese.spv", "interp-named.frag.spv"}; o.vert = "topology-named.vert.spv"; o.uniform = o.named = true; }
 			// The TCS module holds tescDescriptor, first, then tescMain: selecting tescDescriptor must still be refused.
 			else if (scenarioName == "reject-descriptor-shared") { o = {"shared-named.tesc.spv", ccw ? "ccw-named.tese.spv" : "cw-named.tese.spv", "interp-named.frag.spv"}; o.vert = "topology-named.vert.spv"; o.uniform = o.named = true; o.tescEntry = "tescDescriptor"; }
-			else if (scenarioName == "reject-cache") o.cache = true;
 			else if (scenarioName == "reject-push-constant") { o.tesc = "push.tesc.spv"; o.push = true; }
 			else if (scenarioName == "reject-no-admission") {}
 			else if (scenarioName == "reject-indirect-tes" || scenarioName == "reject-indexed-indirect-tes") {
