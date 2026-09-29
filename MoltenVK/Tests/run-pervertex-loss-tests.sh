@@ -57,7 +57,7 @@ for name in "${modes[@]}"; do
 		before:*) expected=1 ;;
 	esac
 	prefill=0 places=64
-	[[ $name == teardown-multi || $name == prefill-abandon-* || $name == metal-error-multi ]] && prefill=1
+	[[ $name == teardown-multi || $name == prefill-abandon-* || $name == metal-error-multi || $name == query-wait-abandoned ]] && prefill=1
 	[[ $name == shared-queue-block || $name == host-sync-progress-* ]] && places=4
 	for mode in sync async; do
 		for run in $(seq 1 "$repeats"); do
