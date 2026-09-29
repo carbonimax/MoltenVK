@@ -60,7 +60,7 @@ Portée : pipelines PerVertexKHR portables sans tessellation, avec `VK_DYNAMIC_S
 
 ## 5. Régression complète : `build/astra/final-r6-162a23a4/`
 
-Tout tourne sous validation Metal, sauf la CTS en mode `plain`. `EVIDENCE.sha256` compte 2 552 entrées (sha256 du manifeste `ddc29301…`).
+Tout tourne sous validation Metal, sauf la CTS en mode `plain` (et, comme avant, les cas indirects ordinaires du runner TES, sous validation API seule). `EVIDENCE.sha256` compte 2 552 entrées (sha256 du manifeste `ddc29301…`).
 
 | Étape | Résultat |
 | --- | --- |
@@ -112,9 +112,9 @@ Tout tourne sous validation Metal, sauf la CTS en mode `plain`. `EVIDENCE.sha256
   - Écart maximal : 5 à 7.
   - Les écarts sont sur l'arête commune aux deux triangles de la bande (x = y), près du coin (127, 127).
 - **Déterminisme.** Les 14 cas échouent à l'identique sur trois passes `plain` (`build/astra/dyntopo-cts-strip-plain-162a23a4/`). Les 8 cas de bande réussissent en mode validé.
-  - La différence suit donc le mode de compilation des shaders : la validation Metal change le code généré. Ce n'est pas un aléa.
-- **Ces écarts ne viennent pas de l'admission.**
-  - **Lignes et bandes.** Le pipeline dynamique et le pipeline statique y prennent exactement le même chemin : capture en classe point, même topologie à l'encodage, même pipeline de rejeu. Or le pipeline de rejeu ne dépend que de la classe (`MVKPipeline.mm:1647`).
+  - La différence suit donc le mode de compilation des shaders. Ce n'est pas un aléa.
+- **Ces écarts ne viennent pas de l'admission.** C'est prouvé pour les listes de triangles, et déduit du chemin de code pour les lignes et les bandes.
+  - **Lignes et bandes (déduit, non mesuré).** Le pipeline dynamique et le pipeline statique y prennent le même chemin : capture en classe point, même topologie à l'encodage, même pipeline de rejeu. Or le pipeline de rejeu ne dépend que de la classe (`MVKPipeline.mm:1647`).
   - **Listes de triangles.** Seule la classe de capture diffère.
     - Une bibliothèque A/B force la capture en classe triangle, comme pour une liste statique (`build/astra/dyntopo-ab-list-capture-162a23a4/`, `880114ec…`, non commitée).
     - Sur les 12 cas `triangle_list`, en `plain` et en validé, elle donne les mêmes verdicts et des images **identiques au bit près** à `lib-162a23a4-tes`.
