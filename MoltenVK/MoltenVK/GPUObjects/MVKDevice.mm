@@ -4028,6 +4028,9 @@ static void mvkWaitForZero(const std::atomic<T>& count) {
 // those submissions encoded. Later submissions are refused or dropped without encoding, since isLosing() is set.
 void MVKDevice::publishLoss() {
 	mvkWaitForZero(_activeEncodings);
+	// No encoding remains, so no application work can be committed any more: the work that may still write application
+	// memory is now exactly the command buffers committed so far, whose completed handlers the inventory counts.
+	_isLossInventoryClosed = true;
 	releaseSemaphoreWaitsAfterLoss();
 	// Work released above, or committed before the loss, may still use application resources. Work that waits for
 	// Metal work MoltenVK cannot release, such as the application's own on an exported command queue, holds the report
@@ -4130,10 +4133,15 @@ void MVKDevice::commitMTLCommandBuffer(id<MTLCommandBuffer> mtlCmdBuff) {
 			_pendingMTLCommandBufferHandlers--;
 		}];
 	}
-	if (completed.count) {
+	// Until a loss closes the inventory, every command buffer is counted until its completed handlers have returned,
+	// even one without other completed handlers: it may write memory the application releases once the loss is reported.
+	bool isCounted = !_isLossInventoryClosed.load();
+	if (completed.count || isCounted) {
+		if (isCounted) { _handlersBeforeInventory++; }
 		_pendingMTLCommandBufferHandlers++;
 		[mtlCmdBuff addCompletedHandler: ^(id<MTLCommandBuffer> mtlCB) {
 			for (MTLCommandBufferHandler handler in completed) { handler(mtlCB); }
+			if (isCounted) { _handlersBeforeInventory--; }
 			_pendingMTLCommandBufferHandlers--;
 		}];
 	}
@@ -4148,6 +4156,18 @@ void MVKDevice::abandonMTLCommandBuffer(id<MTLCommandBuffer> mtlCmdBuff) {
 		for (MTLCommandBufferHandler handler in handlers->_completed) { handler(mtlCmdBuff); }
 	}
 	[handlers release];
+}
+
+void MVKDevice::waitForLossInventory() {
+	if ( !isLosing() ) { return; }
+	bool isWarned = false;
+	while ( !_isLossInventoryClosed.load() || _handlersBeforeInventory.load() ) {
+		if ( !isWarned ) {
+			reportWarning(VK_ERROR_DEVICE_LOST, "Freeing imported host memory waits for the Metal work committed before the device loss, which may still write it.");
+			isWarned = true;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
 }
 
 void MVKDevice::addLossReleasable(MVKLossReleasable* releasable) {
@@ -4828,7 +4848,10 @@ MVKDeviceMemory* MVKDevice::allocateMemory(const VkMemoryAllocateInfo* pAllocate
 
 void MVKDevice::freeMemory(MVKDeviceMemory* mvkDevMem,
 						   const VkAllocationCallbacks* pAllocator) {
-	if (mvkDevMem) { mvkDevMem->destroy(); }
+	if ( !mvkDevMem ) { return; }
+	// Once this returns, the application may reuse host memory it imported: no Metal work may write it any more.
+	if (mvkDevMem->isHostMemoryImported()) { waitForLossInventory(); }
+	mvkDevMem->destroy();
 }
 
 // Look for an available pre-reserved private data slot and return its address if found.
@@ -5090,6 +5113,9 @@ VkResult MVKDevice::invalidateMappedMemoryRanges(uint32_t memRangeCount, const V
 	@autoreleasepool {
 		VkResult rslt = VK_SUCCESS;
 		MVKMTLBlitEncoder mvkBlitEnc;
+		// Bracketed like a queue submission until its commit: its synchronization may write imported host memory, which a
+		// device loss must count before reporting. The completion wait comes after, so that a loss does not wait for it.
+		beginEncoding();
 		for (uint32_t i = 0; i < memRangeCount; i++) {
 			const VkMappedMemoryRange* pMem = &pMemRanges[i];
 			MVKDeviceMemory* mvkMem = (MVKDeviceMemory*)pMem->memory;
@@ -5097,10 +5123,9 @@ VkResult MVKDevice::invalidateMappedMemoryRanges(uint32_t memRangeCount, const V
 			if (rslt == VK_SUCCESS) { rslt = r; }
 		}
 		if (mvkBlitEnc.mtlBlitEncoder) { [mvkBlitEnc.mtlBlitEncoder endEncoding]; }
-		if (mvkBlitEnc.mtlCmdBuffer) {
-			commitMTLCommandBuffer(mvkBlitEnc.mtlCmdBuffer);
-			[mvkBlitEnc.mtlCmdBuffer waitUntilCompleted];
-		}
+		commitMTLCommandBuffer(mvkBlitEnc.mtlCmdBuffer);
+		endEncoding();
+		[mvkBlitEnc.mtlCmdBuffer waitUntilCompleted];
 		return rslt;
 	}
 }
