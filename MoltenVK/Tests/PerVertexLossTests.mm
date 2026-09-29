@@ -108,6 +108,22 @@
 //   and is freed at once; with -failed-allocation, Metal buffers are limited to 64 KiB (mvkTestLimitMetalBufferSize),
 //   and a 128 KiB import fails, which vkAllocateMemory cleans up through the path of vkFreeMemory. That thread must
 //   return within 100 ms, well before the release, while freeing the memory imported before the loss still waits.
+// host-sync-progress-invalidate, host-sync-progress-copy, host-sync-admission-invalidate, host-sync-admission-copy: a
+//   synchronization of managed memory from the GPU, vkInvalidateMappedMemoryRanges (-invalidate) or vkCopyImageToMemoryEXT
+//   from a linear image (-copy), on host memory the test imported into a host-visible, non-coherent memory type.
+//   MoltenVK encodes it only on a Mac without unified memory, whose Metal resources of that type are managed; elsewhere
+//   these modes exit 3 with "HOST_SYNC SKIP". PERVERTEX_HOST_SYNC_DRY=1 runs them anyway, on a coherent memory type:
+//   that checks the Vulkan calls of the test, encodes nothing, and proves nothing about the Metal path.
+//   - host-sync-progress-*: the application fills the Metal queue that MoltenVK acquires those command buffers from
+//     (queue A, as MVKDevice::getAnyQueue() returns it, with MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE=4, as
+//     the runner sets it) with four command buffers that wait for an event. The synchronization, on a thread, blocks
+//     acquiring its command buffer, and the device is lost. Exit 0 when, 100 ms later, it is still blocked in the
+//     acquisition and no encoding holds the loss report back (mvkTestGetLossCounters); 1 when an encoding does.
+//   - host-sync-admission-*: the synchronization's acquisition returns its command buffer only 300 ms after it began; the
+//     device is lost 100 ms after the synchronization starts, and nothing else holds the loss report back. Once the loss
+//     is reported, the same synchronization runs again. Exit 0 when neither commits a Metal command buffer once the loss
+//     has begun; 1 otherwise. Without an admission check, the second one commits work that the closed loss inventory
+//     no longer counts; the first one reaches the admission check with a command buffer already acquired.
 // Exit 2 for a setup failure, 3 when the device lacks a capability.
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
@@ -138,6 +154,8 @@ void sleepMs(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)
 bool gPresentationModes = false;	// the present-* modes enable VK_EXT_metal_surface and VK_KHR_swapchain
 bool gImportedMemoryModes = false;	// the free-imported-* modes enable VK_EXT_external_memory_host
 uint64_t gMetalBufferLimit = 0;		// free-imported-failed-allocation limits Metal buffers before creating the device
+bool gHostImageCopyModes = false;	// the host-sync-*-copy modes enable VK_EXT_host_image_copy, when the device has it
+bool gHasHostImageCopy = false;		// whether it is enabled
 
 struct Buffer {
 	VkBuffer buffer = VK_NULL_HANDLE;
@@ -208,12 +226,25 @@ VkDevice createLogicalDevice(const Context& c, VkQueue* qa, VkQueue* qb) {
 	synchronization2.synchronization2 = VK_TRUE;
 	timeline.pNext = &synchronization2;	// vkQueueSubmit2 in the metal-error-batches2 mode
 	const char* extensions[] = {VK_EXT_METAL_OBJECTS_EXTENSION_NAME, "VK_KHR_portability_subset",
-		gImportedMemoryModes ? VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME : VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+		gImportedMemoryModes ? VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME : VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME};
 	VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
 	deviceInfo.pNext = &timeline;
 	deviceInfo.queueCreateInfoCount = c.familyA == c.familyB ? 1 : 2;
 	deviceInfo.pQueueCreateInfos = queues;
 	deviceInfo.enabledExtensionCount = gPresentationModes || gImportedMemoryModes ? 3 : 2;
+	VkPhysicalDeviceHostImageCopyFeaturesEXT hostImageCopy{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES_EXT};
+	hostImageCopy.hostImageCopy = VK_TRUE;
+	if (gHostImageCopyModes) {
+		uint32_t count = 0;
+		vkEnumerateDeviceExtensionProperties(c.physical, nullptr, &count, nullptr);
+		std::vector<VkExtensionProperties> available(count);
+		vkEnumerateDeviceExtensionProperties(c.physical, nullptr, &count, available.data());
+		for (const auto& extension : available) { gHasHostImageCopy |= std::strcmp(extension.extensionName, VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME) == 0; }
+		if (gHasHostImageCopy) {
+			deviceInfo.enabledExtensionCount = 4;	// the host-sync modes also enable VK_EXT_external_memory_host
+			synchronization2.pNext = &hostImageCopy;
+		}
+	}
 	deviceInfo.ppEnabledExtensionNames = extensions;
 	VkDevice device;
 	check(vkCreateDevice(c.physical, &deviceInfo, nullptr, &device), "vkCreateDevice");
@@ -550,6 +581,12 @@ int eventWait(Context& c) {
 // its handlers start only after gFailedDispatchDelayUs.
 std::atomic<int> gHandlersCommitted{0}, gHandlersStarted{0}, gHandlersFinished{0}, gHandlersLate{0}, gFailCommandBuffers{0}, gFailNextCommits{0};
 std::atomic<bool> gDeviceDestroyed{false}, gCleanupReturned{false};
+// host-sync-*: the acquisitions in progress, a one-shot delay before an acquisition returns, and the commits to
+// gCountedQueue while gCountCommits is set.
+std::atomic<int> gAcquiring{0}, gCommitsCounted{0};
+std::atomic<useconds_t> gAcquireDelayUs{0};
+std::atomic<bool> gCountCommits{false};
+id gCountedQueue = nil;
 useconds_t gHandlerDelayUs = 0, gFailedDispatchDelayUs = 0;
 bool gReverseHandlers = false;
 IMP gAddCompletedHandler = nullptr, gAddScheduledHandler = nullptr, gCommit = nullptr, gCommandBuffer = nullptr, gStatus = nullptr, gError = nullptr;
@@ -592,6 +629,7 @@ MTLCommandBufferHandler dispatchHandlers(NSArray* handlers, bool isFailed) {
 }
 
 void commitCounted(id self, SEL command) {
+	if (gCountCommits && [(id<MTLCommandBuffer>)self commandQueue] == gCountedQueue) { gCommitsCounted++; }
 	NSArray* completed = objc_getAssociatedObject(self, &gCompletedKey);
 	NSArray* scheduled = objc_getAssociatedObject(self, &gScheduledKey);
 	int claim = gFailNextCommits.load();
@@ -623,7 +661,12 @@ id commandBufferOrNil(id self, SEL command, id descriptor) {
 	int remaining = gFailCommandBuffers.load();
 	while (remaining > 0 && !gFailCommandBuffers.compare_exchange_weak(remaining, remaining - 1)) {}
 	if (remaining > 0) { return nil; }
-	return reinterpret_cast<id (*)(id, SEL, id)>(gCommandBuffer)(self, command, descriptor);
+	gAcquiring++;
+	id commandBuffer = reinterpret_cast<id (*)(id, SEL, id)>(gCommandBuffer)(self, command, descriptor);
+	useconds_t delay = gAcquireDelayUs.exchange(0);
+	if (delay) { usleep(delay); }
+	gAcquiring--;
+	return commandBuffer;
 }
 
 IMP replace(Class cls, SEL selector, IMP imp) {
@@ -1307,6 +1350,188 @@ int freeImportedWaits(Context& c, const std::string& mode) {
 	return pass ? 0 : 1;
 }
 
+int hostSync(Context& c, const std::string& mode) {
+	bool isCopy = mode == "host-sync-progress-copy" || mode == "host-sync-admission-copy";
+	bool isProgress = mode == "host-sync-progress-invalidate" || mode == "host-sync-progress-copy";
+	bool isDry = getenv("PERVERTEX_HOST_SYNC_DRY") != nullptr;
+	bool isUnified = c.mtlDevice.hasUnifiedMemory;
+	VkPhysicalDeviceMemoryProperties memoryProperties;
+	vkGetPhysicalDeviceMemoryProperties(c.physical, &memoryProperties);
+	uint32_t managedType = UINT32_MAX, coherentType = UINT32_MAX;
+	for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i) {
+		VkMemoryPropertyFlags flags = memoryProperties.memoryTypes[i].propertyFlags;
+		if (!(flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) { continue; }
+		uint32_t& type = (flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? coherentType : managedType;
+		if (type == UINT32_MAX) { type = i; }
+	}
+	bool isManaged = !isUnified && managedType != UINT32_MAX;
+	std::printf("device=\"%s\" unified_memory=%d managed_type=%d host_image_copy=%d dry=%d\n", c.mtlDevice.name.UTF8String, int(isUnified),
+				int(managedType), int(gHasHostImageCopy), int(isDry));
+	if (!isManaged && !isDry) { std::printf("HOST_SYNC SKIP: MoltenVK synchronizes managed memory only on a Mac without unified memory\n"); return 3; }
+	if (isCopy && !gHasHostImageCopy) { std::printf("HOST_SYNC SKIP: the device does not expose VK_EXT_host_image_copy\n"); return 3; }
+	uint32_t type = isManaged ? managedType : coherentType;
+	if (type == UINT32_MAX) { std::fprintf(stderr, "No host-visible memory type\n"); return 3; }
+
+	// The synchronized resource: the mapped memory itself, or a linear image bound to it.
+	VkPhysicalDeviceExternalMemoryHostPropertiesEXT hostProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+	VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+	properties.pNext = &hostProperties;
+	vkGetPhysicalDeviceProperties2(c.physical, &properties);
+	VkDeviceSize alignment = std::max<VkDeviceSize>(hostProperties.minImportedHostPointerAlignment, 16384);
+	constexpr uint32_t kSide = 16;
+	VkImage image = VK_NULL_HANDLE;
+	VkDeviceSize size = alignment;
+	if (isCopy) {
+		VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+		imageInfo.extent = {kSide, kSide, 1};
+		imageInfo.mipLevels = imageInfo.arrayLayers = 1;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.tiling = VK_IMAGE_TILING_LINEAR;
+		imageInfo.usage = VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		VkImageFormatProperties formatProperties;
+		if (vkGetPhysicalDeviceImageFormatProperties(c.physical, imageInfo.format, imageInfo.imageType, imageInfo.tiling, imageInfo.usage, 0,
+													 &formatProperties) != VK_SUCCESS) {
+			std::printf("HOST_SYNC SKIP: no linear R8G8B8A8 image with host transfer\n");
+			return 3;
+		}
+		check(vkCreateImage(c.device, &imageInfo, nullptr, &image), "vkCreateImage");
+		VkMemoryRequirements requirements;
+		vkGetImageMemoryRequirements(c.device, image, &requirements);
+		if (!(requirements.memoryTypeBits & (1u << type))) { std::printf("HOST_SYNC SKIP: the image cannot use memory type %u\n", type); return 3; }
+		size = (requirements.size + alignment - 1) / alignment * alignment;
+	}
+	void* pages = nullptr;
+	if (posix_memalign(&pages, size_t(alignment), size_t(size))) { std::fprintf(stderr, "posix_memalign\n"); return 2; }
+	std::memset(pages, 0, size_t(size));
+	VkMemoryHostPointerPropertiesEXT pointerProperties{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+	check(vkGetMemoryHostPointerPropertiesEXT(c.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, pages, &pointerProperties),
+		  "vkGetMemoryHostPointerPropertiesEXT");
+	if (!(pointerProperties.memoryTypeBits & (1u << type))) { std::printf("HOST_SYNC SKIP: host memory cannot be imported as type %u\n", type); return 3; }
+	VkImportMemoryHostPointerInfoEXT imported{VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
+	imported.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+	imported.pHostPointer = pages;
+	VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+	allocation.pNext = &imported;
+	allocation.allocationSize = size;
+	allocation.memoryTypeIndex = type;
+	VkDeviceMemory memory;
+	check(vkAllocateMemory(c.device, &allocation, nullptr, &memory), "vkAllocateMemory");
+	void* mapped = nullptr;
+	check(vkMapMemory(c.device, memory, 0, VK_WHOLE_SIZE, 0, &mapped), "vkMapMemory");
+	std::vector<uint32_t> copied(kSide * kSide);
+	auto transitionLayout = reinterpret_cast<PFN_vkTransitionImageLayoutEXT>(vkGetDeviceProcAddr(c.device, "vkTransitionImageLayoutEXT"));
+	auto copyImageToMemory = reinterpret_cast<PFN_vkCopyImageToMemoryEXT>(vkGetDeviceProcAddr(c.device, "vkCopyImageToMemoryEXT"));
+	if (isCopy) {
+		if (!transitionLayout || !copyImageToMemory) { std::fprintf(stderr, "No VK_EXT_host_image_copy entry points\n"); return 2; }
+		check(vkBindImageMemory(c.device, image, memory, 0), "vkBindImageMemory");
+		VkHostImageLayoutTransitionInfoEXT transition{VK_STRUCTURE_TYPE_HOST_IMAGE_LAYOUT_TRANSITION_INFO_EXT};
+		transition.image = image;
+		transition.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		transition.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+		transition.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+		check(transitionLayout(c.device, 1, &transition), "vkTransitionImageLayoutEXT");
+	}
+	VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+	range.memory = memory;
+	range.size = VK_WHOLE_SIZE;
+	auto synchronize = [&] {
+		if (!isCopy) { return vkInvalidateMappedMemoryRanges(c.device, 1, &range); }
+		VkImageToMemoryCopyEXT region{VK_STRUCTURE_TYPE_IMAGE_TO_MEMORY_COPY_EXT};
+		region.pHostPointer = copied.data();
+		region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+		region.imageExtent = {kSide, kSide, 1};
+		VkCopyImageToMemoryInfoEXT copy{VK_STRUCTURE_TYPE_COPY_IMAGE_TO_MEMORY_INFO_EXT};
+		copy.srcImage = image;
+		copy.srcImageLayout = VK_IMAGE_LAYOUT_GENERAL;
+		copy.regionCount = 1;
+		copy.pRegions = &region;
+		return copyImageToMemory(c.device, &copy);
+	};
+
+	// MoltenVK acquires the synchronization's command buffer from queue A (MVKDevice::getAnyQueue()).
+	installHandlerHooks(c);
+	id<MTLCommandQueue> mtlQueue = exportedQueue(c.device, c.qa);
+	if (!mtlQueue) { std::fprintf(stderr, "No exported MTLCommandQueue\n"); return 3; }
+	gCountedQueue = mtlQueue;
+	auto getLossCounters = reinterpret_cast<void (*)(VkDevice, int64_t*, uint32_t*)>(dlsym(RTLD_DEFAULT, "mvkTestGetLossCounters"));
+	if (!getLossCounters) { std::fprintf(stderr, "Needs a MoltenVK test build with mvkTestGetLossCounters\n"); return 3; }
+	int64_t pendingHandlers = 0;
+	uint32_t activeEncodings = 0;
+	bool pass = false;
+	if (isProgress) {
+		id<MTLSharedEvent> unknown = [c.mtlDevice newSharedEvent];
+		std::vector<id<MTLCommandBuffer>> held;
+		for (int i = 0; i < 4; ++i) {	// as many as MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE, as the runner sets it
+			id<MTLCommandBuffer> external = [[mtlQueue commandBuffer] retain];
+			[external encodeWaitForEvent: unknown value: 1];
+			[external commit];
+			held.push_back(external);
+		}
+		std::atomic<bool> returned{false};
+		VkResult result = VK_NOT_READY;
+		std::thread synchronizer([&] { result = synchronize(); returned = true; });
+		sleepMs(100);
+		int acquiringBeforeLoss = gAcquiring.load();
+		c.markLost(c.device);
+		gCountCommits = true;
+		sleepMs(100);
+		getLossCounters(c.device, &pendingHandlers, &activeEncodings);
+		int acquiring = gAcquiring.load();
+		bool stillBlocked = !returned;
+		unknown.signaledValue = 1;	// the application releases its own work
+		for (id<MTLCommandBuffer> external : held) { [external waitUntilCompleted]; [external release]; }
+		synchronizer.join();
+		gCountCommits = false;
+		std::printf("acquiring_before_loss=%d acquiring_100ms_after_loss=%d still_blocked=%d active_encodings=%u pending_handlers=%lld "
+					"result=%d commits_after_loss=%d\n", acquiringBeforeLoss, acquiring, int(stillBlocked), activeEncodings, (long long)pendingHandlers,
+					int(result), gCommitsCounted.load());
+		bool forced = acquiring == 1 && stillBlocked;
+		pass = forced && activeEncodings == 0;
+		std::printf("HOST_SYNC %s\n", isDry ? "DRY: the calls ran on a coherent memory type; nothing was acquired, so this proves nothing"
+					: pass ? "PASS: a synchronization blocked acquiring its command buffer does not hold the loss report back"
+					: !forced ? "FAIL: the synchronization was not blocked in its acquisition, so the interleaving was not forced"
+					: "FAIL: an encoding holds the loss report back while the synchronization is blocked acquiring its command buffer");
+		[unknown release];
+	} else {
+		// The first synchronization acquires its command buffer before the loss, and gets it only after the loss began.
+		gAcquireDelayUs = 300000;
+		VkResult first = VK_NOT_READY;
+		std::thread synchronizer([&] { first = synchronize(); });
+		sleepMs(100);
+		c.markLost(c.device);
+		gCountCommits = true;
+		synchronizer.join();
+		int firstCommits = gCommitsCounted.exchange(0);
+		bool consumed = gAcquireDelayUs.exchange(0) == 0;
+		// Once the loss is reported, the second one begins after the loss inventory is closed. vkDeviceWaitIdle() itself
+		// commits an empty command buffer to each queue (MVKQueue::waitIdle()), which is not a synchronization.
+		VkResult waited = vkDeviceWaitIdle(c.device);
+		gCommitsCounted = 0;
+		VkResult second = synchronize();
+		int secondCommits = gCommitsCounted.load();
+		gCountCommits = false;
+		std::printf("acquisition_delayed=%d first: result=%d commits_after_loss=%d; device_wait_idle=%d; second: result=%d commits=%d\n", int(consumed),
+					int(first), firstCommits, int(waited), int(second), secondCommits);
+		bool forced = consumed;
+		pass = forced && waited == VK_ERROR_DEVICE_LOST && firstCommits == 0 && secondCommits == 0;
+		std::printf("HOST_SYNC %s\n", isDry ? "DRY: the calls ran on a coherent memory type; nothing was acquired, so this proves nothing"
+					: pass ? "PASS: no synchronization commits a Metal command buffer once the loss has begun"
+					: !forced ? "FAIL: the synchronization did not acquire a command buffer, so the interleaving was not forced"
+					: secondCommits ? "FAIL: a synchronization begun after the loss report commits work the closed inventory does not count"
+					: firstCommits ? "FAIL: a synchronization admitted once the loss had begun commits its command buffer"
+					: "FAIL: the loss was not reported");
+	}
+	gCountedQueue = nil;
+	if (image) { vkDestroyImage(c.device, image, nullptr); }
+	vkUnmapMemory(c.device, memory);
+	vkFreeMemory(c.device, memory, nullptr);
+	std::free(pages);
+	return isDry ? 0 : pass ? 0 : 1;
+}
+
 // A swapchain of 3 images on a CAMetalLayer detached from any window.
 struct Presentation {
 	CAMetalLayer* layer = nil;
@@ -1482,12 +1707,17 @@ int main(int argc, char** argv) {
 		|| mode == "free-imported-late-allocation" || mode == "free-imported-failed-allocation";
 	gImportedMemoryModes = isFreeImported;
 	gMetalBufferLimit = mode == "free-imported-failed-allocation" ? 65536 : 0;
+	bool isHostSync = mode == "host-sync-progress-invalidate" || mode == "host-sync-progress-copy" || mode == "host-sync-admission-invalidate"
+		|| mode == "host-sync-admission-copy";
+	gImportedMemoryModes |= isHostSync;
+	gHostImageCopyModes = mode == "host-sync-progress-copy" || mode == "host-sync-admission-copy";
 	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss" && mode != "event-wait" && !isExternalWait
 		&& mode != "shared-queue-block" && mode != "timeline-listener-aba" && !isPresentation && !isFreeImported && !isTeardown && !isPrefill && !isMetalError
-		&& !isMetalErrorBatches) {
+		&& !isMetalErrorBatches && !isHostSync) {
 		std::fprintf(stderr, "usage: %s counter-race|binary-generation|destroy-after-loss|event-wait|external-queue-wait[-idle|-query]|shared-queue-block"
 					 "|timeline-listener-aba|teardown[-multi|-nil|-nil-transient]|prefill-abandon-{reset,free,pool}[-lost]"
-					 "|metal-error[-multi|-batches|-batches2|-calls]|present-scheduled-after-destroy|present-destroy-race|present-pending-destroy|free-imported-waits[-late-commit|-slow-handler]|free-imported-{late,failed}-allocation\n", argv[0]);
+					 "|metal-error[-multi|-batches|-batches2|-calls]|present-scheduled-after-destroy|present-destroy-race|present-pending-destroy|free-imported-waits[-late-commit|-slow-handler]|free-imported-{late,failed}-allocation"
+					 "|host-sync-{progress,admission}-{invalidate,copy}\n", argv[0]);
 		return 64;
 	}
 	@autoreleasepool {
@@ -1501,7 +1731,7 @@ int main(int argc, char** argv) {
 			: mode == "event-wait" ? eventWait(c)
 			: isExternalWait ? externalQueueWait(c, mode == "external-queue-wait" ? "fence" : mode.substr(std::strlen("external-queue-wait-")))
 			: mode == "shared-queue-block" ? sharedQueueBlock(c) : mode == "timeline-listener-aba" ? timelineListenerAba(c)
-			: isPresentation ? presentation(c, mode) : isFreeImported ? freeImportedWaits(c, mode)
+			: isPresentation ? presentation(c, mode) : isFreeImported ? freeImportedWaits(c, mode) : isHostSync ? hostSync(c, mode)
 			: isPrefill ? prefillAbandon(c, mode) : isMetalError ? metalError(c, mode)
 			: isMetalErrorBatches ? metalErrorBatches(c, mode) : destroyAfterLoss(c);
 		std::fflush(stdout);
