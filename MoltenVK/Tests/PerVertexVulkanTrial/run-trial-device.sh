@@ -26,8 +26,9 @@ runs() { find "$1" -name journal.txt -exec dirname {} \; 2>/dev/null | while rea
 fetch "$output/.before"
 before=$(runs "$output/.before")
 
-environment="{\"MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS\":\"$([[ $mode == sync ]] && echo 1 || echo 0)\",\"MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS\":\"0\",\"MVK_CONFIG_LOG_LEVEL\":\"2\""
+environment="{\"MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS\":\"$([[ $mode == sync ]] && echo 1 || echo 0)\",\"MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS\":\"${TRIAL_PREFILL:-0}\",\"MVK_CONFIG_LOG_LEVEL\":\"2\""
 [[ $validation == plain ]] || environment="$environment,\"MTL_DEBUG_LAYER\":\"1\",\"MTL_SHADER_VALIDATION\":\"1\""
+# TRIAL_PREFILL=1 prefills Metal command buffers (the abandon suite).
 # TRIAL_EXTRA_ENVIRONMENT adds "NAME":"VALUE" pairs, comma separated, to the launch environment.
 [[ -z ${TRIAL_EXTRA_ENVIRONMENT:-} ]] || environment="$environment,$TRIAL_EXTRA_ENVIRONMENT"
 environment="$environment}"

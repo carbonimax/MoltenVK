@@ -19,10 +19,13 @@
 extern "C" int pervertexIndirectMain(int argc, char** argv);
 extern "C" int pervertexMeshMain(int argc, char** argv);
 extern "C" int pervertexBarrierMain(int argc, char** argv);
+extern "C" int pervertexAbandonMain(int argc, char** argv);
+extern "C" int pervertexLossMain(int argc, char** argv);
 
 namespace {
 
-enum Fixture { kIndirect, kMesh, kBarrier };  // PerVertexKHR indirect, mesh-draw, Metal-only barrier reproducer
+// PerVertexKHR indirect, mesh-draw, Metal-only barrier reproducer, Metal-only abandon probe, device loss oracles
+enum Fixture { kIndirect, kMesh, kBarrier, kAbandon, kLoss };
 
 struct TrialCase {
 	const char* name;
@@ -86,6 +89,17 @@ std::vector<TrialCase> barrierCases() {
 		list.push_back({variant, kBarrier, {variant}, {}, 0, "^BARRIER_REPRO PASS"});
 	}
 	list.push_back({"cost", kBarrier, {"cost"}, {}, 0, "^BARRIER_COST PASS"});
+	return list;
+}
+
+// TRIAL_SUITE=abandon: the Metal-only abandon probe of the Mac family harness, then the prefill abandon oracles, which
+// need MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=1 at launch. The oracles swizzle Metal command buffers and count their
+// handlers for the whole process: launch one case per process, named by TRIAL_CASE.
+std::vector<TrialCase> abandonCases() {
+	std::vector<TrialCase> list = {{"metal-abandon", kAbandon, {}, {}, 0, "^ABANDON_PROBE PASS"}};
+	for (const char* variant : {"prefill-abandon-reset", "prefill-abandon-free", "prefill-abandon-pool", "prefill-abandon-reset-lost"}) {
+		list.push_back({variant, kLoss, {variant}, {}, 0, "^PREFILL_ABANDON PASS"});
+	}
 	return list;
 }
 
@@ -174,13 +188,16 @@ NSDictionary* deviceInfo() {
 	NSString* shaders = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"Shaders"];
 	NSMutableArray* results = [NSMutableArray array];
 	int pass = 0, fail = 0, skipped = 0;
-	const char* suite = getenv("TRIAL_SUITE");
-	bool barrier = suite && !strcmp(suite, "metal-barrier");
-	for (const TrialCase& trial : barrier ? barrierCases() : cases()) {
+	const char* suiteVariable = getenv("TRIAL_SUITE");
+	std::string suite = suiteVariable ? suiteVariable : "vulkan";
+	const char* only = getenv("TRIAL_CASE");	// one case of the suite, if set
+	for (const TrialCase& trial : suite == "metal-barrier" ? barrierCases() : suite == "abandon" ? abandonCases() : cases()) {
+		if (only && strcmp(only, trial.name)) { continue; }
 		NSString* name = @(trial.name);
 		NSString* log = [run stringByAppendingPathComponent:[name stringByAppendingPathExtension:@"log"]];
-		std::vector<std::string> args = {trial.fixture == kMesh ? "mesh-draw" : trial.fixture == kBarrier ? "pervertex-barrier-repro" : "pervertex-indirect-gpu"};
-		if (trial.fixture != kBarrier) { args.push_back(std::string(shaders.UTF8String) + (trial.fixture == kMesh ? "/mesh" : "/indirect")); }
+		const char* program[] = {"pervertex-indirect-gpu", "mesh-draw", "pervertex-barrier-repro", "abandon-probe", "pervertex-loss"};
+		std::vector<std::string> args = {program[trial.fixture]};
+		if (trial.fixture == kIndirect || trial.fixture == kMesh) { args.push_back(std::string(shaders.UTF8String) + (trial.fixture == kMesh ? "/mesh" : "/indirect")); }
 		for (const auto& arg : trial.args) { args.push_back(arg == "@PREFIX@" ? std::string([run stringByAppendingPathComponent:name].UTF8String) : arg); }
 		std::vector<char*> argv;
 		for (auto& arg : args) { argv.push_back(arg.data()); }
@@ -195,7 +212,8 @@ NSDictionary* deviceInfo() {
 		dup2(output, STDOUT_FILENO);
 		dup2(output, STDERR_FILENO);
 		NSDate* begin = NSDate.date;
-		int (*entry)(int, char**) = trial.fixture == kMesh ? pervertexMeshMain : trial.fixture == kBarrier ? pervertexBarrierMain : pervertexIndirectMain;
+		int (*entries[])(int, char**) = {pervertexIndirectMain, pervertexMeshMain, pervertexBarrierMain, pervertexAbandonMain, pervertexLossMain};
+		int (*entry)(int, char**) = entries[trial.fixture];
 		int rc = entry(int(argv.size() - 1), argv.data());
 		double seconds = -begin.timeIntervalSinceNow;
 		fflush(stdout);
@@ -220,7 +238,7 @@ NSDictionary* deviceInfo() {
 		// The lines that carry the fixture's own checks.
 		NSMutableArray* lines = [NSMutableArray array];
 		for (NSString* line in [@(text.c_str()) componentsSeparatedByString:@"\n"]) {
-			if ([line hasPrefix:@"PERVERTEX_INDIRECT"] || [line hasPrefix:@"MESH_DRAW"] || [line hasPrefix:@"BARRIER_"] || [line hasPrefix:@"submission="] || [line hasPrefix:@"dependent wait"] ||
+			if ([line hasPrefix:@"PERVERTEX_INDIRECT"] || [line hasPrefix:@"MESH_DRAW"] || [line hasPrefix:@"BARRIER_"] || [line hasPrefix:@"ABANDON_PROBE"] || [line hasPrefix:@"PREFILL_ABANDON"] || [line hasPrefix:@"submission="] || [line hasPrefix:@"dependent wait"] ||
 				[line hasPrefix:@"queue idle"] || [line hasPrefix:@"  sample"] || [line hasPrefix:@"[mvk-error]"] || [line hasPrefix:@"DEVICE="] || [line hasPrefix:@"VK_EXT"] ||
 				[line hasPrefix:@"ERROR"]) { [lines addObject:line]; }
 		}
@@ -229,12 +247,16 @@ NSDictionary* deviceInfo() {
 		progress([NSString stringWithFormat:@"%@ %@ (exit %d)", verdict, name, rc]);
 	}
 
+	// A TRIAL_CASE that names no case of the suite ran nothing: that is no pass.
+	if (!results.count) { ++fail; }
+
 	// Metal announces its validation once per process, in the first case that creates a device.
 	bool validation = false;
 	for (NSDictionary* result in results) { validation |= [result[@"validation_announced"] boolValue]; }
 	NSDictionary* report = @{
 		@"format": @"PerVertexVulkanTrial 2",
-		@"suite": barrier ? @"metal-barrier" : @"vulkan",
+		@"suite": @(suite.c_str()),
+		@"only_case": only ? @(only) : [NSNull null],
 		@"metal_validation_announced": @(validation),
 		@"started_utc": started,
 		@"device": deviceInfo(),

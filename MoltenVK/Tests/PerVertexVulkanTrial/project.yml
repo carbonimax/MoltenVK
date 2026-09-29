@@ -18,6 +18,9 @@ targets:
     platform: iOS
     sources:
       - path: Sources
+        excludes: [LossFixture.mm]
+      - path: Sources/LossFixture.mm
+        compilerFlags: [-fno-objc-arc]
       - path: ${TRIAL_BUILD}/Shaders
         type: folder
         buildPhase: resources

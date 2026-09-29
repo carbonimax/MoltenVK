@@ -10,27 +10,21 @@
 // acquisition within 2 s; none of their fills reaches the buffer; a control command buffer committed on the same queue
 // afterwards completes, and its fill (0x5A) does. Data, never the verdict: how many times Metal runs the completed
 // handler of each abandoned command buffer at its release. Not probed: an enqueued command buffer released uncommitted,
-// which MoltenVK never does, and which Metal API validation rejects. Exit 0 on PASS, 1 on FAIL. The iOS app calls runAbandonProbe() with ABANDON_PROBE_NO_MAIN defined.
+// which MoltenVK never does, and which Metal API validation rejects. Exit 0 on PASS, 1 on FAIL. The iOS trial app calls runAbandonProbe(), with ABANDON_PROBE_NO_MAIN defined.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
-#include <initializer_list>
 #include <unistd.h>
 
-static FILE* gAbandonProbeCopy = nullptr;	// the iOS app also writes the lines to a file
-
 static void say(const char* format, ...) {
-	for (FILE* out : {stdout, gAbandonProbeCopy}) {
-		if (!out) continue;
-		va_list args;
-		va_start(args, format);
-		std::vfprintf(out, format, args);
-		va_end(args);
-		std::fflush(out);
-	}
+	va_list args;
+	va_start(args, format);
+	std::vprintf(format, args);
+	va_end(args);
+	std::fflush(stdout);
 }
 
 // Acquires a command buffer on another thread, so that a queue without a free slot cannot block the probe.
@@ -60,8 +54,7 @@ static bool bytesEqual(id<MTLBuffer> buffer, NSUInteger offset, uint8_t value) {
 	return bytes[0] == value && bytes[1] == value && bytes[2] == value && bytes[3] == value;
 }
 
-int runAbandonProbe(FILE* copy) {
-	gAbandonProbeCopy = copy;
+int runAbandonProbe() {
 	constexpr int kSlots = 4, kAbandoned = 64;
 	id<MTLDevice> device = MTLCreateSystemDefaultDevice();
 	if (!device) { say("ABANDON_PROBE FAIL: no Metal device\n"); return 1; }
@@ -124,6 +117,6 @@ int runAbandonProbe(FILE* copy) {
 
 #ifndef ABANDON_PROBE_NO_MAIN
 int main() {
-	@autoreleasepool { return runAbandonProbe(nullptr); }
+	@autoreleasepool { return runAbandonProbe(); }
 }
 #endif
