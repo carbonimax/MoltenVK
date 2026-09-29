@@ -93,6 +93,7 @@ library shipping OFF OFF
 library mutation-winding ON ON 's/uint slot = p\[2\] && corner \? 3 - corner : corner;/uint slot = !p[2] && corner ? 3 - corner : corner;/'
 library mutation-interior ON ON 's/14563 \* q/16384 * q/g'
 library mutation-offset ON ON 's/uint key = offsets\[i\] \+ triangle;/uint key = triangle;/'
+library mutation-lower-left-order ON ON 's/ != _perVertexTessLowerLeft; \}/; }/' GPUObjects/MVKPipeline.h
 library mutation-helper-missing ON ON 's/kernel void tessLevelsToHalfFactors\(/kernel void tessLevelsToHalfFactorsUnavailable(/'
 library mutation-first-vertex-origin ON ON 's/MTLRegionMake2D\(firstVertex, firstInstance, vertexCount, 1\)/MTLRegionMake2D(0, firstInstance, vertexCount, 1)/' Commands/MVKCmdDraw.mm
 library mutation-first-instance-origin ON ON 's/MTLRegionMake2D\(firstVertex, firstInstance, vertexCount, 1\)/MTLRegionMake2D(firstVertex, 0, vertexCount, 1)/' Commands/MVKCmdDraw.mm
@@ -134,6 +135,7 @@ for winding in ccw cw; do
 	topology dev cache-reuse "$winding" 0 "TES_TOPOLOGY PASS" "stage cache hits: fill=0 reuse=4 of 4"
 	topology dev dynamic-scissor "$winding" 0 "TES_TOPOLOGY PASS" "scissor ab: .*cells=[1-9][0-9]*/0/[1-9]"
 	topology dev dynamic-viewport "$winding" 0 "TES_TOPOLOGY PASS" "viewport lr: pixels differing from left on the left half and right on the right half=0"
+	topology dev lower-left "$winding" 0 "TES_TOPOLOGY PASS" "ok   an explicit upper-left domain origin renders the default image"
 	topology dev dynamic-both "$winding" 0 "TES_TOPOLOGY PASS" "first cell differing from left=0, covered middle=0, last cell differing from right=0"
 	first_sums="vertex=33 instance=6 tag=42 base_vertex=18 base_instance=6"
 	topology dev first "$winding" 0 "TES_TOPOLOGY PASS" "VS storage sums: expected $first_sums; ordinary $first_sums; pervertex $first_sums"
@@ -143,7 +145,7 @@ done
 PREFILL=1 topology dev mixed ccw 0 "TES_TOPOLOGY PASS"
 PREFILL=2 topology dev mixed cw 0 "TES_TOPOLOGY PASS"
 # 2. Deterministic refusals before submission; ordinary tessellation keeps these modes.
-for scenario in reject-quads reject-fractional reject-point-mode reject-lower-left reject-descriptor reject-push-constant reject-instances reject-descriptor-named reject-descriptor-shared reject-dynamic-line-width reject-multi-viewport; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
+for scenario in reject-quads reject-fractional reject-point-mode reject-descriptor reject-push-constant reject-instances reject-descriptor-named reject-descriptor-shared reject-dynamic-line-width reject-multi-viewport; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
 for scenario in reject-indirect-tes reject-indexed-indirect-tes; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS" "vkEndCommandBuffer=-8"; done
 topology no-admission reject-no-admission ccw 0 "TES_TOPOLOGY PASS"
 topology shipping public-device-gate ccw 0 "TES_TOPOLOGY PASS"
@@ -190,6 +192,8 @@ topology mutation-cache-layout cache-reuse ccw 1 "ERROR: Create pipeline interp-
 topology mutation-entry-main entry-names ccw 1 "ERROR: Entry point does not exist"
 # The resource check reflects the module's first TCS entry point instead of pName: the admitted tescMain is refused.
 topology mutation-entry-default entry-shared-module ccw 1 "ERROR: Create pipeline interp-named: -8"
+# The lower-left origin no longer reverses the generator's corner order: the CPU model must fail.
+topology mutation-lower-left-order lower-left ccw 2 "FAIL ordered PerVertex values match the CPU model"
 topology mutation-helper-missing ordinary-levels-direct ccw 1 "Could not find support compute shader function tessLevelsToHalfFactors" "ERROR: Create pipeline case0-levels: -3"
 # 5. The float32 level ABI is live in the PerVertex TCS and TES compute kernels.
 mkdir -p "$output/dump"

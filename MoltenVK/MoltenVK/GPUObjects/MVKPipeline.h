@@ -269,8 +269,8 @@ public:
 	bool usesFloat32TessLevels() const { return _usesFloat32TessLevels && !usesPerVertexTessEval(); }
 	id<MTLComputePipelineState> getTessLevelsToHalfFactorsPipelineState() const { return _mtlTessLevelsToHalfFactorsState; }
 	id<MTLComputePipelineState> getPerVertexTessEvalPipelineState() const { return _mtlPerVertexTessEvalState; }
-	/** Counter-clockwise TES winding (upper-left domain origin) reverses the generator's clockwise corner order. */
-	bool perVertexTessReversesCorners() const { return _tessReflectData.windingOrder == spv::ExecutionModeVertexOrderCcw; }
+	/** Counter-clockwise TES winding reverses the generator's clockwise corner order; a lower-left domain origin reverses it again. */
+	bool perVertexTessReversesCorners() const { return (_tessReflectData.windingOrder == spv::ExecutionModeVertexOrderCcw) != _perVertexTessLowerLeft; }
 	const SPIRV_CROSS_NAMESPACE::MSLCapturedOutputReplayBarycentricBinding& getPerVertexReplayBarycentricBinding() const { return _perVertexReplayBarycentricBinding; }
 	bool usesPortableBarycentrics() const { return _usesPerspectiveBarycentrics || _usesNoPerspectiveBarycentrics; }
 	id<MTLRenderPipelineState> getPerVertexCapturePipelineState(uint32_t viewCount) const {
@@ -456,6 +456,7 @@ protected:
 	VkPrimitiveTopology _vkPrimitiveTopology;
 	uint32_t _outputControlPointCount;
 	mvk::SPIRVTessReflectionData _tessReflectData;
+	bool _perVertexTessLowerLeft = false;
 
 	MVKShaderModule* _vertexModule = nullptr;
 	MVKShaderModule* _tessCtlModule = nullptr;
