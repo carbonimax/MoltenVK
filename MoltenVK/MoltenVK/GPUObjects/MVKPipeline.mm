@@ -1418,11 +1418,13 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 			mvkUsesResources(_tessEvalModule->getSPIRV(), spv::ExecutionModelTessellationEvaluation, tessEvalEntry)) {
 			return unsupported("TES requires TCS and TES stages without descriptors or push constants for the float32 tessellation level ABI.");
 		}
-		// Only VK_DYNAMIC_STATE_SCISSOR is qualified: the render pass the replay restarts after the compute stages
-		// applies the current scissor. VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT sets the same flag, so read the Vulkan list.
+		// Only VK_DYNAMIC_STATE_SCISSOR and VK_DYNAMIC_STATE_VIEWPORT are qualified: the render pass the replay restarts
+		// after the compute stages applies the current scissor and viewport. The WITH_COUNT variants set the same flags,
+		// so read the Vulkan list.
 		if (const auto* dynamic = pCreateInfo->pDynamicState) {
 			for (uint32_t i = 0; i < dynamic->dynamicStateCount; ++i) {
-				if (dynamic->pDynamicStates[i] != VK_DYNAMIC_STATE_SCISSOR) { return unsupported("TES test admits no dynamic state other than VK_DYNAMIC_STATE_SCISSOR."); }
+				VkDynamicState state = dynamic->pDynamicStates[i];
+				if (state != VK_DYNAMIC_STATE_SCISSOR && state != VK_DYNAMIC_STATE_VIEWPORT) { return unsupported("TES test admits no dynamic state other than VK_DYNAMIC_STATE_SCISSOR and VK_DYNAMIC_STATE_VIEWPORT."); }
 			}
 		}
 		// The domain origin extension changes the winding convention of the generated triangles.
