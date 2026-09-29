@@ -87,7 +87,7 @@ Preuves, chacune avec son `EVIDENCE.sha256` :
   - Bibliothèque `dev` : sha256 `60a75580…`.
 - **Les matrices PerVertex hors TES ne sont pas relancées.** Le diff ne touche que des branches gardées par `usesPerVertexTessEval()` ou `recordedGraphicsPipelineUsesPerVertexTessEval()`, qui n'existent qu'avec l'admission de test.
 
-## 7. Ce qui reste hors du contrat
+## 7. Ce qui reste hors du contrat (au jalon `b3baee52` ; état courant au § 10)
 
 - **Pipeline.**
   - Les domaines quads et isolines, les espacements fractionnaires, le mode point et plus de 3 points de contrôle.
@@ -106,3 +106,79 @@ Preuves, chacune avec son `EVIDENCE.sha256` :
   - Ils suivent la même origine stage-in, mais aucun VS du harnais ne les lit.
 - **Autres GPU.** Seul un M4 Pro est prouvé. M1, M3 et Intel restent pour la fin.
 - **Non fait dans cette passe.** La mesure du coût du dispatch supplémentaire, notée au plan.
+
+## 8. Suite de la revue : l'oracle `first` étendu, en test seul (`c0d9c0dd`)
+
+Astra a validé le jalon de façon bornée. Elle a demandé de vérifier en test seul un attribut par instance et `gl_BaseVertex`/`gl_BaseInstance`, avec des mutations séparées de `firstVertex` et de `firstInstance`.
+
+- **Le montage.**
+  - Le VS de `first` lit un attribut par instance (binding 1, `VK_VERTEX_INPUT_RATE_INSTANCE`, `R32_UINT`) : 6 pour l'instance 0, un leurre, et 7 pour l'instance 1.
+  - Il ajoute `tag - 7` aux niveaux.
+  - Il additionne aussi l'attribut (42 attendu), `gl_BaseVertex` (18) et `gl_BaseInstance` (6), en plus de `gl_VertexIndex` (33) et de `gl_InstanceIndex` (6).
+- **Le runtime n'a pas changé depuis `b3baee52`.** L'oracle étendu est vert sans correctif, pour les deux enroulements : les cinq sommes sont exactes sur les pipelines ordinaire et PerVertex (`build/astra/tes-first-extended-c0d9c0dd/`).
+- **Deux mutations remplacent la mutation combinée.** Chacune ne retire qu'une coordonnée de l'origine :
+
+| Mutation | Sommes PerVertex (sommet, instance, attribut, base de sommet, base d'instance) | Couverture |
+| --- | --- | --- |
+| `mutation-first-vertex-origin` : origine (0, `firstInstance`) | 15, 6, 42, **0**, 6 : seules les sommes liées à `firstVertex` changent | 1 568 pixels sur 3 136 en écart |
+| `mutation-first-instance-origin` : origine (`firstVertex`, 0) | 33, **0**, **36**, 18, **0** : seules les sommes liées à `firstInstance` changent | 1 568 pixels sur 3 136 en écart |
+
+- Runner TES complet à `c0d9c0dd` : **103/103 PASS** ; `EVIDENCE.sha256` compte 863 entrées (`build/astra/tes-runner-c0d9c0dd/`).
+- Les deux lacunes notées au § 7 sont fermées pour ce dessin : l'attribut par instance et `gl_BaseVertex`/`gl_BaseInstance`.
+
+## 9. Le refus de pipeline suivant : des points d'entrée autres que `main`
+
+**Le choix.** C'est le plus petit refus de pipeline indépendant de la soumission.
+- La porte d'admission TES refusait tout point d'entrée qui ne s'appelle pas `main` (`MVKPipeline.mm:1403`).
+- Tout le reste du chemin TES PerVertex utilise déjà le `pName` de chaque étage : réflexion, compilation de la capture, rejeu. Le rejeu TES reçoit l'étage TES (`MVKPipeline.mm:2126`).
+- Une seule vraie dépendance restait : le contrôle des ressources du TCS et du TES. `mvkUsesResources()` réfléchissait le point d'entrée `main` par un argument par défaut.
+- Les front-ends HLSL nomment couramment leurs points d'entrée autrement que `main`.
+
+**L'oracle (`358064bd`).**
+- Le scénario `entry-names` renomme tous les points d'entrée : `vertMain`, `tescMain`, `teseMain`, `fragMain`.
+- L'image PerVertex doit concorder avec le pipeline ordinaire construit à partir des mêmes étages renommés. Elle doit aussi être égale, octet par octet, à l'image PerVertex des mêmes shaders nommés `main`.
+- Le refus `reject-descriptor-named` garde un descripteur dans un TCS renommé. Il doit rester refusé.
+
+**Le correctif (`547c3871`).**
+- La porte réfléchit les ressources du TCS et du TES à leurs vrais points d'entrée.
+- `mvkUsesResources()` n'a plus de nom par défaut.
+- La spécialisation, le `pNext` et les `flags` d'étage restent refusés.
+
+**Rouge avant, vert après, mutation détectée.**
+
+| Bibliothèque | `entry-names` | `reject-descriptor-named` |
+| --- | --- | --- |
+| **Avant** : `lib-b3baee52-tes` (`5868ff17…`). Son runtime est identique à `358064bd`, car `c0d9c0dd` et `358064bd` ne touchent que les tests. | Sortie 1 pour les deux enroulements : le pipeline est refusé à cause du nom (« unspecialized main entry points »). | PASS, mais refusé à cause du nom, pas du descripteur. |
+| **Après** : `lib-547c3871-tes` (`dc33a8dd…`) | PASS pour les deux enroulements : 0 écart sur 3 136 pixels face au pipeline ordinaire, image égale à celle des shaders nommés `main`. | PASS, refusé cette fois à cause du descripteur. |
+| **Mutation** `mutation-entry-main`, où le contrôle du TCS réfléchit encore `main` (`26a2ed89…`) | Sortie 1 : l'exception « Entry point does not exist » de SPIRV-Cross traverse `vkCreateGraphicsPipelines` jusqu'à l'application. | non lancée |
+
+La mutation montre ce qu'aurait fait un correctif qui retirerait seulement le contrôle du nom : une exception C++ qui sort par l'API Vulkan.
+
+**Régressions.**
+- Runner TES complet à `547c3871` : **107/107 PASS**.
+  - Tout tourne sous `MTL_DEBUG_LAYER=1` et `MTL_SHADER_VALIDATION=1`, sauf les cas indirects ordinaires, sous validation API seule comme avant.
+  - `EVIDENCE.sha256` compte 883 entrées (sha256 du manifeste `045ded7a…`). Bibliothèque `dev` : `56eb2984…`.
+- Les matrices PerVertex hors TES ne sont pas relancées : le seul changement hors de la porte TES est de supprimer l'argument par défaut de `mvkUsesResources()`. L'autre appelant, le chemin mesh, passait déjà son `pName`.
+- Preuves, chacune avec son `EVIDENCE.sha256` : `build/astra/tes-entry-names-before-358064bd/` (le `NOTE.txt` explique un journal sans valeur de test), `build/astra/tes-entry-names-after-547c3871/` et `build/astra/tes-runner-547c3871/`.
+
+Note sur les empreintes des bibliothèques. Deux constructions Debug du même runtime n'ont pas le même sha256 quand leurs chemins de source diffèrent, par exemple l'arbre de travail et l'archive du runner. Chaque bibliothèque est donc désignée par son propre `PROVENANCE.txt`.
+
+## 10. Ce qui reste hors du contrat (à `547c3871`)
+
+- **Pipeline.**
+  - Les domaines quads et isolines, les espacements fractionnaires, le mode point et plus de 3 points de contrôle.
+  - L'origine de domaine en bas à gauche.
+  - Les descripteurs et push constants du TCS ou du TES.
+  - Le cache de pipeline, la spécialisation, le `pNext` ou les `flags` d'étage, et tout état dynamique.
+  - Le multiview, le multi-échantillonnage et les diviseurs de sommets.
+- **Dessins.**
+  - Les dessins indexés, indirects et indexés indirects.
+  - Plus d'une instance.
+  - DrawID ≠ 0 (multi-draw).
+- **Niveaux.** Les niveaux non uniformes, au-dessus de 3, ou avec un niveau intérieur NaN : le device est perdu à la soumission.
+- **Non prouvé.**
+  - Un module SPIR-V dont plusieurs points d'entrée ont le même modèle d'exécution. Les noms sont bien transmis, mais aucun oracle n'en construit un.
+  - La mesure du coût du dispatch supplémentaire.
+- **Autres GPU.** Seul un M4 Pro est prouvé. M1, M3 et Intel restent pour la fin.
+
+L'extension reste fermée par défaut et n'est pas prête pour upstream.
