@@ -833,9 +833,9 @@ int main(int argc, char** argv) {
 				std::printf("TES_TOPOLOGY %s %s: vkEndCommandBuffer=%d expected=%d, nothing submitted\n", actual == expected ? "PASS" : "FAIL", scenarioName.c_str(), actual, expected);
 				return actual == expected ? 0 : 2;
 			}
-			else if (scenarioName == "reject-first-vertex" || scenarioName == "reject-instances") {
+			else if (scenarioName == "reject-instances") {
 				check(createPipeline(o, pipeline), "Create admitted pipeline");
-				actual = record(pipeline, {uniform(two)}, scenarioName == "reject-first-vertex" ? 3 : 0, scenarioName == "reject-instances" ? 2 : 1, o);
+				actual = record(pipeline, {uniform(two)}, 0, 2, o);
 				std::printf("TES_TOPOLOGY %s %s: vkEndCommandBuffer=%d expected=%d, nothing submitted\n", actual == expected ? "PASS" : "FAIL", scenarioName.c_str(), actual, expected);
 				return actual == expected ? 0 : 2;
 			} else throw std::runtime_error("Unknown refusal");

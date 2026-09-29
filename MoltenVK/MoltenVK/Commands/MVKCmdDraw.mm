@@ -133,7 +133,7 @@ VkResult MVKCmdDraw::setContent(MVKCommandBuffer* cmdBuff,
         return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCmdDraw(): The current device does not support drawing with a non-zero base instance.");
     }
 
-	if (cmdBuff->recordedGraphicsPipelineUsesPerVertexTessEval() && vertexCount && instanceCount && (firstVertex || firstInstance || drawIndex)) { return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "PerVertex TES test requires zero firstVertex, firstInstance and DrawID."); }
+	if (cmdBuff->recordedGraphicsPipelineUsesPerVertexTessEval() && vertexCount && instanceCount && drawIndex) { return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "PerVertex TES test requires DrawID 0."); }
 	VkResult result = recordTessPatchCount(cmdBuff, _vertexCount, _instanceCount);
 	return result == VK_SUCCESS ? cmdBuff->recordPerVertexDraw(_vertexCount, _instanceCount) : result;
 }
@@ -377,7 +377,7 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 // or infers a level. The encoder waits for the classification: levels without a proven topology lose the
 // device before any later command or signal of the submission is encoded. VS/TCS effects of that draw have
 // already executed by then.
-static void encodePerVertexTessEval(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline, uint32_t vertexCount) {
+static void encodePerVertexTessEval(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipeline* pipeline, uint32_t vertexCount, uint32_t firstVertex, uint32_t firstInstance) {
 	auto lose = [&](const char* reason) {
 		cmdEncoder->reportError(VK_ERROR_DEVICE_LOST, "PerVertex TES draw was not rendered: %s.", reason);
 		cmdEncoder->getDevice()->markLost();
@@ -405,7 +405,9 @@ static void encodePerVertexTessEval(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	// Admitted draws have DrawID 0 (direct draws; nonzero draw indices are refused at recording).
 	uint32_t drawIndex = 0;
 	if (pipeline->needsDrawIdBuffer()) { computeState.bindStructBytes(compute, &drawIndex, pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::DrawId]); }
-	[compute setStageInRegion:MTLRegionMake2D(0, 0, vertexCount, 1)];
+	// As for ordinary tessellation, the stage-in origin offsets attribute fetches and gl_VertexIndex/gl_InstanceIndex;
+	// outputs stay indexed from 0. Divisors are refused at pipeline creation, so no zero-divisor binding needs an offset.
+	[compute setStageInRegion:MTLRegionMake2D(firstVertex, firstInstance, vertexCount, 1)];
 	[compute dispatchThreads:MTLSizeMake(vertexCount, 1, 1) threadsPerThreadgroup:MTLSizeMake(pipeline->getTessVertexStageState().threadExecutionWidth, 1, 1)];
 	// Vulkan runs the VS for every vertex, including those that complete no patch; nothing is tessellated then.
 	if (!patches) { cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass); return; }
@@ -548,13 +550,13 @@ void MVKCmdDraw::encode(MVKCommandEncoder* cmdEncoder) {
 
 	auto* pipeline = cmdEncoder->getGraphicsPipeline();
 	if (pipeline->usesPerVertexTessEval()) {
-		if (_instanceCount != 1 || _firstVertex || _firstInstance || _drawIndex) {
-			cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "PerVertex TES draw requires one instance, zero first vertex/instance and DrawID."));
+		if (_instanceCount != 1 || _drawIndex) {
+			cmdEncoder->_cmdBuffer->setConfigurationResult(cmdEncoder->_cmdBuffer->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "PerVertex TES draw requires one instance and DrawID 0."));
 			cmdEncoder->getDevice()->markLost();
 			cmdEncoder->stopEncoding();
 			return;
 		}
-		encodePerVertexTessEval(cmdEncoder, pipeline, _vertexCount);
+		encodePerVertexTessEval(cmdEncoder, pipeline, _vertexCount, _firstVertex, _firstInstance);
 		return;
 	}
 	if (pipeline->usesPerVertexInputBuffer()) { encodePerVertexInput(cmdEncoder, pipeline); return; }

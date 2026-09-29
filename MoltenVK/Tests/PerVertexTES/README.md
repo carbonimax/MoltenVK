@@ -11,13 +11,13 @@ A PerVertexKHR pipeline with tessellation is admitted only for:
 - TCS and TES without descriptor resources or push constants, because the float32 TessLevel ABI excludes Metal argument buffers (VS and fragment resources are allowed and use the pipeline's own binding model);
 - vertex inputs without divisors, static state, a single view and a single sample;
 - no pipeline cache and no specialization;
-- direct non-indexed draws of one instance with `firstVertex`, `firstInstance` and DrawID equal to 0 (the VS reads a bound DrawID of 0).
+- direct non-indexed draws of one instance, with any `firstVertex` and `firstInstance`, and DrawID 0 (the VS reads a bound DrawID of 0).
 
 Any other pipeline mode returns `VK_ERROR_FEATURE_NOT_PRESENT` at `vkCreateGraphicsPipelines`. Any other draw fails at `vkEndCommandBuffer`, before submission.
 
 ## Execution
 
-1. **TCS.** VS and TCS run in compute. The TCS is compiled with SPIRV-Cross `tessellation_factors_float32`, so it writes the exact float32 levels (`outer[4]`, `inner[2]`, 24 bytes per patch). Metal's half factors would round `nextafter(1, +inf)` down to level 1.
+1. **TCS.** VS and TCS run in compute. As for ordinary tessellation, the VS stage-in region starts at (`firstVertex`, `firstInstance`): attribute fetches, `gl_VertexIndex` and `gl_InstanceIndex` follow it, and every output buffer stays indexed from 0. The TCS is compiled with SPIRV-Cross `tessellation_factors_float32`, so it writes the exact float32 levels (`outer[4]`, `inner[2]`, 24 bytes per patch). Metal's half factors would round `nextafter(1, +inf)` down to level 1.
 2. **Topology.** `perVertexTessTopology` classifies each patch on the GPU:
    - a patch is discarded when one of its first three outer levels is ≤ 0 or NaN;
    - otherwise each level is clamped to `[1, maxTessellationGenerationLevel]` and rounded up;
@@ -69,10 +69,11 @@ Scenarios cover:
 - both windings;
 - seams: two patches of level 1, 2 or 3 sharing an edge, which is the `u = 0` edge of one and the `w = 0` edge of the other (rule 4);
 - draws of 1, 2, 4 and 5 vertices, counted by the VS storage counter;
+- `firstVertex` 3 and `firstInstance` 1: zeroed decoy vertices precede the data, the VS adds `gl_InstanceIndex - 1` to the levels, and the VS storage counter also sums `gl_VertexIndex` (33) and `gl_InstanceIndex` (6), on the ordinary and the PerVertex pipeline;
 - level 4, non-uniform levels and a NaN inner level, which must be refused with `VK_ERROR_DEVICE_LOST` and no pixel;
 - ordinary-only draws (`ordinary-levels-*`, also on the shipping library, through each draw command, as one draw and as two draws in one render pass) where levels that half would change must render, tessellate and reach the TES exactly like their Vulkan representative: `nextafter(1, +inf)` as 2, `nextafter(2, +inf)` as 3, `1e-30` as 1 on outer and inner levels, with `+inf`, `-0` and NaN as controls.
 
-`main.cpp` keeps the earlier pilot checks that still apply: the factor-1 fixture with the ordered, swapped and wrong-patch fragments, the compute-bind recording guards, and the refusals for cache, patch size, specialization, instances, first vertex, indexed draws and the no-admission build.
+`main.cpp` keeps the earlier pilot checks that still apply: the factor-1 fixture with the ordered, swapped and wrong-patch fragments, the compute-bind recording guards, and the refusals for cache, patch size, specialization, instances, indexed draws and the no-admission build.
 
 ## Reproduce
 
@@ -85,7 +86,8 @@ bash MoltenVK/Tests/run-pervertex-tes-tests.sh /private/tmp/mvk-tes-topology
 The runner builds from `HEAD`:
 
 - three Debug arm64 libraries: development, without admission, and shipping;
-- three generator mutations that must be caught: reversed winding, moved level-3 interior coordinates, and ignored patch offsets.
+- three generator mutations that must be caught: reversed winding, moved level-3 interior coordinates, and ignored patch offsets;
+- two runtime mutations that must be caught: a missing level conversion helper, and a PerVertex TES draw whose VS ignores the stage-in origin (`firstVertex`, `firstInstance`).
 
 It also checks that the float32 TessLevel ABI is live in the generated TCS and TES, that ordinary fractional and quad pipelines keep the half ABI, and writes `EVIDENCE.sha256` and `SOURCE-INDEX.txt`.
 
@@ -97,7 +99,8 @@ Proven on one Apple M4 Pro (macOS 27.2, Xcode 27.1) only. Not supported:
 
 - other levels, spacings, domains or domain origins;
 - point mode;
-- descriptors or push constants in TCS/TES, instancing, multiview, indexed or indirect draws;
+- descriptors or push constants in TCS/TES, more than one instance, DrawID other than 0 (multi-draw), multiview, indexed or indirect draws;
+- instance-rate vertex attributes with a nonzero `firstInstance`: they follow the same stage-in origin, but no oracle reads one;
 - pipeline caches;
 - other GPU families. The coordinates are copied from the M4 tessellator; on another GPU they still satisfy the Vulkan rules, but need not match that GPU's ordinary TES bit for bit.
 

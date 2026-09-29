@@ -48,7 +48,7 @@ int main(int argc, char** argv) {
     try {
         if (argc != 6 && argc != 7) throw std::runtime_error("Usage: test vertex.spv control.spv evaluation.spv fragment.spv mode [compute.spv]");
         const std::string mode = argv[5];
-        const bool bindCompute = mode == "ordered-compute" || mode == "reject-first-compute" || mode == "reject-first-instance-compute";
+        const bool bindCompute = mode == "ordered-compute" || mode == "reject-instance-compute";
         const bool rejectCompute = bindCompute && mode != "ordered-compute";
         if (bindCompute && argc != 7) throw std::runtime_error("Compute-bind test requires compute.spv");
         if (bindCompute && (!getenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS") || strcmp(getenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS"), "0"))) throw std::runtime_error("Compute-bind test requires explicit prefill=0");
@@ -370,7 +370,7 @@ int main(int argc, char** argv) {
             vkCmdBindIndexBuffer(command, buffer, 0, VK_INDEX_TYPE_UINT16);
             vkCmdDrawIndexed(command, 6, 1, 0, 0, 0);
         } else {
-            vkCmdDraw(command, 6, mode == "reject-instance" ? 2 : 1, mode == "reject-first" || mode == "reject-first-compute" ? 3 : 0, mode == "reject-first-instance-compute" ? 1 : 0);
+            vkCmdDraw(command, 6, mode == "reject-instance" || mode == "reject-instance-compute" ? 2 : 1, 0, 0);
         }
         vkCmdEndRenderPass(command);
         VkImageMemoryBarrier imageBarrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -425,7 +425,7 @@ int main(int argc, char** argv) {
             vkDestroyInstance(instance, nullptr);
             return recorded == VK_ERROR_FEATURE_NOT_PRESENT && untouched && blue && rejectedBufferSubmissions == 0 && housekeepingSubmissions == 2 ? 0 : 2;
         }
-        if (mode == "reject-instance" || mode == "reject-first" || mode == "reject-indexed") {
+        if (mode == "reject-instance" || mode == "reject-indexed") {
             std::printf("recording rejection: %d (expected %d); no submission\n", recorded, VK_ERROR_FEATURE_NOT_PRESENT);
             vkDestroyDevice(device, nullptr);
             vkDestroyInstance(instance, nullptr);
