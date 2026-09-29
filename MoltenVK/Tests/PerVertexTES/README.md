@@ -69,7 +69,7 @@ Scenarios cover:
 - both windings;
 - seams: two patches of level 1, 2 or 3 sharing an edge, which is the `u = 0` edge of one and the `w = 0` edge of the other (rule 4);
 - draws of 1, 2, 4 and 5 vertices, counted by the VS storage counter;
-- `firstVertex` 3 and `firstInstance` 1: zeroed decoy vertices precede the data, the VS adds `gl_InstanceIndex - 1` to the levels, and the VS storage counter also sums `gl_VertexIndex` (33) and `gl_InstanceIndex` (6), on the ordinary and the PerVertex pipeline;
+- `firstVertex` 3 and `firstInstance` 1: zeroed decoy vertices precede the data, and a per-instance attribute holds a decoy tag 6 for instance 0 and 7 for instance 1. The VS adds `gl_InstanceIndex - 1` and `tag - 7` to the levels, and its storage counter also sums `gl_VertexIndex` (33), `gl_InstanceIndex` (6), the tag (42), `gl_BaseVertex` (18) and `gl_BaseInstance` (6), on the ordinary and the PerVertex pipeline;
 - level 4, non-uniform levels and a NaN inner level, which must be refused with `VK_ERROR_DEVICE_LOST` and no pixel;
 - ordinary-only draws (`ordinary-levels-*`, also on the shipping library, through each draw command, as one draw and as two draws in one render pass) where levels that half would change must render, tessellate and reach the TES exactly like their Vulkan representative: `nextafter(1, +inf)` as 2, `nextafter(2, +inf)` as 3, `1e-30` as 1 on outer and inner levels, with `+inf`, `-0` and NaN as controls.
 
@@ -87,7 +87,7 @@ The runner builds from `HEAD`:
 
 - three Debug arm64 libraries: development, without admission, and shipping;
 - three generator mutations that must be caught: reversed winding, moved level-3 interior coordinates, and ignored patch offsets;
-- two runtime mutations that must be caught: a missing level conversion helper, and a PerVertex TES draw whose VS ignores the stage-in origin (`firstVertex`, `firstInstance`).
+- three runtime mutations that must be caught: a missing level conversion helper, and a PerVertex TES draw whose VS ignores either coordinate of the stage-in origin (`firstVertex`, then `firstInstance`).
 
 It also checks that the float32 TessLevel ABI is live in the generated TCS and TES, that ordinary fractional and quad pipelines keep the half ABI, and writes `EVIDENCE.sha256` and `SOURCE-INDEX.txt`.
 
@@ -100,7 +100,6 @@ Proven on one Apple M4 Pro (macOS 27.2, Xcode 27.1) only. Not supported:
 - other levels, spacings, domains or domain origins;
 - point mode;
 - descriptors or push constants in TCS/TES, more than one instance, DrawID other than 0 (multi-draw), multiview, indexed or indirect draws;
-- instance-rate vertex attributes with a nonzero `firstInstance`: they follow the same stage-in origin, but no oracle reads one;
 - pipeline caches;
 - other GPU families. The coordinates are copied from the M4 tessellator; on another GPU they still satisfy the Vulkan rules, but need not match that GPU's ordinary TES bit for bit.
 

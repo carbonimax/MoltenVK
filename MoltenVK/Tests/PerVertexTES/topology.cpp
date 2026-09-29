@@ -118,7 +118,7 @@ static float asFloat(uint32_t word) { float value; memcpy(&value, &word, 4); ret
 // Capture TES record: patch, u, v, w, pixel x, pixel y, then outer[0..2] and inner[0] as the TES read them.
 constexpr uint32_t kCaptureWords = 10;
 
-struct Image { std::vector<uint8_t> rgba; VkResult submit = VK_SUCCESS, wait = VK_SUCCESS; uint32_t invocations = 0, vertexSum = 0, instanceSum = 0; std::vector<uint32_t> tesCapture, fragmentCapture; };
+struct Image { std::vector<uint8_t> rgba; VkResult submit = VK_SUCCESS, wait = VK_SUCCESS; uint32_t invocations = 0; std::array<uint32_t, 5> sums{}; std::vector<uint32_t> tesCapture, fragmentCapture; };
 
 int main(int argc, char** argv) {
 	try {
@@ -150,8 +150,9 @@ int main(int argc, char** argv) {
 			scenarios["seam" + std::to_string(level)] = seam;
 		}
 		// Vulkan runs the VS for every vertex of a draw, including vertices that do not complete a patch.
-		// Nonzero firstVertex and firstInstance: zeroed decoy vertices precede the data, the VS adds gl_InstanceIndex - 1
-		// to the levels, and its counter also sums gl_VertexIndex and gl_InstanceIndex.
+		// Nonzero firstVertex and firstInstance: zeroed decoy vertices precede the data, the VS adds gl_InstanceIndex - 1 and a
+		// per-instance tag - 7 to the levels, and its counter also sums gl_VertexIndex, gl_InstanceIndex, the tag,
+		// gl_BaseVertex and gl_BaseInstance.
 		Scenario first{{uniform(two), uniform(three)}, {}, false, false, "first.vert.spv", true};
 		first.firstVertex = 3;
 		first.firstInstance = 1;
@@ -304,6 +305,10 @@ int main(int argc, char** argv) {
 		Buffer staging = makeBuffer(vertices.size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
 		Buffer readback = makeBuffer(kWidth * kHeight * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 		Buffer counter = makeBuffer(256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+		// Per-instance tags of first.vert.spv: 6 is the decoy of instance 0, 7 the value of instance 1.
+		Buffer instanceTags = makeBuffer(2 * sizeof(uint32_t), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+		reinterpret_cast<uint32_t*>(instanceTags.data)[0] = 6;
+		reinterpret_cast<uint32_t*>(instanceTags.data)[1] = 7;
 		Buffer scale = makeBuffer(256, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 		// Tessellation coordinates: every ordinary TES invocation appends six words; the PerVertex fragment
 		// stores three vertices of six words per pixel.
@@ -476,12 +481,14 @@ int main(int argc, char** argv) {
 				stages[i].module = module(names[i]);
 				stages[i].pName = "main";
 			}
-			VkVertexInputBindingDescription binding{0, kVertexStride, VK_VERTEX_INPUT_RATE_VERTEX};
-			VkVertexInputAttributeDescription attributes[2] = {{0, 0, VK_FORMAT_R32G32_SFLOAT, 0}, {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 16}};
+			// first.vert.spv also reads a per-instance tag from binding 1.
+			const bool tagged = o.vert == "first.vert.spv";
+			VkVertexInputBindingDescription bindings[2] = {{0, kVertexStride, VK_VERTEX_INPUT_RATE_VERTEX}, {1, sizeof(uint32_t), VK_VERTEX_INPUT_RATE_INSTANCE}};
+			VkVertexInputAttributeDescription attributes[3] = {{0, 0, VK_FORMAT_R32G32_SFLOAT, 0}, {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 16}, {2, 1, VK_FORMAT_R32_UINT, 0}};
 			VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-			vertexInput.vertexBindingDescriptionCount = 1;
-			vertexInput.pVertexBindingDescriptions = &binding;
-			vertexInput.vertexAttributeDescriptionCount = 2;
+			vertexInput.vertexBindingDescriptionCount = tagged ? 2 : 1;
+			vertexInput.pVertexBindingDescriptions = bindings;
+			vertexInput.vertexAttributeDescriptionCount = tagged ? 3 : 2;
 			vertexInput.pVertexAttributeDescriptions = attributes;
 			VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
 			assembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
@@ -601,6 +608,7 @@ int main(int argc, char** argv) {
 			if (set) vkCmdBindDescriptorSets(target, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout(o), 0, 1, &set, 0, nullptr);
 			VkDeviceSize offset = 0;
 			vkCmdBindVertexBuffers(target, 0, 1, &vertices.buffer, &offset);
+			if (o.vert == "first.vert.spv") vkCmdBindVertexBuffers(target, 1, 1, &instanceTags.buffer, &offset);
 			const uint32_t drawCount = scenario.vertexCount ? scenario.vertexCount : uint32_t(3 * patches.size());
 			const uint32_t parts = splitDraw ? 2 : 1, counts[2] = {splitDraw ? 3 : drawCount, drawCount - 3}, starts[2] = {0, 3};
 			if (drawMode == "direct") for (uint32_t part = 0; part < parts; ++part) vkCmdDraw(target, counts[part], instances, firstVertex + starts[part], scenario.firstInstance);
@@ -663,8 +671,7 @@ int main(int argc, char** argv) {
 			result.rgba.assign(readback.data, readback.data + readback.size);
 			std::ofstream(prefix + "-" + name + ".rgba", std::ios::binary).write(reinterpret_cast<const char*>(result.rgba.data()), result.rgba.size());
 			memcpy(&result.invocations, counter.data, 4);
-			memcpy(&result.vertexSum, counter.data + 4, 4);
-			memcpy(&result.instanceSum, counter.data + 8, 4);
+			memcpy(result.sums.data(), counter.data + 4, sizeof(result.sums));
 			result.tesCapture.resize(tesCapture.size / 4);
 			memcpy(result.tesCapture.data(), tesCapture.data, tesCapture.size);
 			result.fragmentCapture.resize(fragmentCapture.size / 4);
@@ -906,12 +913,14 @@ int main(int argc, char** argv) {
 			std::printf("  VS storage counter: expected=%u ordinary=%u pervertex=%u\n", vertexCount, ordinaryImage.invocations, interp.invocations);
 			verdict(exact, "VS side effects run once per vertex in ordinary and PerVertex pipelines, discarded patch included");
 			if (scenario.firstVertex || scenario.firstInstance) {
-				uint32_t vertexSum = 0, instanceSum = vertexCount * scenario.firstInstance;
-				for (uint32_t i = 0; i < vertexCount; ++i) vertexSum += scenario.firstVertex + i;
+				// gl_VertexIndex, gl_InstanceIndex, per-instance tag, gl_BaseVertex, gl_BaseInstance.
+				std::array<uint32_t, 5> expected{0, vertexCount * scenario.firstInstance, vertexCount * 7, vertexCount * scenario.firstVertex, vertexCount * scenario.firstInstance};
+				for (uint32_t i = 0; i < vertexCount; ++i) expected[0] += scenario.firstVertex + i;
 				bool sums = true;
-				for (const Image* image : {&ordinaryImage, &interp, &ordered, &swapped, &consistency}) sums &= image->vertexSum == vertexSum && image->instanceSum == instanceSum;
-				std::printf("  VS storage sums: expected vertex=%u instance=%u; ordinary vertex=%u instance=%u; pervertex vertex=%u instance=%u\n", vertexSum, instanceSum, ordinaryImage.vertexSum, ordinaryImage.instanceSum, interp.vertexSum, interp.instanceSum);
-				verdict(sums, "gl_VertexIndex and gl_InstanceIndex start at firstVertex and firstInstance in ordinary and PerVertex pipelines");
+				for (const Image* image : {&ordinaryImage, &interp, &ordered, &swapped, &consistency}) sums &= image->sums == expected;
+				auto text = [](const std::array<uint32_t, 5>& v) { char line[128]; std::snprintf(line, sizeof(line), "vertex=%u instance=%u tag=%u base_vertex=%u base_instance=%u", v[0], v[1], v[2], v[3], v[4]); return std::string(line); };
+				std::printf("  VS storage sums: expected %s; ordinary %s; pervertex %s\n", text(expected).c_str(), text(ordinaryImage.sums).c_str(), text(interp.sums).c_str());
+				verdict(sums, "gl_VertexIndex, gl_InstanceIndex, the per-instance attribute, gl_BaseVertex and gl_BaseInstance follow firstVertex and firstInstance in ordinary and PerVertex pipelines");
 			}
 		}
 
