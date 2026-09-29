@@ -141,7 +141,7 @@ done
 PREFILL=1 topology dev mixed ccw 0 "TES_TOPOLOGY PASS"
 PREFILL=2 topology dev mixed cw 0 "TES_TOPOLOGY PASS"
 # 2. Deterministic refusals before submission; ordinary tessellation keeps these modes.
-for scenario in reject-quads reject-fractional reject-point-mode reject-lower-left reject-descriptor reject-push-constant reject-instances reject-descriptor-named reject-descriptor-shared reject-dynamic-viewport; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
+for scenario in reject-quads reject-fractional reject-point-mode reject-lower-left reject-descriptor reject-push-constant reject-instances reject-descriptor-named reject-descriptor-shared reject-dynamic-viewport reject-multi-viewport; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS"; done
 for scenario in reject-indirect-tes reject-indexed-indirect-tes; do topology dev "$scenario" ccw 0 "TES_TOPOLOGY PASS" "vkEndCommandBuffer=-8"; done
 topology no-admission reject-no-admission ccw 0 "TES_TOPOLOGY PASS"
 topology shipping public-device-gate ccw 0 "TES_TOPOLOGY PASS"

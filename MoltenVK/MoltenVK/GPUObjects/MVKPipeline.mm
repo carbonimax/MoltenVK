@@ -1430,8 +1430,10 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 			}
 		}
 		// The domain origin extension changes the winding convention of the generated triangles.
-		if (!getMetalFeatures().nonUniformThreadgroups || pCreateInfo->stageCount != 4 || !pCreateInfo->pTessellationState || pCreateInfo->pTessellationState->patchControlPoints != 3 || pCreateInfo->pTessellationState->pNext || getRenderingCreateInfo(pCreateInfo)->viewMask || pCreateInfo->pMultisampleState->rasterizationSamples != VK_SAMPLE_COUNT_1_BIT || !pCreateInfo->pVertexInputState || pCreateInfo->pVertexInputState->pNext) {
-			return unsupported("TES test requires single-view, single-sample triangle patches with three control points, an upper-left domain and no vertex divisors.");
+		const auto* viewports = pCreateInfo->pViewportState;
+		if (!getMetalFeatures().nonUniformThreadgroups || pCreateInfo->stageCount != 4 || !pCreateInfo->pTessellationState || pCreateInfo->pTessellationState->patchControlPoints != 3 || pCreateInfo->pTessellationState->pNext || getRenderingCreateInfo(pCreateInfo)->viewMask || pCreateInfo->pMultisampleState->rasterizationSamples != VK_SAMPLE_COUNT_1_BIT || !pCreateInfo->pVertexInputState || pCreateInfo->pVertexInputState->pNext ||
+			!viewports || viewports->viewportCount != 1 || viewports->scissorCount != 1) {
+			return unsupported("TES test requires single-view, single-sample triangle patches with three control points, an upper-left domain, no vertex divisors, and one viewport and scissor.");
 		}
 		testTES = true;
 	}
