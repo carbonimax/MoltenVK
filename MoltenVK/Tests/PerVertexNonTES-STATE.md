@@ -4,7 +4,7 @@ Le jalon TES restreint est clos (`PerVertexTES/README.md`, figé à `66f9fd97`).
 
 ## 1. Ce qui est admis
 
-**Chemin natif.** Sur un GPU Apple10, avec MSL 4.0, une topologie triangulaire et sans `BaryCoordKHR`, le fragment lit directement les valeurs des sommets (`MVKPipeline.mm:1389`). Aucun GPU Apple10 n'est disponible : ce chemin n'a jamais rendu à travers Vulkan.
+**Chemin natif.** Sur un GPU Apple10, avec MSL 4.0, une topologie triangulaire et sans `BaryCoordKHR`, le fragment lit directement les valeurs des sommets (`MVKPipeline.mm:1391`). Aucun GPU Apple10 n'est disponible : ce chemin n'a jamais rendu à travers Vulkan.
 
 **Chemin portable (capture puis rejeu), sur tout GPU avec MSL 2.4.**
 - **Pipelines.**
