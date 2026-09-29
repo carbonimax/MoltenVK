@@ -24,6 +24,7 @@
 #include "MVKSync.h"
 #include "MVKSmallVector.h"
 #include <atomic>
+#include <deque>
 #include <mutex>
 #include <condition_variable>
 
@@ -31,6 +32,7 @@
 
 class MVKQueue;
 class MVKQueueSubmission;
+class MVKQueueCommandBufferSubmission;
 class MVKPhysicalDevice;
 class MVKGPUCaptureScope;
 
@@ -152,6 +154,13 @@ protected:
 	 */
 	bool isDeviceLoss(id<MTLCommandBuffer> mtlCmdBuff);
 
+	/**
+	 * Publishes a command buffer submission whose Metal work has completed, then the later ones already complete, in
+	 * the order they were submitted. A fence or semaphore signal covers every earlier submission to its queue: it is
+	 * never reported before the failure of an earlier submission is known.
+	 */
+	void publishInOrder(MVKQueueCommandBufferSubmission* submission);
+
 	MVKQueueFamily* _queueFamily;
 	std::string _name;
 	dispatch_queue_t _execQueue;
@@ -159,6 +168,9 @@ protected:
 	std::mutex _execQueueMutex;
 	std::condition_variable _execQueueConditionVariable;
 	std::atomic<uint32_t> _execQueueJobCount{0};
+	std::mutex _publicationLock;
+	std::deque<MVKQueueCommandBufferSubmission*> _unpublishedSubmissions;
+	bool _isPublishing = false;
 	id<MTLCommandQueue> _mtlQueue = nil;
 	NSString* _mtlCmdBuffLabelBeginCommandBuffer = nil;
 	NSString* _mtlCmdBuffLabelQueueSubmit = nil;
@@ -225,6 +237,9 @@ public:
 	/** Reserves, in submission order, the semaphore values that a deferred execution encodes. */
 	virtual void reserveSemaphores() {}
 
+	/** Takes its place, in submission order, among the submissions its queue publishes in order. */
+	virtual void queueForPublication() {}
+
 	MVKQueueSubmission(MVKQueue* queue,
 					   uint32_t waitSemaphoreInfoCount,
 					   const VkSemaphoreSubmitInfo* pWaitSemaphoreSubmitInfos);
@@ -271,6 +286,7 @@ public:
 	VkResult execute() override;
 	bool needsWorker() override { return _needsContinuation; }
 	void reserveSemaphores() override;
+	void queueForPublication() override;
 	virtual VkResult reservePerVertexScratch(std::unordered_set<MVKCommandBuffer*>& prefilledExecutions) { return getConfigurationResult(); }
 
 	/**
@@ -294,6 +310,7 @@ public:
 
 protected:
 	friend MVKCommandBuffer;
+	friend MVKQueue;
 
 	id<MTLCommandBuffer> getActiveMTLCommandBuffer();
 	void setActiveMTLCommandBuffer(id<MTLCommandBuffer> mtlCmdBuff);
@@ -311,6 +328,7 @@ protected:
 	MVKCommandUse _commandUse = kMVKCommandUseNone;
 	std::atomic<uint32_t> _pendingMTLCommandBuffers{1};	// Committed Metal command buffers not done, plus encoding.
 	std::atomic<bool> _isMTLCommandBufferLost{false};
+	bool _isComplete = false;			// Guarded by the queue's publication lock.
 	bool _emulatedWaitDone = false;		//Used to track if we've already waited for emulated semaphores.
 };
 
