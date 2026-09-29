@@ -25,8 +25,10 @@
 //   | form-fewer | form-scalar | form-array1 | form-array2 | form-half | form-int16 | form-uint16 | form-mixed
 //   | form-grid | resource-bda | resource-bda-other | resource-unresident | model-check | reject-task | reject-descriptor | reject-per-primitive | reject-pervertex-block
 //   | reject-pervertex-matrix | reject-specialization | reject-indirect | reject-grid-limit | reject-draw-id | reject-draw-id-uint
-//   | reject-buffer-address | no-adapter | public-device-gate
-// The refusal scenarios only create pipelines: nothing they build is ever submitted.
+//   | reject-buffer-address | reject-local-size-op | no-adapter | public-device-gate
+// The refusal scenarios only create pipelines: nothing they build is ever submitted. reject-local-size-op sizes the
+// workgroup with LocalSizeId from a specialization constant operation: creation must fail with a Vulkan result, not
+// an exception. Every mesh shader here uses LocalSizeId (glslang's form for Vulkan 1.3), so maintenance4 is enabled.
 #define VK_ENABLE_BETA_EXTENSIONS 1
 #include <vulkan/vulkan.h>
 
@@ -327,6 +329,8 @@ int main(int argc, char** argv) {
 		            meshProperties.maxMeshWorkGroupCount[0], meshProperties.maxMeshWorkGroupCount[1], meshProperties.maxMeshWorkGroupCount[2], meshProperties.maxMeshWorkGroupTotalCount);
 
 		VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR supportedBarycentric{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR};
+		VkPhysicalDeviceVulkan13Features supported13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+		supportedBarycentric.pNext = &supported13;
 		VkPhysicalDeviceVulkan12Features supported12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
 		supported12.pNext = &supportedBarycentric;
 		VkPhysicalDeviceVulkan11Features supported11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
@@ -334,7 +338,7 @@ int main(int argc, char** argv) {
 		VkPhysicalDeviceFeatures2 supportedFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 		supportedFeatures.pNext = &supported11;
 		vkGetPhysicalDeviceFeatures2(physical, &supportedFeatures);
-		if (!supported11.shaderDrawParameters || !supported12.bufferDeviceAddress) throw std::runtime_error("shaderDrawParameters or bufferDeviceAddress unavailable");
+		if (!supported11.shaderDrawParameters || !supported12.bufferDeviceAddress || !supported13.maintenance4) throw std::runtime_error("shaderDrawParameters, bufferDeviceAddress or maintenance4 unavailable");
 		if (!hasExtension(physical, VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME) || !supportedBarycentric.fragmentShaderBarycentric) throw std::runtime_error("fragmentShaderBarycentric unavailable through the test adapter");
 		// The 16-bit forms need 16-bit stage I/O and arithmetic.
 		const bool sixteen = supported11.storageInputOutput16 && supported12.shaderFloat16 && supportedFeatures.features.shaderInt16;
@@ -342,6 +346,9 @@ int main(int argc, char** argv) {
 		// gl_DrawID and device addresses must be legal in the device, so that only the mesh path refuses them.
 		VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR enableBarycentric{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR};
 		enableBarycentric.fragmentShaderBarycentric = VK_TRUE;
+		VkPhysicalDeviceVulkan13Features enable13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+		enable13.maintenance4 = VK_TRUE;  // LocalSizeId
+		enableBarycentric.pNext = &enable13;
 		VkPhysicalDeviceVulkan12Features enable12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
 		enable12.bufferDeviceAddress = VK_TRUE;
 		enable12.shaderFloat16 = sixteen;
@@ -530,7 +537,7 @@ int main(int argc, char** argv) {
 		};
 
 		if (scenario == "reject-task" || scenario == "reject-descriptor" || scenario == "reject-per-primitive" || scenario == "reject-pervertex-block" || scenario == "reject-pervertex-matrix" ||
-		    scenario == "reject-specialization" || scenario == "reject-draw-id" || scenario == "reject-draw-id-uint" || scenario == "reject-buffer-address") {
+		    scenario == "reject-specialization" || scenario == "reject-draw-id" || scenario == "reject-draw-id-uint" || scenario == "reject-buffer-address" || scenario == "reject-local-size-op") {
 			VkPipeline pipeline = VK_NULL_HANDLE;
 			VkResult result = scenario == "reject-task" ? createPipeline("mesh.mesh.spv", true, emptyLayout, pipeline)
 			                : scenario == "reject-descriptor" ? createPipeline("descriptor.mesh.spv", false, uniformLayout, pipeline)
@@ -540,6 +547,7 @@ int main(int argc, char** argv) {
 			                : scenario == "reject-draw-id" ? createPipeline("draw-id.mesh.spv", false, emptyLayout, pipeline)
 			                : scenario == "reject-draw-id-uint" ? createPipeline("draw-id-uint.mesh.spv", false, emptyLayout, pipeline)
 			                : scenario == "reject-buffer-address" ? createPipeline("buffer-address.mesh.spv", false, emptyLayout, pipeline)
+			                : scenario == "reject-local-size-op" ? createPipeline("local-size-op.mesh.spv", false, emptyLayout, pipeline)
 			                : createPipeline("per-primitive.mesh.spv", false, emptyLayout, pipeline);
 			bool pass = result == VK_ERROR_FEATURE_NOT_PRESENT;
 			std::printf("MESH_DRAW %s %s: vkCreateGraphicsPipelines=%d expected=%d\n", pass ? "PASS" : "FAIL", scenario.c_str(), result, VK_ERROR_FEATURE_NOT_PRESENT);
