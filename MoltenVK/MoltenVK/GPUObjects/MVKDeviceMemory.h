@@ -56,6 +56,9 @@ public:
 	VkDebugReportObjectTypeEXT getVkDebugReportObjectType() override { return VK_DEBUG_REPORT_OBJECT_TYPE_DEVICE_MEMORY_EXT; }
 
 	/** Returns whether the memory is accessible from the host. */
+	/** Returns whether this memory maps host memory that the application imported (VK_EXT_external_memory_host). */
+	bool isHostMemoryImported() { return _isHostMemImported; }
+
     inline bool isMemoryHostAccessible() {
         if (_mtlStorageMode == MTLStorageModeMemoryless)
             return false;

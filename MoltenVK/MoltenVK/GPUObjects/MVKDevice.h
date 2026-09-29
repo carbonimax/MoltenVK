@@ -751,6 +751,12 @@ public:
 	 */
 	void commitMTLCommandBuffer(id<MTLCommandBuffer> mtlCmdBuff);
 
+	/**
+	 * While this device is being lost, waits until no Metal work committed before the loss inventory closed can still
+	 * write application memory. Used before releasing host memory that the application imported, which it may reuse.
+	 */
+	void waitForLossInventory();
+
 	/** Registers a semaphore or event whose encoded Metal waits must be released if this device is lost. */
 	void addLossReleasable(MVKLossReleasable* releasable);
 
@@ -1182,6 +1188,8 @@ protected:
 	dispatch_queue_t _lossPublisher = nullptr;
 	std::atomic<uint32_t> _activeEncodings{0};
 	std::atomic<int64_t> _pendingMTLCommandBufferHandlers{0};
+	std::atomic<int64_t> _handlersBeforeInventory{0};
+	std::atomic<bool> _isLossInventoryClosed{false};
 	bool _isLossPublished = false;
 	std::atomic<bool> _losing{false};
 	std::atomic<bool> _markPhysicalDeviceLost{false};

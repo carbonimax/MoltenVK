@@ -801,6 +801,10 @@ VkResult MVKImage::copyImageToMemory(const VkCopyImageToMemoryInfo* pCopyImageTo
 	// to sync the managed memory from the GPU, so the texture content is accessible to be copied by the CPU.
 	if ( !isUnifiedMemoryGPU() && getMTLStorageMode() == MTLStorageModeManaged ) {
 		@autoreleasepool {
+			// Bracketed like a queue submission until its commit: its synchronization may write imported host memory,
+			// which a device loss must count before reporting. The completion wait comes after, so that a loss does not
+			// wait for it.
+			getDevice()->beginEncoding();
 			id<MTLCommandBuffer> mtlCmdBuff = getDevice()->getAnyQueue()->getMTLCommandBuffer(kMVKCommandUseCopyImageToMemory);
 			id<MTLBlitCommandEncoder> mtlBlitEnc = [mtlCmdBuff blitCommandEncoder];
 
@@ -820,6 +824,7 @@ VkResult MVKImage::copyImageToMemory(const VkCopyImageToMemoryInfo* pCopyImageTo
 
 			[mtlBlitEnc endEncoding];
 			getDevice()->commitMTLCommandBuffer(mtlCmdBuff);
+			getDevice()->endEncoding();
 			[mtlCmdBuff waitUntilCompleted];
 		}
 	}
