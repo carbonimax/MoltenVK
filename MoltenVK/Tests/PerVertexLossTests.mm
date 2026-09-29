@@ -103,6 +103,11 @@
 //   reused while C still writes them. Without a device loss reported, freeing memory that pending work uses is invalid;
 //   it is the ordering that a loss reported in finite time would make legal (PerVertexExternalWait-DESIGN.md, R6 and
 //   R8), and this mode checks the mechanism R8 adds for it, on the submission path.
+// free-imported-late-allocation, free-imported-failed-allocation: the same, and 50 ms after the loss another thread
+//   imports other host pages, which no work admitted before the loss can use. With -late-allocation the import succeeds
+//   and is freed at once; with -failed-allocation, Metal buffers are limited to 64 KiB (mvkTestLimitMetalBufferSize),
+//   and a 128 KiB import fails, which vkAllocateMemory cleans up through the path of vkFreeMemory. That thread must
+//   return within 100 ms, well before the release, while freeing the memory imported before the loss still waits.
 // Exit 2 for a setup failure, 3 when the device lacks a capability.
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
@@ -132,6 +137,7 @@ void sleepMs(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)
 
 bool gPresentationModes = false;	// the present-* modes enable VK_EXT_metal_surface and VK_KHR_swapchain
 bool gImportedMemoryModes = false;	// the free-imported-* modes enable VK_EXT_external_memory_host
+uint64_t gMetalBufferLimit = 0;		// free-imported-failed-allocation limits Metal buffers before creating the device
 
 struct Buffer {
 	VkBuffer buffer = VK_NULL_HANDLE;
@@ -259,6 +265,11 @@ Context createContext() {
 	}
 	if (c.familyB == UINT32_MAX && c.familyA != UINT32_MAX && families[c.familyA].queueCount >= 2) { c.familyB = c.familyA; }
 	if (c.familyB == UINT32_MAX) { std::fprintf(stderr, "Need two Vulkan queues\n"); std::exit(3); }
+	if (gMetalBufferLimit) {
+		auto limit = reinterpret_cast<void (*)(VkPhysicalDevice, uint64_t)>(dlsym(RTLD_DEFAULT, "mvkTestLimitMetalBufferSize"));
+		if (!limit) { std::fprintf(stderr, "Needs a MoltenVK test build with mvkTestLimitMetalBufferSize\n"); std::exit(3); }
+		limit(c.physical, gMetalBufferLimit);
+	}
 	c.device = createLogicalDevice(c, &c.qa, &c.qb);
 	VkExportMetalDeviceInfoEXT metalDevice{VK_STRUCTURE_TYPE_EXPORT_METAL_DEVICE_INFO_EXT};
 	VkExportMetalObjectsInfoEXT exportInfo{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT};
@@ -1145,6 +1156,7 @@ id computeEncoderWithTypeDelayed(id self, SEL command, NSUInteger type) {
 
 int freeImportedWaits(Context& c, const std::string& mode) {
 	bool isLateCommit = mode == "free-imported-waits-late-commit", isSlowHandler = mode == "free-imported-waits-slow-handler";
+	bool isLateAllocation = mode == "free-imported-late-allocation", isFailedAllocation = mode == "free-imported-failed-allocation";
 	VkPhysicalDeviceExternalMemoryHostPropertiesEXT hostProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
 	VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
 	properties.pNext = &hostProperties;
@@ -1155,6 +1167,10 @@ int freeImportedWaits(Context& c, const std::string& mode) {
 	if (posix_memalign(&pages, size, size)) { std::fprintf(stderr, "posix_memalign\n"); return 2; }
 	std::memset(pages, 0, size);
 	volatile uint32_t* words = static_cast<volatile uint32_t*>(pages);
+	size_t lateSize = isFailedAllocation ? 2 * gMetalBufferLimit : size;
+	void* latePages = nullptr;
+	if (posix_memalign(&latePages, size, lateSize)) { std::fprintf(stderr, "posix_memalign\n"); return 2; }
+	std::memset(latePages, 0, lateSize);
 	VkMemoryHostPointerPropertiesEXT pointerProperties{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
 	check(vkGetMemoryHostPointerPropertiesEXT(c.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, pages, &pointerProperties),
 		  "vkGetMemoryHostPointerPropertiesEXT");
@@ -1223,6 +1239,26 @@ int freeImportedWaits(Context& c, const std::string& mode) {
 	c.markLost(c.device);
 	auto lost = std::chrono::steady_clock::now();
 	sleepMs(50);
+	// -late-allocation, -failed-allocation: an import during the loss, then its release, on another thread.
+	std::atomic<bool> lateReturned{false};
+	double lateMs = -1;
+	VkResult lateResult = VK_SUCCESS;
+	std::thread late;
+	if (isLateAllocation || isFailedAllocation) {
+		late = std::thread([&] {
+			auto lateStart = std::chrono::steady_clock::now();
+			VkImportMemoryHostPointerInfoEXT lateImport = imported;
+			lateImport.pHostPointer = latePages;
+			VkMemoryAllocateInfo lateAllocation = allocation;
+			lateAllocation.pNext = &lateImport;
+			lateAllocation.allocationSize = lateSize;
+			VkDeviceMemory lateMemory = VK_NULL_HANDLE;
+			lateResult = vkAllocateMemory(c.device, &lateAllocation, nullptr, &lateMemory);
+			if (lateResult == VK_SUCCESS) { vkFreeMemory(c.device, lateMemory, nullptr); }
+			lateMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - lateStart).count();
+			lateReturned = true;
+		});
+	}
 	std::atomic<bool> freed{false};
 	std::chrono::steady_clock::time_point freedAt;
 	uint32_t valueAtFree = 0;
@@ -1236,21 +1272,30 @@ int freeImportedWaits(Context& c, const std::string& mode) {
 		std::fflush(stdout);
 	});
 	sleepMs(300);
-	bool freedBeforeRelease = freed;
+	bool freedBeforeRelease = freed, lateBeforeRelease = lateReturned;
 	auto released = std::chrono::steady_clock::now();
 	unknown.signaledValue = 1;	// the application releases its own work
 	[external waitUntilCompleted];
 	freer.join();
 	submitter.join();
+	if (late.joinable()) { late.join(); }
 	vkQueueWaitIdle(c.qb);	// reports the loss
 	bool isForced = !isLateCommit || gEncoderDelayUs.load() == 0;
 	double freedAfterReleaseMs = sinceMs(freedAt) - sinceMs(released), handlerDelayMs = gHandlerDelayUs / 1000.0;
 	bool waitedForHandler = freedAfterReleaseMs >= handlerDelayMs;
-	bool pass = isForced && !freedBeforeRelease && freedAt >= released && valueAtFree == kMarker && waitedForHandler;
+	bool isLate = isLateAllocation || isFailedAllocation;
+	bool lateReturnedAtOnce = !isLate || (lateBeforeRelease && lateMs < 100 && (lateResult == VK_SUCCESS) == isLateAllocation);
+	bool pass = isForced && !freedBeforeRelease && freedAt >= released && valueAtFree == kMarker && waitedForHandler && lateReturnedAtOnce;
+	if (isLate) {
+		std::printf("late_import=%s result=%d returned_in=%.0f ms before_release=%d\n", isLateAllocation ? "succeeds" : "fails", lateResult, lateMs,
+					int(lateBeforeRelease));
+	}
 	std::printf("loss_at=%.0f ms freed_at=%.0f ms released_at=%.0f ms value_at_free=%08x handler_delay=%.0f ms freed_after_release=%.0f ms\n",
 				sinceMs(lost), sinceMs(freedAt), sinceMs(released), valueAtFree, handlerDelayMs, freedAfterReleaseMs);
 	std::printf("FREE_IMPORTED %s\n", pass ? "PASS: vkFreeMemory returned only after the work that writes the imported pages"
 				: !isForced ? "FAIL: C created no Metal encoder, so its commit was not held after the loss"
+				: !lateReturnedAtOnce ? (lateResult == VK_SUCCESS) != isLateAllocation ? "FAIL: the import during the loss did not end as expected"
+					: "FAIL: an import made during the loss waited for work admitted before it"
 				: !waitedForHandler && !freedBeforeRelease && valueAtFree == kMarker ? "FAIL: vkFreeMemory returned once C's work ended, before its completed handler did"
 				: freedBeforeRelease ? "FAIL: vkFreeMemory returned while pending work could still write the imported pages"
 				: "FAIL: vkFreeMemory returned after the release, but without the pending work's value in the pages");
@@ -1258,6 +1303,7 @@ int freeImportedWaits(Context& c, const std::string& mode) {
 	vkDestroyCommandPool(c.device, pool, nullptr);
 	[external release];
 	[unknown release];
+	std::free(latePages);
 	return pass ? 0 : 1;
 }
 
@@ -1432,14 +1478,16 @@ int main(int argc, char** argv) {
 	bool isExternalWait = mode == "external-queue-wait" || mode == "external-queue-wait-idle" || mode == "external-queue-wait-query";
 	bool isPresentation = mode == "present-scheduled-after-destroy" || mode == "present-destroy-race" || mode == "present-pending-destroy";
 	gPresentationModes = isPresentation;
-	bool isFreeImported = mode == "free-imported-waits" || mode == "free-imported-waits-late-commit" || mode == "free-imported-waits-slow-handler";
+	bool isFreeImported = mode == "free-imported-waits" || mode == "free-imported-waits-late-commit" || mode == "free-imported-waits-slow-handler"
+		|| mode == "free-imported-late-allocation" || mode == "free-imported-failed-allocation";
 	gImportedMemoryModes = isFreeImported;
+	gMetalBufferLimit = mode == "free-imported-failed-allocation" ? 65536 : 0;
 	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss" && mode != "event-wait" && !isExternalWait
 		&& mode != "shared-queue-block" && mode != "timeline-listener-aba" && !isPresentation && !isFreeImported && !isTeardown && !isPrefill && !isMetalError
 		&& !isMetalErrorBatches) {
 		std::fprintf(stderr, "usage: %s counter-race|binary-generation|destroy-after-loss|event-wait|external-queue-wait[-idle|-query]|shared-queue-block"
 					 "|timeline-listener-aba|teardown[-multi|-nil|-nil-transient]|prefill-abandon-{reset,free,pool}[-lost]"
-					 "|metal-error[-multi|-batches|-batches2|-calls]|present-scheduled-after-destroy|present-destroy-race|present-pending-destroy|free-imported-waits[-late-commit|-slow-handler]\n", argv[0]);
+					 "|metal-error[-multi|-batches|-batches2|-calls]|present-scheduled-after-destroy|present-destroy-race|present-pending-destroy|free-imported-waits[-late-commit|-slow-handler]|free-imported-{late,failed}-allocation\n", argv[0]);
 		return 64;
 	}
 	@autoreleasepool {
