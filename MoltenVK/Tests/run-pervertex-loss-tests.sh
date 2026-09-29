@@ -50,6 +50,7 @@ blockers=()
 for name in "${modes[@]}"; do
 	case $side:$name in
 		before:teardown | before:teardown-multi | before:prefill-abandon-* | before:metal-error*) expected='1|134|139' ;;
+		before:free-imported-waits-late-commit) expected='1|139' ;;	# C may crash on the buffer freed while it encodes
 		before:teardown-nil | after:*) expected=0 ;;
 		before:*) expected=1 ;;
 	esac
