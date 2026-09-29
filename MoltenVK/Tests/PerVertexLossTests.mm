@@ -92,8 +92,10 @@
 // free-imported-waits, free-imported-waits-late-commit: C fills a buffer bound to host memory the test imported
 //   (VK_EXT_external_memory_host), queued behind the application's own Metal work on queue B, which waits for an event
 //   (as in external-queue-wait), so that C stays pending after the loss. The device is lost, and vkFreeMemory on that
-//   memory is called on another thread; the test releases its work 300 ms later. With -late-commit, C's Metal commit
-//   is held 300 ms, so that it happens after the loss began, while C is still encoding. Exit 0 when vkFreeMemory
+//   memory is called on another thread; the test releases its work 300 ms later. With -late-commit, C's encoding is
+//   held 300 ms when it creates its first Metal encoder, so that MoltenVK commits C, and counts it, only after the loss
+//   began: this passes only if the loss inventory closes once no encoding remains, not when the loss begins. Otherwise
+//   vkFreeMemory returns while C encodes, and C may then crash binding the freed buffer. Exit 0 when vkFreeMemory
 //   returns only after the release, with C's value in the pages; 1 when it returns before: the pages could then be
 //   reused while C still writes them. Without a device loss reported, freeing memory that pending work uses is invalid;
 //   it is the ordering that a loss reported in finite time would make legal (PerVertexExternalWait-DESIGN.md, R6 and
@@ -534,7 +536,7 @@ int eventWait(Context& c) {
 // its handlers start only after gFailedDispatchDelayUs.
 std::atomic<int> gHandlersCommitted{0}, gHandlersStarted{0}, gHandlersFinished{0}, gHandlersLate{0}, gFailCommandBuffers{0}, gFailNextCommits{0};
 std::atomic<bool> gDeviceDestroyed{false}, gCleanupReturned{false};
-useconds_t gHandlerDelayUs = 0, gFailedDispatchDelayUs = 0, gCommitDelayUs = 0;
+useconds_t gHandlerDelayUs = 0, gFailedDispatchDelayUs = 0;
 bool gReverseHandlers = false;
 IMP gAddCompletedHandler = nullptr, gAddScheduledHandler = nullptr, gCommit = nullptr, gCommandBuffer = nullptr, gStatus = nullptr, gError = nullptr;
 char gCompletedKey, gScheduledKey, gFailedKey;
@@ -576,7 +578,6 @@ MTLCommandBufferHandler dispatchHandlers(NSArray* handlers, bool isFailed) {
 }
 
 void commitCounted(id self, SEL command) {
-	if (gCommitDelayUs) { usleep(gCommitDelayUs); }
 	NSArray* completed = objc_getAssociatedObject(self, &gCompletedKey);
 	NSArray* scheduled = objc_getAssociatedObject(self, &gScheduledKey);
 	int claim = gFailNextCommits.load();
@@ -1124,6 +1125,21 @@ int timelineListenerAba(Context& c) {
 	return spurious ? 1 : 0;
 }
 
+// free-imported-waits-late-commit: the first Metal encoder created afterwards sleeps gEncoderDelayUs first.
+std::atomic<useconds_t> gEncoderDelayUs{0};
+IMP gBlitEncoder = nullptr, gComputeEncoder = nullptr, gComputeEncoderWithType = nullptr;
+
+void delayEncoder() {
+	useconds_t delay = gEncoderDelayUs.exchange(0);
+	if (delay) { usleep(delay); }
+}
+id blitEncoderDelayed(id self, SEL command) { delayEncoder(); return reinterpret_cast<id (*)(id, SEL)>(gBlitEncoder)(self, command); }
+id computeEncoderDelayed(id self, SEL command) { delayEncoder(); return reinterpret_cast<id (*)(id, SEL)>(gComputeEncoder)(self, command); }
+id computeEncoderWithTypeDelayed(id self, SEL command, NSUInteger type) {
+	delayEncoder();
+	return reinterpret_cast<id (*)(id, SEL, NSUInteger)>(gComputeEncoderWithType)(self, command, type);
+}
+
 int freeImportedWaits(Context& c, bool isLateCommit) {
 	VkPhysicalDeviceExternalMemoryHostPropertiesEXT hostProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
 	VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
@@ -1181,16 +1197,22 @@ int freeImportedWaits(Context& c, bool isLateCommit) {
 	check(vkBeginCommandBuffer(commands, &begin), "vkBeginCommandBuffer");
 	vkCmdFillBuffer(commands, buffer, 0, 4, kMarker);
 	check(vkEndCommandBuffer(commands), "vkEndCommandBuffer");
+	if (isLateCommit) {
+		Class bufferClass = object_getClass(external);
+		gBlitEncoder = replace(bufferClass, @selector(blitCommandEncoder), reinterpret_cast<IMP>(blitEncoderDelayed));
+		gComputeEncoder = replace(bufferClass, @selector(computeCommandEncoder), reinterpret_cast<IMP>(computeEncoderDelayed));
+		gComputeEncoderWithType = replace(bufferClass, @selector(computeCommandEncoderWithDispatchType:), reinterpret_cast<IMP>(computeEncoderWithTypeDelayed));
+		gEncoderDelayUs = 300000;
+	}
 	auto start = std::chrono::steady_clock::now();
 	auto sinceMs = [&](std::chrono::steady_clock::time_point t) { return std::chrono::duration<double, std::milli>(t - start).count(); };
-	gCommitDelayUs = isLateCommit ? 300000 : 0;
 	std::thread submitter([&] {
 		VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
 		submit.commandBufferCount = 1;
 		submit.pCommandBuffers = &commands;
 		vkQueueSubmit(c.qb, 1, &submit, VK_NULL_HANDLE);	// its result only reports a loss that began meanwhile
 	});
-	// With -late-commit, C is still encoding (its commit is held) when the loss begins.
+	// With -late-commit, C is still encoding (held at its first Metal encoder) when the loss begins.
 	sleepMs(isLateCommit ? 100 : 200);
 	c.markLost(c.device);
 	auto lost = std::chrono::steady_clock::now();
@@ -1203,6 +1225,9 @@ int freeImportedWaits(Context& c, bool isLateCommit) {
 		freedAt = std::chrono::steady_clock::now();
 		valueAtFree = words[0];
 		freed = true;
+		// Printed at once: if C then encodes with the freed buffer and crashes, the log still shows why.
+		std::printf("vkFreeMemory returned at %.0f ms, value %08x\n", sinceMs(freedAt), valueAtFree);
+		std::fflush(stdout);
 	});
 	sleepMs(300);
 	bool freedBeforeRelease = freed;
@@ -1211,11 +1236,13 @@ int freeImportedWaits(Context& c, bool isLateCommit) {
 	[external waitUntilCompleted];
 	freer.join();
 	submitter.join();
-	gCommitDelayUs = 0;
 	vkQueueWaitIdle(c.qb);	// reports the loss
-	bool pass = !freedBeforeRelease && freedAt >= released && valueAtFree == kMarker;
-	std::printf("loss_at=%.0f ms freed_at=%.0f ms released_at=%.0f ms value_at_free=%08x\n", sinceMs(lost), sinceMs(freedAt), sinceMs(released), valueAtFree);
+	bool isForced = !isLateCommit || gEncoderDelayUs.load() == 0;
+	bool pass = isForced && !freedBeforeRelease && freedAt >= released && valueAtFree == kMarker;
+	std::printf("loss_at=%.0f ms freed_at=%.0f ms released_at=%.0f ms value_at_free=%08x\n", sinceMs(lost), sinceMs(freedAt),
+				sinceMs(released), valueAtFree);
 	std::printf("FREE_IMPORTED %s\n", pass ? "PASS: vkFreeMemory returned only after the work that writes the imported pages"
+				: !isForced ? "FAIL: C created no Metal encoder, so its commit was not held after the loss"
 				: freedBeforeRelease ? "FAIL: vkFreeMemory returned while pending work could still write the imported pages"
 				: "FAIL: vkFreeMemory returned after the release, but without the pending work's value in the pages");
 	vkDestroyBuffer(c.device, buffer, nullptr);
