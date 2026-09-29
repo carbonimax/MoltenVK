@@ -1418,9 +1418,16 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 			mvkUsesResources(_tessEvalModule->getSPIRV(), spv::ExecutionModelTessellationEvaluation, tessEvalEntry)) {
 			return unsupported("TES requires TCS and TES stages without descriptors or push constants for the float32 tessellation level ABI.");
 		}
+		// Only VK_DYNAMIC_STATE_SCISSOR is qualified: the render pass the replay restarts after the compute stages
+		// applies the current scissor. VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT sets the same flag, so read the Vulkan list.
+		if (const auto* dynamic = pCreateInfo->pDynamicState) {
+			for (uint32_t i = 0; i < dynamic->dynamicStateCount; ++i) {
+				if (dynamic->pDynamicStates[i] != VK_DYNAMIC_STATE_SCISSOR) { return unsupported("TES test admits no dynamic state other than VK_DYNAMIC_STATE_SCISSOR."); }
+			}
+		}
 		// The domain origin extension changes the winding convention of the generated triangles.
-		if (!getMetalFeatures().nonUniformThreadgroups || pCreateInfo->stageCount != 4 || !_dynamicStateFlags.empty() || !pCreateInfo->pTessellationState || pCreateInfo->pTessellationState->patchControlPoints != 3 || pCreateInfo->pTessellationState->pNext || getRenderingCreateInfo(pCreateInfo)->viewMask || pCreateInfo->pMultisampleState->rasterizationSamples != VK_SAMPLE_COUNT_1_BIT || !pCreateInfo->pVertexInputState || pCreateInfo->pVertexInputState->pNext) {
-			return unsupported("TES test requires static single-view, single-sample triangle patches with three control points, an upper-left domain and no vertex divisors.");
+		if (!getMetalFeatures().nonUniformThreadgroups || pCreateInfo->stageCount != 4 || !pCreateInfo->pTessellationState || pCreateInfo->pTessellationState->patchControlPoints != 3 || pCreateInfo->pTessellationState->pNext || getRenderingCreateInfo(pCreateInfo)->viewMask || pCreateInfo->pMultisampleState->rasterizationSamples != VK_SAMPLE_COUNT_1_BIT || !pCreateInfo->pVertexInputState || pCreateInfo->pVertexInputState->pNext) {
+			return unsupported("TES test requires single-view, single-sample triangle patches with three control points, an upper-left domain and no vertex divisors.");
 		}
 		testTES = true;
 	}
