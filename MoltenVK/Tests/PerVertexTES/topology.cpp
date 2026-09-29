@@ -883,7 +883,7 @@ int main(int argc, char** argv) {
 
 		if (scenarioName == "cache-reuse") {
 			// Creation fills an empty Vulkan pipeline cache; a second cache created from its data must then serve every stage,
-			// add nothing, and give the same image as a pipeline created without cache.
+			// add no entry, and give the same image as a pipeline created without cache.
 			auto cacheData = [&](VkPipelineCache cache) {
 				size_t size = 0;
 				check(vkGetPipelineCacheData(device, cache, &size, nullptr), "Size pipeline cache data");
@@ -924,7 +924,8 @@ int main(int argc, char** argv) {
 			std::printf("  pipeline cache: empty=%zu filled=%zu restored_after_reuse=%zu; stage cache hits: fill=%u reuse=%u of 4\n", empty.size(), data.size(), after.size(), hits(fillFeedback), hits(reuseFeedback));
 			verdict(data.size() > empty.size(), "creating the pipeline fills the empty cache");
 			verdict(hits(fillFeedback) == 0 && hits(reuseFeedback) == 4, "no stage hits the empty cache; every stage hits the cache restored from its data");
-			verdict(after == data, "reuse adds nothing to the restored cache");
+			// Entry order follows MoltenVK's unordered shader cache map, so compare sizes: any added conversion adds an entry.
+			verdict(after.size() == data.size(), "reuse adds no entry to the restored cache");
 			verdict(fillImage.rgba == reference.rgba && reuseImage.rgba == reference.rgba, "images through the filled and the restored cache equal the image without cache");
 			uint32_t coverageMismatch = 0, coveredPixels = 0;
 			for (uint32_t i = 0; i < kWidth * kHeight; ++i) { coveredPixels += covered(ordinaryImage.rgba, i); coverageMismatch += covered(ordinaryImage.rgba, i) != covered(reuseImage.rgba, i); }
