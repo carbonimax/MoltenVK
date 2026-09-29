@@ -131,6 +131,15 @@
 //   when vkDestroyDevice returns within 50 ms. -before-report: the device alone is destroyed 100 ms after the loss, while
 //   C is pending, which Vulkan allows only once a wait has reported the loss: invalid usage today, legal once the loss is
 //   reported in finite time (R6). Always exit 0; the line "destroy_device" gives how long vkDestroyDevice took.
+// query-wait-abandoned: a timestamp query whose command buffer never runs, waited for with VK_QUERY_RESULT_WAIT_BIT
+//   across a device loss. Under deferred prefilling (MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=1, as the runner sets it),
+//   C resets the query and writes it, encoded at vkEndCommandBuffer. Submissions are asynchronous (forced by this
+//   mode). A first submission, empty with a fence, holds the queue's worker: its Metal command buffer acquisition
+//   returns only 300 ms later. C is submitted behind it and accepted; a thread then waits for the query's result; the
+//   device is lost 100 ms later, so that C's execution is refused and its prefilled command buffer never runs. The
+//   Lost Device section of the Vulkan specification requires the wait to return in finite time. Exit 0 when it returns
+//   within 2 s of the loss report, with VK_SUCCESS or VK_ERROR_DEVICE_LOST, 1 otherwise (the process then exits without destroying the query pool the wait
+//   still uses).
 // Exit 2 for a setup failure, 3 when the device lacks a capability.
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
@@ -1619,6 +1628,73 @@ int deviceDestroy(Context& c, bool isAfterReport) {
 	return isAfterReport && destroyMs >= 50 ? 1 : 0;
 }
 
+int queryWaitAbandoned(Context& c) {
+	installHandlerHooks(c);
+	VkQueryPoolCreateInfo queryInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+	queryInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+	queryInfo.queryCount = 1;
+	VkQueryPool queries;
+	check(vkCreateQueryPool(c.device, &queryInfo, nullptr, &queries), "vkCreateQueryPool");
+	VkCommandPool pool = commandPool(c);
+	VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+	allocation.commandPool = pool;
+	allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	allocation.commandBufferCount = 1;
+	VkCommandBuffer commands;
+	check(vkAllocateCommandBuffers(c.device, &allocation, &commands), "vkAllocateCommandBuffers");
+	VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+	check(vkBeginCommandBuffer(commands, &begin), "vkBeginCommandBuffer");
+	vkCmdResetQueryPool(commands, queries, 0, 1);
+	vkCmdWriteTimestamp(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 0);
+	check(vkEndCommandBuffer(commands), "vkEndCommandBuffer");	// prefilled: the query is encoded now
+	// The queue's worker is held by an empty submission whose Metal command buffer acquisition returns 300 ms later.
+	gAcquireDelayUs = 300000;
+	VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+	VkFence fence;
+	check(vkCreateFence(c.device, &fenceInfo, nullptr, &fence), "vkCreateFence");
+	check(vkQueueSubmit(c.qb, 0, nullptr, fence), "vkQueueSubmit (holder)");
+	VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+	submit.commandBufferCount = 1;
+	submit.pCommandBuffers = &commands;
+	VkResult submitted = vkQueueSubmit(c.qb, 1, &submit, VK_NULL_HANDLE);
+	auto start = std::chrono::steady_clock::now();
+	auto ms = [&] { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(); };
+	std::atomic<bool> returned{false};
+	std::atomic<double> returnedAt{-1};
+	VkResult waitResult = VK_NOT_READY;
+	uint64_t timestamp = 0;
+	std::thread waiter([&] {
+		waitResult = vkGetQueryPoolResults(c.device, queries, 0, 1, sizeof(timestamp), &timestamp, sizeof(timestamp),
+										   VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+		returnedAt = ms();
+		returned = true;
+	});
+	sleepMs(100);
+	bool returnedBeforeLoss = returned;
+	c.markLost(c.device);
+	double lostAt = ms();
+	VkResult idle = vkDeviceWaitIdle(c.device);	// returns once the loss is reported
+	double reportedAt = ms();
+	bool consumed = gAcquireDelayUs.exchange(0) == 0;
+	while (!returned && ms() < reportedAt + 2000) { sleepMs(5); }
+	bool reportsLoss = waitResult == VK_ERROR_DEVICE_LOST || waitResult == VK_SUCCESS;	// VK_NOT_READY is not allowed with WAIT_BIT
+	bool pass = returned && !returnedBeforeLoss && submitted == VK_SUCCESS && consumed && reportsLoss;
+	std::printf("submit=%d holder_delayed=%d waited_before_loss=%d loss_at=%.0f ms reported_at=%.0f ms (idle=%d) wait_returned=%d at=%.0f ms result=%d\n",
+				int(submitted), int(consumed), int(!returnedBeforeLoss), lostAt, reportedAt, int(idle), int(returned.load()), returnedAt.load(), int(waitResult));
+	std::printf("QUERY_WAIT %s\n", pass ? "PASS: the query wait returned once the loss was reported"
+				: !consumed || submitted != VK_SUCCESS ? "FAIL: the interleaving was not forced"
+				: returnedBeforeLoss ? "FAIL: the query wait returned before the loss"
+				: returned ? "FAIL: the query wait returned neither VK_SUCCESS nor VK_ERROR_DEVICE_LOST"
+				: "FAIL: the query wait still waits 2 s after the loss report, for a query that no command buffer will write");
+	std::fflush(stdout);
+	if (!returned) { std::_Exit(1); }	// the wait still uses the query pool: do not destroy it
+	waiter.join();
+	vkDestroyFence(c.device, fence, nullptr);
+	vkDestroyCommandPool(c.device, pool, nullptr);
+	vkDestroyQueryPool(c.device, queries, nullptr);
+	return pass ? 0 : 1;
+}
+
 // A swapchain of 3 images on a CAMetalLayer detached from any window.
 struct Presentation {
 	CAMetalLayer* layer = nil;
@@ -1799,13 +1875,15 @@ int main(int argc, char** argv) {
 	gImportedMemoryModes |= isHostSync;
 	gHostImageCopyModes = mode == "host-sync-progress-copy" || mode == "host-sync-admission-copy";
 	gPreferDiscreteGPU = isHostSync;
+	if (mode == "query-wait-abandoned") { setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "0", 1); }	// before MoltenVK reads its configuration
 	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss" && mode != "event-wait" && !isExternalWait
 		&& mode != "shared-queue-block" && mode != "timeline-listener-aba" && !isPresentation && !isFreeImported && !isTeardown && !isPrefill && !isMetalError
-		&& !isMetalErrorBatches && !isHostSync && mode != "device-destroy-after-report" && mode != "device-destroy-before-report") {
+		&& !isMetalErrorBatches && !isHostSync && mode != "device-destroy-after-report" && mode != "device-destroy-before-report"
+		&& mode != "query-wait-abandoned") {
 		std::fprintf(stderr, "usage: %s counter-race|binary-generation|destroy-after-loss|event-wait|external-queue-wait[-idle|-query]|shared-queue-block"
 					 "|timeline-listener-aba|teardown[-multi|-nil|-nil-transient]|prefill-abandon-{reset,free,pool}[-lost]"
 					 "|metal-error[-multi|-batches|-batches2|-calls]|present-scheduled-after-destroy|present-destroy-race|present-pending-destroy|free-imported-waits[-late-commit|-slow-handler]|free-imported-{late,failed}-allocation"
-					 "|host-sync-{progress,admission}-{invalidate,copy}|device-destroy-{after,before}-report\n", argv[0]);
+					 "|host-sync-{progress,admission}-{invalidate,copy}|device-destroy-{after,before}-report|query-wait-abandoned\n", argv[0]);
 		return 64;
 	}
 	@autoreleasepool {
@@ -1825,6 +1903,7 @@ int main(int argc, char** argv) {
 			: isExternalWait ? externalQueueWait(c, mode == "external-queue-wait" ? "fence" : mode.substr(std::strlen("external-queue-wait-")))
 			: mode == "shared-queue-block" ? sharedQueueBlock(c) : mode == "timeline-listener-aba" ? timelineListenerAba(c)
 			: isPresentation ? presentation(c, mode) : isFreeImported ? freeImportedWaits(c, mode) : isHostSync ? hostSync(c, mode)
+			: mode == "query-wait-abandoned" ? queryWaitAbandoned(c)
 			: isPrefill ? prefillAbandon(c, mode) : isMetalError ? metalError(c, mode)
 			: isMetalErrorBatches ? metalErrorBatches(c, mode) : destroyAfterLoss(c);
 		std::fflush(stdout);
