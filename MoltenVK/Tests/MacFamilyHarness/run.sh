@@ -78,7 +78,8 @@ say "  with test adapters: fragmentShaderBarycentric=$(cap vk.feature.fragmentSh
 
 # 3. Smoke cases: name|kind|fixture|arguments|environment|expected exit|success pattern|required capabilities|prerequisite case
 # kind: gate (no GPU submission), render (GPU work), refusal (MoltenVK must refuse before any GPU draw), measure (Metal
-# only, without MoltenVK: the probe must finish; its per-limit verdicts are data for the report).
+# only, without MoltenVK: the probe must finish; its per-limit verdicts are data for the report), metal (Metal only,
+# without MoltenVK, with a verdict).
 indirect_caps='vk.feature.fragmentShaderBarycentric vk.ext.VK_KHR_draw_indirect_count vk.feature.shaderDrawParameters vk.feature.drawIndirectFirstInstance vk.feature.multiDrawIndirect vk.feature.vertexPipelineStoresAndAtomics'
 tes_caps='vk.feature.tessellationShader vk.feature.shaderDrawParameters vk.feature.vertexPipelineStoresAndAtomics vk.feature.fragmentStoresAndAtomics vk.feature.multiDrawIndirect'
 mesh_caps='vk.feature.meshShader vk.feature.fragmentShaderBarycentric vk.feature.shaderDrawParameters vk.feature.bufferDeviceAddress'
@@ -88,8 +89,16 @@ indirect_env='PERVERTEX_TEST_TOPOLOGY=triangle-list'
 continuation_caps="$indirect_caps vk.feature.timelineSemaphore"
 continuation_env='PERVERTEX_TEST_SPLIT_PRODUCER=1 PERVERTEX_TEST_LATE_SIGNAL=1 PERVERTEX_TEST_DEPENDENT_SUBMISSION=1 PERVERTEX_TEST_WAIT_IDLE=1 MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=0'
 sync_same='MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=1 PERVERTEX_TEST_DEPENDENT_SAME_QUEUE=1'
+# Prefill abandon: a deferred prefilled command buffer, reset, freed or destroyed with its pool before any submission,
+# with or without a device loss, returns its pooled buffer exactly once and executes nothing.
+abandon_env='MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=1'
 cases=(
 	"mesh-gate|gate|mesh-draw|@SHADERS@/mesh no-adapter||0|^MESH_DRAW PASS|vk.instance|"
+	"metal-abandon|metal|abandon-probe|||0|^ABANDON_PROBE PASS|mtl.present|"
+	"prefill-abandon-reset|render|pervertex-loss|prefill-abandon-reset|$abandon_env MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=1|0|^PREFILL_ABANDON PASS|vk.feature.timelineSemaphore|metal-abandon"
+	"prefill-abandon-free|render|pervertex-loss|prefill-abandon-free|$abandon_env MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0|0|^PREFILL_ABANDON PASS|vk.feature.timelineSemaphore|metal-abandon"
+	"prefill-abandon-pool|render|pervertex-loss|prefill-abandon-pool|$abandon_env MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=1|0|^PREFILL_ABANDON PASS|vk.feature.timelineSemaphore|metal-abandon"
+	"prefill-abandon-reset-lost|render|pervertex-loss|prefill-abandon-reset-lost|$abandon_env MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0|0|^PREFILL_ABANDON PASS|vk.feature.timelineSemaphore|metal-abandon"
 	"pervertex-direct-indirect|render|pervertex-indirect-gpu|@SHADERS@/indirect draw u32 decisive compute @PREFIX@|$indirect_env PERVERTEX_TEST_SWAP_FRAGMENT=0|0|^PERVERTEX_INDIRECT PASS|$indirect_caps|"
 	"pervertex-indexed-indirect|render|pervertex-indirect-gpu|@SHADERS@/indirect indexed u32 decisive compute @PREFIX@|$indirect_env PERVERTEX_TEST_SWAP_FRAGMENT=0|0|^PERVERTEX_INDIRECT PASS|$indirect_caps|"
 	"pervertex-swap-negative|render|pervertex-indirect-gpu|@SHADERS@/indirect draw u32 decisive compute @PREFIX@|$indirect_env PERVERTEX_TEST_SWAP_FRAGMENT=1|2|pixel_mismatches=[1-9]|$indirect_caps|pervertex-direct-indirect"
@@ -161,8 +170,8 @@ for entry in "${cases[@]}"; do
 		# dyld prints the real path of every image it loads: exactly the bundled library, and no other MoltenVK.
 		loaded=$(/usr/bin/grep -cF " $root/lib/libMoltenVK.1.4.3.dylib" "$log" || true)
 		others=$(/usr/bin/grep -E '^dyld\[[0-9]+\]: ' "$log" | /usr/bin/grep 'libMoltenVK' | /usr/bin/grep -vcF " $root/lib/libMoltenVK.1.4.3.dylib" || true)
-		# The Metal probe loads no MoltenVK at all.
-		[[ $kind != measure ]] || { [[ $others == 0 && $loaded == 0 ]] && loaded=1; }
+		# The Metal probes load no MoltenVK at all.
+		[[ $kind != measure && $kind != metal ]] || { [[ $others == 0 && $loaded == 0 ]] && loaded=1; }
 		if [[ $rc == 124 ]]; then status=FAIL detail="timeout after $seconds s"
 		elif [[ $loaded == 0 || $others != 0 ]]; then status=FAIL detail='the bundled libMoltenVK was not the one loaded'
 		elif ! /usr/bin/grep -q 'Metal API Validation Enabled' "$log" || ! /usr/bin/grep -q 'Metal GPU Validation Enabled' "$log"; then status=FAIL detail='Metal API/GPU validation did not announce activation'
@@ -178,7 +187,7 @@ for entry in "${cases[@]}"; do
 $name=$status"
 	case $status in PASS) pass=$((pass + 1));; FAIL) fail=$((fail + 1));; REFUSED) refused=$((refused + 1));; SKIPPED) skipped=$((skipped + 1));; NOT-RUN) not_run=$((not_run + 1));; esac
 	say "CASE $name $status ($kind) $detail"
-	[[ ! -f ${log:-/nonexistent} || $status == SKIPPED || $status == NOT-RUN ]] || /usr/bin/grep -E '^(MESH_DRAW|TES_TOPOLOGY|PERVERTEX_INDIRECT|submission=|dependent wait|queue idle)|^  ' "$log" 2>/dev/null | head -6 | /usr/bin/sed 's/^/    /' | tee -a "$summary" || true
+	[[ ! -f ${log:-/nonexistent} || $status == SKIPPED || $status == NOT-RUN ]] || /usr/bin/grep -E '^(MESH_DRAW|TES_TOPOLOGY|PERVERTEX_INDIRECT|ABANDON_PROBE|PREFILL_ABANDON|submission=|dependent wait|queue idle)|^  ' "$log" 2>/dev/null | head -6 | /usr/bin/sed 's/^/    /' | tee -a "$summary" || true
 	[[ $name != mesh-limits || ! -f ${log:-/nonexistent} ]] || /usr/bin/grep -E '^(DEVICE|MESH_LIMIT [a-z])' "$log" | cut -c1-200 | /usr/bin/sed 's/^/    /' | tee -a "$summary" || true
 	log=
 done

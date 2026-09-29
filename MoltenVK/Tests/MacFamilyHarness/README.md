@@ -1,8 +1,8 @@
-# Harnais Mac r13 : essais M1 et M3
+# Harnais Mac r14 : essais M1 et M3
 
 Ce bundle hors ligne fait deux choses sur un Mac Apple Silicon :
 - il relève les capacités Vulkan et Metal que ce Mac expose réellement avec la bibliothèque MoltenVK fournie ;
-- il lance un smoke borné des chemins PerVertexKHR direct et indexé, indirect, TES et mesh, **seulement quand ces capacités les admettent**.
+- il lance un smoke borné des chemins PerVertexKHR direct et indexé, indirect, TES et mesh, et de l'abandon d'un command buffer Metal prérempli, **seulement quand ces capacités les admettent**.
 
 Aucune capacité n'est déduite du nom du Mac ou du GPU : ce nom est seulement noté dans le rapport.
 
@@ -25,9 +25,9 @@ L'identité de la bibliothèque est dans `PROVENANCE.txt` : commits MoltenVK et 
 Dans le répertoire où se trouvent l'archive et son fichier `.sha256` :
 
 ```bash
-shasum -a 256 -c mac-family-harness-r13.tar.gz.sha256
-tar -xzf mac-family-harness-r13.tar.gz
-cd mac-family-harness-r13
+shasum -a 256 -c mac-family-harness-r14.tar.gz.sha256
+tar -xzf mac-family-harness-r14.tar.gz
+cd mac-family-harness-r14
 ./run.sh --verify-only
 ./run.sh --smoke
 ```
@@ -52,6 +52,8 @@ xattr -dr com.apple.quarantine .
 | Cas | Chemin | Exige |
 | --- | --- | --- |
 | `mesh-gate` | extensions mesh et barycentrique fermées sans adaptateur ; aucun travail GPU | instance Vulkan |
+| `metal-abandon` | Metal seul, sans MoltenVK : sur une file de 4 places, 64 command buffers encodés puis relâchés sans `enqueue` ni `commit` rendent leur place et n'exécutent rien ; un command buffer témoin validé ensuite s'exécute. Le nombre d'appels, par Metal, des handlers des command buffers abandonnés est une donnée, pas un verdict | périphérique Metal |
+| `prefill-abandon-reset`, `-free`, `-pool`, `-reset-lost` | command buffer Vulkan prérempli (`MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=1`) réinitialisé, libéré ou détruit avec son pool avant toute soumission, avec ou sans perte du périphérique : rien ne s'exécute, et son buffer de pool revient **une seule fois** (seulement si `metal-abandon` réussit) | `timelineSemaphore` |
 | `pervertex-direct-indirect` | draws PerVertexKHR **directs**, validés contre un oracle CPU, puis `vkCmdDrawIndirect` comparé octet par octet | barycentrique, `VK_KHR_draw_indirect_count`, `shaderDrawParameters`, `drawIndirectFirstInstance`, `multiDrawIndirect`, `vertexPipelineStoresAndAtomics` |
 | `pervertex-indexed-indirect` | draws PerVertexKHR **indexés**, puis `vkCmdDrawIndexedIndirect` | idem |
 | `pervertex-swap-negative` | témoin : fragment aux coins échangés, **doit** échouer (sortie 2, pixels différents) | idem, et le cas direct réussi |
@@ -70,7 +72,7 @@ Tous les cas exigent aussi que la validation Metal soit active : la sonde vérif
 **Bornes :**
 - un seul processus de test à la fois ;
 - 40 secondes au plus par cas (240 pour `mesh-limits`), plus 1 seconde d'arrêt forcé ;
-- 19 cas, sans matrice automatique ;
+- 24 cas, sans matrice automatique ;
 - le premier `FAIL` arrête tous les cas GPU suivants (`NOT-RUN`).
 
 Ces bornes ne peuvent pas rattraper un blocage du système ou du GPU.
@@ -107,7 +109,7 @@ Elles contiennent :
 ## Contenu
 
 - `lib/` : la bibliothèque de test, avec sa signature d'éditeur de liens d'origine (ne pas la re-signer).
-- `bin/` : la sonde et les trois fixtures, signées ad hoc, liées à `@executable_path/../lib`, et la sonde Metal `mesh-limits`, qui ne charge pas MoltenVK.
+- `bin/` : la sonde et les quatre fixtures, signées ad hoc, liées à `@executable_path/../lib`, et les sondes Metal `mesh-limits` et `abandon-probe`, qui ne chargent pas MoltenVK.
 - `shaders/` : le SPIR-V.
 - `source/` : les sources de la sonde, du runner, des fixtures et des shaders, pour référence.
 - `PROVENANCE.txt`, `SHA256SUMS` : identité et empreintes. Ces sommes détectent une corruption, mais n'authentifient pas l'éditeur.
