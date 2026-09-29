@@ -80,7 +80,8 @@ library mutation-winding ON ON 's/uint slot = p\[2\] && corner \? 3 - corner : c
 library mutation-interior ON ON 's/14563 \* q/16384 * q/g'
 library mutation-offset ON ON 's/uint key = offsets\[i\] \+ triangle;/uint key = triangle;/'
 library mutation-helper-missing ON ON 's/kernel void tessLevelsToHalfFactors\(/kernel void tessLevelsToHalfFactorsUnavailable(/'
-library mutation-first-origin ON ON 's/MTLRegionMake2D\(firstVertex, firstInstance, vertexCount, 1\)/MTLRegionMake2D(0, 0, vertexCount, 1)/' MVKCmdDraw.mm
+library mutation-first-vertex-origin ON ON 's/MTLRegionMake2D\(firstVertex, firstInstance, vertexCount, 1\)/MTLRegionMake2D(0, firstInstance, vertexCount, 1)/' MVKCmdDraw.mm
+library mutation-first-instance-origin ON ON 's/MTLRegionMake2D\(firstVertex, firstInstance, vertexCount, 1\)/MTLRegionMake2D(firstVertex, 0, vertexCount, 1)/' MVKCmdDraw.mm
 
 cases=0
 check_log() { # log expected-exit actual-exit required...
@@ -111,7 +112,8 @@ pilot() { # library mode fragment [control]
 for winding in ccw cw; do
 	for scenario in f1 f2 f3 next mixed nan fraction cull drawid seam1 seam2 seam3; do topology dev "$scenario" "$winding" 0 "TES_TOPOLOGY PASS"; done
 	topology dev resources "$winding" 0 "TES_TOPOLOGY PASS" "VS storage counter: expected=9 ordinary=9 pervertex=9"
-	topology dev first "$winding" 0 "TES_TOPOLOGY PASS" "VS storage sums: expected vertex=33 instance=6; ordinary vertex=33 instance=6; pervertex vertex=33 instance=6"
+	first_sums="vertex=33 instance=6 tag=42 base_vertex=18 base_instance=6"
+	topology dev first "$winding" 0 "TES_TOPOLOGY PASS" "VS storage sums: expected $first_sums; ordinary $first_sums; pervertex $first_sums"
 	for count in 1 2 4 5; do topology dev "vertices$count" "$winding" 0 "TES_TOPOLOGY PASS" "VS storage counter: expected=$count ordinary=$count pervertex=$count"; done
 	for scenario in level4 nonuniform inner-nan; do topology dev "$scenario" "$winding" 0 "TES_TOPOLOGY PASS" "PerVertex TES draw was not rendered"; done
 done
@@ -155,8 +157,10 @@ topology mutation-winding cull ccw 2 "FAIL PerVertex replay matches ordinary TES
 topology mutation-winding f3 ccw 2 "FAIL ordered PerVertex values match the CPU model"
 topology mutation-interior f3 ccw 2 "FAIL PerVertex coordinates and positions bitwise equal to the hardware tessellator's"
 topology mutation-offset mixed ccw 2 "FAIL PerVertex replay matches ordinary TES coverage"
-# Stage-in origin ignored: the decoy vertices and instance 0 reach the VS, so the image and the VS sums differ.
-topology mutation-first-origin first ccw 2 "FAIL PerVertex replay matches ordinary TES coverage" "FAIL gl_VertexIndex and gl_InstanceIndex start at firstVertex"
+# One stage-in origin coordinate ignored at a time: the decoy vertices, or instance 0 and its tag, reach the VS, so the
+# image and the VS sums of that coordinate differ while those of the other coordinate stay exact.
+topology mutation-first-vertex-origin first ccw 2 "FAIL PerVertex replay matches ordinary TES coverage" "pervertex vertex=15 instance=6 tag=42 base_vertex=0 base_instance=6"
+topology mutation-first-instance-origin first ccw 2 "FAIL PerVertex replay matches ordinary TES coverage" "pervertex vertex=33 instance=0 tag=36 base_vertex=18 base_instance=0"
 topology mutation-helper-missing ordinary-levels-direct ccw 1 "Could not find support compute shader function tessLevelsToHalfFactors" "ERROR: Create pipeline case0-levels: -3"
 # 5. The float32 level ABI is live in the PerVertex TCS and TES compute kernels.
 mkdir -p "$output/dump"
