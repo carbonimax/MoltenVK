@@ -38,6 +38,22 @@
 //   Exit 0 when the loss is reported within 2 s and C never runs after that report; 1 otherwise, with
 //   "LOSS_NOT_REPORTED" when the wait timed out, or "RAN_AFTER_REPORT" when C ran after the loss was reported.
 //   No safe runtime meets both today (see the report): this mode reproduces that blocker.
+// external-queue-wait-idle, external-queue-wait-query: the same, but the host wait has no timeout: vkQueueWaitIdle, or
+//   vkGetQueryPoolResults with VK_QUERY_RESULT_WAIT_BIT on a timestamp C writes. The Lost Device section of the Vulkan
+//   specification requires both to return in finite time, with VK_SUCCESS or VK_ERROR_DEVICE_LOST. The wait runs on a
+//   thread, given 2 s; the outcomes and the exit code are those of external-queue-wait.
+// shared-queue-block: a second VkDevice is created on the same physical device, and the test checks that its queue
+//   exports the same MTLCommandQueue as queue B of the first. The application commits four command buffers that wait a
+//   MTLSharedEvent to that Metal queue, and the first device is lost. The second device, healthy, then submits and waits
+//   for a fence, on a thread given 2 s. Exit 0 when that submission completes; 1 with "SHARED_QUEUE BLOCKED" otherwise.
+//   With MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE=4 (the runner's setting), the four fill the Metal queue:
+//   a synchronous vkQueueSubmit blocks acquiring a Metal command buffer. With more places, it returns, and the work waits
+//   behind the first device's in the Metal queue's order. The line "submit_returned_in_2s" tells the two apart.
+// timeline-listener-aba: no device loss. vkWaitSemaphores waits value n + 1 of an imported timeline semaphore for 10 ms
+//   and times out, leaving its Metal event listener registered; a second vkWaitSemaphores from the same call site then
+//   waits value n + 2, while another thread raises the event to n + 1 only. Exit 0 when the second wait never reports
+//   success below n + 2, over 5 rounds; 1 when it does: the first listener, keyed by the address of a waiter that no
+//   longer exists, woke the second one.
 // prefill-abandon-reset, -free, -pool, and the same with -lost: under MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=1, a
 //   command buffer recorded with vkCmdUpdateBuffer, whose data MoltenVK copies to a pooled Metal buffer, is never
 //   submitted, then reset, freed, or destroyed with its pool (after a device loss with -lost). Exit 0 when the update
@@ -134,6 +150,44 @@ struct Context {
 	}
 };
 
+// A device with queues A and B as createContext() chooses them; queue B has the same family and index on every device.
+VkDevice createLogicalDevice(const Context& c, VkQueue* qa, VkQueue* qb) {
+	float priorities[] = {1.0f, 1.0f};
+	VkDeviceQueueCreateInfo queues[2] = {{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}, {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}};
+	queues[0].queueFamilyIndex = c.familyA;
+	queues[0].queueCount = c.familyA == c.familyB ? 2 : 1;
+	queues[0].pQueuePriorities = priorities;
+	queues[1].queueFamilyIndex = c.familyB;
+	queues[1].queueCount = 1;
+	queues[1].pQueuePriorities = priorities;
+	VkPhysicalDeviceTimelineSemaphoreFeatures timeline{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
+	timeline.timelineSemaphore = VK_TRUE;
+	VkPhysicalDeviceSynchronization2Features synchronization2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES};
+	synchronization2.synchronization2 = VK_TRUE;
+	timeline.pNext = &synchronization2;	// vkQueueSubmit2 in the metal-error-batches2 mode
+	const char* extensions[] = {VK_EXT_METAL_OBJECTS_EXTENSION_NAME, "VK_KHR_portability_subset"};
+	VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+	deviceInfo.pNext = &timeline;
+	deviceInfo.queueCreateInfoCount = c.familyA == c.familyB ? 1 : 2;
+	deviceInfo.pQueueCreateInfos = queues;
+	deviceInfo.enabledExtensionCount = 2;
+	deviceInfo.ppEnabledExtensionNames = extensions;
+	VkDevice device;
+	check(vkCreateDevice(c.physical, &deviceInfo, nullptr, &device), "vkCreateDevice");
+	vkGetDeviceQueue(device, c.familyA, 0, qa);
+	vkGetDeviceQueue(device, c.familyB, c.familyA == c.familyB ? 1 : 0, qb);
+	return device;
+}
+
+id<MTLCommandQueue> exportedQueue(VkDevice device, VkQueue queue) {
+	VkExportMetalCommandQueueInfoEXT queueInfo{VK_STRUCTURE_TYPE_EXPORT_METAL_COMMAND_QUEUE_INFO_EXT};
+	queueInfo.queue = queue;
+	VkExportMetalObjectsInfoEXT exportInfo{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT};
+	exportInfo.pNext = &queueInfo;
+	vkExportMetalObjectsEXT(device, &exportInfo);
+	return queueInfo.mtlCommandQueue;
+}
+
 Context createContext() {
 	Context c;
 	const char* portability = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
@@ -165,29 +219,7 @@ Context createContext() {
 	}
 	if (c.familyB == UINT32_MAX && c.familyA != UINT32_MAX && families[c.familyA].queueCount >= 2) { c.familyB = c.familyA; }
 	if (c.familyB == UINT32_MAX) { std::fprintf(stderr, "Need two Vulkan queues\n"); std::exit(3); }
-	float priorities[] = {1.0f, 1.0f};
-	VkDeviceQueueCreateInfo queues[2] = {{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}, {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}};
-	queues[0].queueFamilyIndex = c.familyA;
-	queues[0].queueCount = c.familyA == c.familyB ? 2 : 1;
-	queues[0].pQueuePriorities = priorities;
-	queues[1].queueFamilyIndex = c.familyB;
-	queues[1].queueCount = 1;
-	queues[1].pQueuePriorities = priorities;
-	VkPhysicalDeviceTimelineSemaphoreFeatures timeline{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
-	timeline.timelineSemaphore = VK_TRUE;
-	VkPhysicalDeviceSynchronization2Features synchronization2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES};
-	synchronization2.synchronization2 = VK_TRUE;
-	timeline.pNext = &synchronization2;	// vkQueueSubmit2 in the metal-error-batches2 mode
-	const char* extensions[] = {VK_EXT_METAL_OBJECTS_EXTENSION_NAME, "VK_KHR_portability_subset"};
-	VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-	deviceInfo.pNext = &timeline;
-	deviceInfo.queueCreateInfoCount = c.familyA == c.familyB ? 1 : 2;
-	deviceInfo.pQueueCreateInfos = queues;
-	deviceInfo.enabledExtensionCount = 2;
-	deviceInfo.ppEnabledExtensionNames = extensions;
-	check(vkCreateDevice(c.physical, &deviceInfo, nullptr, &c.device), "vkCreateDevice");
-	vkGetDeviceQueue(c.device, c.familyA, 0, &c.qa);
-	vkGetDeviceQueue(c.device, c.familyB, c.familyA == c.familyB ? 1 : 0, &c.qb);
+	c.device = createLogicalDevice(c, &c.qa, &c.qb);
 	VkExportMetalDeviceInfoEXT metalDevice{VK_STRUCTURE_TYPE_EXPORT_METAL_DEVICE_INFO_EXT};
 	VkExportMetalObjectsInfoEXT exportInfo{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT};
 	exportInfo.pNext = &metalDevice;
@@ -851,17 +883,15 @@ int metalError(Context& c, const std::string& variant) {
 	return pass ? 0 : 1;
 }
 
-int externalQueueWait(Context& c) {
-	VkExportMetalCommandQueueInfoEXT queueInfo{VK_STRUCTURE_TYPE_EXPORT_METAL_COMMAND_QUEUE_INFO_EXT};
-	queueInfo.queue = c.qb;
-	VkExportMetalObjectsInfoEXT exportInfo{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT};
-	exportInfo.pNext = &queueInfo;
-	vkExportMetalObjectsEXT(c.device, &exportInfo);
-	if (!queueInfo.mtlCommandQueue) { std::fprintf(stderr, "No exported MTLCommandQueue\n"); return 3; }
+// variant: "fence" (vkWaitForFences bounded at 2 s), "idle" (vkQueueWaitIdle) or "query" (vkGetQueryPoolResults with
+// VK_QUERY_RESULT_WAIT_BIT), the last two without a timeout of their own, on a thread given 2 s.
+int externalQueueWait(Context& c, const std::string& variant) {
+	id<MTLCommandQueue> mtlQueue = exportedQueue(c.device, c.qb);
+	if (!mtlQueue) { std::fprintf(stderr, "No exported MTLCommandQueue\n"); return 3; }
 	id<MTLSharedEvent> unknown = [c.mtlDevice newSharedEvent];
 	id<MTLBuffer> externalMarker = [c.mtlDevice newBufferWithLength: 64 options: MTLResourceStorageModeShared];
 	std::memset(externalMarker.contents, 0, 64);
-	id<MTLCommandBuffer> external = [queueInfo.mtlCommandQueue commandBuffer];
+	id<MTLCommandBuffer> external = [mtlQueue commandBuffer];
 	[external encodeWaitForEvent: unknown value: 1];
 	id<MTLBlitCommandEncoder> blit = [external blitCommandEncoder];
 	[blit fillBuffer: externalMarker range: NSMakeRange(0, 4) value: 0xA5];
@@ -877,7 +907,16 @@ int externalQueueWait(Context& c) {
 	check(vkAllocateCommandBuffers(c.device, &allocation, &commands), "vkAllocateCommandBuffers");
 	VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
 	check(vkBeginCommandBuffer(commands, &begin), "vkBeginCommandBuffer");
+	VkQueryPool queries = VK_NULL_HANDLE;
+	if (variant == "query") {
+		VkQueryPoolCreateInfo queryInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+		queryInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+		queryInfo.queryCount = 1;
+		check(vkCreateQueryPool(c.device, &queryInfo, nullptr, &queries), "vkCreateQueryPool");
+		vkCmdResetQueryPool(commands, queries, 0, 1);
+	}
 	vkCmdFillBuffer(commands, marker.buffer, 0, 4, kMarker);
+	if (queries) { vkCmdWriteTimestamp(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries, 0); }
 	check(vkEndCommandBuffer(commands), "vkEndCommandBuffer");
 	VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
 	VkFence fence;
@@ -891,28 +930,149 @@ int externalQueueWait(Context& c) {
 	VkResult fenceBeforeLoss = vkGetFenceStatus(c.device, fence);
 	c.markLost(c.device);
 	auto start = std::chrono::steady_clock::now();
-	VkResult report = vkWaitForFences(c.device, 1, &fence, VK_TRUE, 2000000000ull);
+	VkResult report = VK_TIMEOUT;
+	std::atomic<bool> waited{false};
+	VkResult threadResult = VK_NOT_READY;
+	uint64_t timestamp = 0;
+	std::thread waiter;
+	if (variant == "fence") {
+		report = vkWaitForFences(c.device, 1, &fence, VK_TRUE, 2000000000ull);
+	} else {
+		waiter = std::thread([&] {
+			threadResult = variant == "idle" ? vkQueueWaitIdle(c.qb)
+				: vkGetQueryPoolResults(c.device, queries, 0, 1, sizeof(timestamp), &timestamp, sizeof(timestamp), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+			waited = true;
+		});
+		while (!waited && std::chrono::steady_clock::now() - start < std::chrono::seconds(2)) { sleepMs(1); }
+		if (waited) { report = threadResult; }
+	}
 	double reportMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 	uint32_t markerAtReport = marker.mapped[0];
 	// The application releases its own work, as it eventually would.
 	unknown.signaledValue = 1;
 	[external waitUntilCompleted];
+	if (waiter.joinable()) { waiter.join(); }
 	VkResult late = vkWaitForFences(c.device, 1, &fence, VK_TRUE, 5000000000ull);
 	sleepMs(100);
 	uint32_t markerLater = marker.mapped[0];
 	bool reported = report == VK_ERROR_DEVICE_LOST;
 	bool ranAfterReport = reported && markerAtReport != kMarker && markerLater == kMarker;
-	std::printf("C_before_loss: fence=%d marker=%08x; wait_after_loss=%d in %.0f ms marker_C=%08x; after external signal: wait=%d marker_C=%08x\n",
-				int(fenceBeforeLoss), markerBeforeLoss, int(report), reportMs, markerAtReport, int(late), markerLater);
+	std::printf("C_before_loss: fence=%d marker=%08x; %s wait_after_loss=%d in %.0f ms marker_C=%08x; after external signal: wait=%d%s marker_C=%08x\n",
+				int(fenceBeforeLoss), markerBeforeLoss, variant.c_str(), int(report), reportMs, markerAtReport, int(late),
+				variant == "fence" ? "" : (" host_wait=" + std::to_string(int(threadResult))).c_str(), markerLater);
 	std::printf("EXTERNAL_QUEUE_WAIT %s\n", !reported ? "LOSS_NOT_REPORTED: the loss waits for C, which waits for the application's Metal work"
 				: ranAfterReport ? "RAN_AFTER_REPORT: C ran after the loss was reported, on resources the application could destroy"
 				: "PASS: the loss was reported and C did not run after it");
 	vkDestroyFence(c.device, fence, nullptr);
+	if (queries) { vkDestroyQueryPool(c.device, queries, nullptr); }
 	vkDestroyCommandPool(c.device, pool, nullptr);
 	c.destroy(marker);
 	[externalMarker release];
 	[unknown release];
 	return reported && !ranAfterReport && fenceBeforeLoss == VK_NOT_READY ? 0 : 1;
+}
+
+int sharedQueueBlock(Context& c) {
+	constexpr int kHeld = 4;	// as many as MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE, as the runner sets it
+	VkQueue otherQa, otherQb;
+	VkDevice other = createLogicalDevice(c, &otherQa, &otherQb);
+	id<MTLCommandQueue> mtlQueue = exportedQueue(c.device, c.qb), otherMTLQueue = exportedQueue(other, otherQb);
+	if (!mtlQueue || !otherMTLQueue) { std::fprintf(stderr, "No exported MTLCommandQueue\n"); return 3; }
+	bool isShared = mtlQueue == otherMTLQueue;
+	// The application holds every place of the first device's Metal queue B.
+	id<MTLSharedEvent> unknown = [c.mtlDevice newSharedEvent];
+	std::vector<id<MTLCommandBuffer>> held;
+	for (int i = 0; i < kHeld; ++i) {
+		id<MTLCommandBuffer> external = [[mtlQueue commandBuffer] retain];
+		[external encodeWaitForEvent: unknown value: 1];
+		[external commit];
+		held.push_back(external);
+	}
+	c.markLost(c.device);
+	// The second device, which nothing lost, submits to its own queue B.
+	VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+	poolInfo.queueFamilyIndex = c.familyB;
+	VkCommandPool pool;
+	check(vkCreateCommandPool(other, &poolInfo, nullptr, &pool), "vkCreateCommandPool");
+	VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+	allocation.commandPool = pool;
+	allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	allocation.commandBufferCount = 1;
+	VkCommandBuffer commands;
+	check(vkAllocateCommandBuffers(other, &allocation, &commands), "vkAllocateCommandBuffers");
+	VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+	check(vkBeginCommandBuffer(commands, &begin), "vkBeginCommandBuffer");
+	check(vkEndCommandBuffer(commands), "vkEndCommandBuffer");
+	VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+	VkFence fence;
+	check(vkCreateFence(other, &fenceInfo, nullptr, &fence), "vkCreateFence");
+	std::atomic<bool> done{false}, hasSubmitted{false};
+	VkResult submitted = VK_NOT_READY, waitedResult = VK_NOT_READY;
+	auto start = std::chrono::steady_clock::now();
+	std::thread submitter([&] {
+		VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+		submit.commandBufferCount = 1;
+		submit.pCommandBuffers = &commands;
+		submitted = vkQueueSubmit(otherQb, 1, &submit, fence);
+		hasSubmitted = true;
+		waitedResult = vkWaitForFences(other, 1, &fence, VK_TRUE, UINT64_MAX);
+		done = true;
+	});
+	while (!done && std::chrono::steady_clock::now() - start < std::chrono::seconds(2)) { sleepMs(1); }
+	bool completedInTime = done, submittedInTime = hasSubmitted;
+	double elapsedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+	// The application releases its own work, as it eventually would.
+	unknown.signaledValue = 1;
+	for (id<MTLCommandBuffer> external : held) { [external waitUntilCompleted]; [external release]; }
+	submitter.join();
+	std::printf("shared_mtl_queue=%d external_command_buffers=%d first_device_lost=1 second_device: submit_returned_in_2s=%d completed_in_2s=%d after %.0f ms, submit=%d wait=%d (after release)\n",
+				int(isShared), kHeld, int(submittedInTime), int(completedInTime), elapsedMs, int(submitted), int(waitedResult));
+	std::printf("SHARED_QUEUE %s\n", completedInTime ? "PASS: the second device's submission completed"
+				: !isShared ? "BLOCKED: the second device's submission did not complete, on a Metal queue of its own"
+				: submittedInTime ? "BLOCKED: the second device's work waits behind the first device's in the Metal queue they share"
+				: "BLOCKED: the second device waits for places of the Metal queue it shares with the first device");
+	vkDestroyFence(other, fence, nullptr);
+	vkDestroyCommandPool(other, pool, nullptr);
+	vkDestroyDevice(other, nullptr);
+	[unknown release];
+	return completedInTime ? 0 : 1;
+}
+
+int timelineListenerAba(Context& c) {
+	id<MTLSharedEvent> event = [c.mtlDevice newSharedEvent];
+	event.signaledValue = 0;
+	VkSemaphore timeline = importedSemaphore(c, event, true);
+	// Both waits come from this call site, so that MoltenVK's waiter object is at the same stack address each time.
+	auto waitFor = [&](uint64_t value, uint64_t timeout) {
+		VkSemaphoreWaitInfo info{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+		info.semaphoreCount = 1;
+		info.pSemaphores = &timeline;
+		info.pValues = &value;
+		return vkWaitSemaphores(c.device, &info, timeout);
+	};
+	constexpr int kRounds = 5;
+	int spurious = 0;
+	for (int round = 0; round < kRounds; ++round) {
+		uint64_t base = 2 * uint64_t(round);
+		event.signaledValue = base;
+		VkResult first = waitFor(base + 1, 10000000ull);		// times out, its listener stays registered at base + 1
+		std::thread signaler([&] { sleepMs(100); event.signaledValue = base + 1; });
+		auto start = std::chrono::steady_clock::now();
+		VkResult second = waitFor(base + 2, 1000000000ull);	// base + 2 is never reached in this round
+		double secondMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+		signaler.join();
+		uint64_t counter = 0;
+		check(vkGetSemaphoreCounterValue(c.device, timeline, &counter), "vkGetSemaphoreCounterValue");
+		bool isSpurious = second == VK_SUCCESS && counter < base + 2;
+		spurious += isSpurious;
+		std::printf("round=%d first=%d second=%d in %.0f ms counter=%llu%s\n", round, int(first), int(second), secondMs,
+					(unsigned long long)counter, isSpurious ? " SPURIOUS" : "");
+	}
+	std::printf("TIMELINE_LISTENER %s\n", spurious ? "FAIL: a wait reported success below its value, woken by an earlier wait's listener"
+				: "PASS: no wait reported success below its value");
+	vkDestroySemaphore(c.device, timeline, nullptr);
+	[event release];
+	return spurious ? 1 : 0;
 }
 
 }  // namespace
@@ -926,10 +1086,12 @@ int main(int argc, char** argv) {
 	}
 	bool isMetalError = mode == "metal-error" || mode == "metal-error-multi";
 	bool isMetalErrorBatches = mode == "metal-error-batches" || mode == "metal-error-batches2" || mode == "metal-error-calls";
-	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss" && mode != "event-wait" && mode != "external-queue-wait"
-		&& !isTeardown && !isPrefill && !isMetalError && !isMetalErrorBatches) {
-		std::fprintf(stderr, "usage: %s counter-race|binary-generation|destroy-after-loss|event-wait|external-queue-wait|teardown[-multi|-nil|-nil-transient]"
-					 "|prefill-abandon-{reset,free,pool}[-lost]|metal-error[-multi|-batches|-batches2|-calls]\n", argv[0]);
+	bool isExternalWait = mode == "external-queue-wait" || mode == "external-queue-wait-idle" || mode == "external-queue-wait-query";
+	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss" && mode != "event-wait" && !isExternalWait
+		&& mode != "shared-queue-block" && mode != "timeline-listener-aba" && !isTeardown && !isPrefill && !isMetalError && !isMetalErrorBatches) {
+		std::fprintf(stderr, "usage: %s counter-race|binary-generation|destroy-after-loss|event-wait|external-queue-wait[-idle|-query]|shared-queue-block"
+					 "|timeline-listener-aba|teardown[-multi|-nil|-nil-transient]|prefill-abandon-{reset,free,pool}[-lost]"
+					 "|metal-error[-multi|-batches|-batches2|-calls]\n", argv[0]);
 		return 64;
 	}
 	@autoreleasepool {
@@ -940,7 +1102,9 @@ int main(int argc, char** argv) {
 			return rc;
 		}
 		int rc = mode == "counter-race" ? counterRace(c) : mode == "binary-generation" ? binaryGeneration(c)
-			: mode == "event-wait" ? eventWait(c) : mode == "external-queue-wait" ? externalQueueWait(c)
+			: mode == "event-wait" ? eventWait(c)
+			: isExternalWait ? externalQueueWait(c, mode == "external-queue-wait" ? "fence" : mode.substr(std::strlen("external-queue-wait-")))
+			: mode == "shared-queue-block" ? sharedQueueBlock(c) : mode == "timeline-listener-aba" ? timelineListenerAba(c)
 			: isPrefill ? prefillAbandon(c, mode) : isMetalError ? metalError(c, mode)
 			: isMetalErrorBatches ? metalErrorBatches(c, mode) : destroyAfterLoss(c);
 		std::fflush(stdout);
