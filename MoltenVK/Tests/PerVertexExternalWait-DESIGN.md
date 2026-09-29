@@ -30,6 +30,7 @@ Deux voies sont écartées, pour les raisons déjà données au rapport :
 | Réutilisation des pools pendant la perte | Command buffers, descriptor sets, requêtes, allocations temporaires (§3.4) | Signalée, non traitée |
 | *Trouvé en plus* : attentes de complétion bloquantes | `vkQueueWaitIdle`, `vkDeviceWaitIdle`, `vkInvalidateMappedMemoryRanges` et `vkCopyImageToMemoryEXT` appellent `waitUntilCompleted` (§3.3) | G1 resterait faux pour ces appels, même avec une publication en temps fini |
 | *Trouvé en plus* : la surface du swapchain | `MVKSwapchain::destroy()` écrit dans `_surface`, que le swapchain ne retient pas (§3.1) | Un swapchain différé toucherait une surface détruite entre-temps |
+| *Trouvé en plus* : le job de publication de la perte | `publishLoss()` s'exécute sur `_lossPublisher` après `markLost()`, puis commit un command buffer de secours (§3.2) | Un device supprimé dès que les compteurs sont à zéro pourrait l'être sous ce job |
 
 ## 3. Faits relevés
 
@@ -51,9 +52,11 @@ Deux voies sont écartées, pour les raisons déjà données au rapport :
 
 ### 3.2 Acquisitions de command buffers Metal
 
-Un seul site appelle Metal : `MVKQueue::getMTLCommandBuffer()` (`MVKQueue.mm:220`). La file est créée avec `maxActiveMetalCommandBuffersPerQueue` places (`MVKQueue.mm:43-44`).
+Deux sites acquièrent un command buffer Metal :
+- `MVKQueue::getMTLCommandBuffer()` (`MVKQueue.mm:220`), sur les files du device. Elles sont créées avec `maxActiveMetalCommandBuffersPerQueue` places (`MVKQueue.mm:43-44`). C'est le site qui peut bloquer.
+- `MVKDevice::releaseSemaphoreWaitsAfterLoss()` (`MVKDevice.mm:4073`), sur la file de secours du device physique (`MVKDevice.mm:3821`, 64 places par défaut). Cette file ne porte jamais de travail de l'application, seulement les signaux qui libèrent les attentes Metal après une perte ; ses command buffers ne font que signaler des événements, donc elle ne sature pas. Elle n'a pas besoin de R2. Ses handlers sont comptés par `commitMTLCommandBuffer()`, donc elle entre dans R5.
 
-Ses appelants :
+Les appelants de `MVKQueue::getMTLCommandBuffer()` :
 - pendant un encodage de soumission, compté dans `_activeEncodings` : `getActiveMTLCommandBuffer()` et `continueOnNewMTLCommandBuffer()` ;
 - sur le fil de l'application : `vkBeginCommandBuffer` avec préremplissage (`MVKCommandBuffer.mm:188`). Le command buffer prérempli garde sa place jusqu'à sa fin, ou jusqu'à son abandon ;
 - `waitIdle()` (`MVKQueue.mm:204`), l'acquisition d'image (`MVKImage.mm:1615`), la présentation (`MVKQueue.mm:910`) ;
@@ -110,13 +113,15 @@ Si le dernier handler supprimait le device, cette suppression s'exécuterait dan
 ### R1. Destruction différée, avant toute libération
 
 1. `MVKVulkanAPIDeviceObject::destroy()` devient `final` :
-   - si le device est en perte (`isLosing()`), l'objet est ajouté à une liste FIFO du device, et `destroy()` rend la main sans rien libérer ;
-   - sinon, il appelle `destroyNow()`.
+   - si le device est en perte (`isLosing()`) **et n'est pas en cours de retrait**, l'objet est ajouté à une liste FIFO du device, et `destroy()` rend la main sans rien libérer ;
+   - sinon, il appelle `destroyNow()`. C'est aussi le cas quand l'objet n'a plus de device : `MVKSwapchainImage::detachSwapchain()` met `_device` à nul (`MVKImage.mm:1545`).
 2. `virtual void destroyNow()` fait par défaut `MVKVulkanAPIObject::destroy()`.
    - Les 7 surcharges du §3.1 deviennent des surcharges de `destroyNow()` ; leur corps ne change pas.
    - `final` fait refuser par le compilateur toute nouvelle surcharge de `destroy()` : une sous-classe future ne peut plus contourner le report.
 3. Le retrait du device (R5) vide la liste **dans l'ordre FIFO**, avant de démonter quoi que ce soit : il appelle `destroyNow()` sur chaque objet. L'ordre de destruction de l'application est ainsi rejoué (un buffer avant sa mémoire, par exemple).
-4. Les destructions internes au device passent aussi par `destroy()` : images de transfert du pool d'encodage, images présentables. Elles sont donc reportées aussi.
+   - Il vide la liste **jusqu'à ce qu'elle soit vide**, sans en prendre d'instantané.
+   - Pendant le retrait, `destroy()` ne diffère plus rien (point 1). Les objets que détruisent les `destroyNow()` vidés, ou `~MVKDevice` lui-même, sont donc détruits aussitôt : les images de transfert de `MVKCommandEncodingPool::destroyMetalResources()`, les images présentables d'un swapchain différé.
+4. Les destructions internes au device, avant son retrait, passent aussi par `destroy()` : images de transfert du pool d'encodage, images présentables. Pendant une perte, elles sont donc reportées aussi.
 5. **Le swapchain retient sa surface**, de sa création à son destructeur. Il en va de même pour tout objet différé qui garde un objet de l'instance.
 
 Destruction en course avec le début de la perte : un objet détruit juste avant, alors que du travail en attente l'utilise, reste un usage invalide de l'application. Ce cas est inchangé.
@@ -126,6 +131,7 @@ Destruction en course avec le début de la perte : un objet détruit juste avant
 1. Chaque `MVKQueue` compte ses command buffers Metal en cours.
    - Une place est prise à l'acquisition.
    - Elle est rendue à la fin du dernier handler d'un command buffer commité, ou à l'abandon d'un command buffer jamais mis en file.
+   - La place d'un command buffer commité est rendue par le handler de la file, enregistré à l'acquisition (`MVKQueue.mm:226`). Ce handler s'exécute dans la liste du device, donc **avant** le décrément de `_pendingMTLCommandBufferHandlers` : la file appartient au device, qui peut être retiré après ce décrément.
 2. La `MTLCommandQueue` est créée avec **deux fois** `maxActiveMetalCommandBuffersPerQueue` places. MoltenVK n'en prend que `maxActiveMetalCommandBuffersPerQueue`.
    - La marge couvre le délai entre la place rendue par MoltenVK et celle rendue par Metal, ainsi que les références autorelease en retard.
    - Elle couvre aussi jusqu'à `maxActiveMetalCommandBuffersPerQueue` command buffers de l'application sur la file exportée.
@@ -155,16 +161,20 @@ Destruction en course avec le début de la perte : un objet détruit juste avant
 
 ### R5. Vie du device, et suppression hors des callbacks
 
-1. Le device se supprime quand quatre conditions sont réunies :
+1. Le device se supprime quand cinq conditions sont réunies :
    - l'application a appelé `vkDestroyDevice` ;
    - aucun encodage n'est en cours (`_activeEncodings`) ;
    - aucun handler n'est en attente (`_pendingMTLCommandBufferHandlers`) ;
-   - aucun écouteur `MTLSharedEvent` n'est enregistré (compteur nouveau).
+   - aucun écouteur `MTLSharedEvent` n'est enregistré (compteur nouveau) ;
+   - aucun job de publication de la perte n'est en file ou en cours sur `_lossPublisher` (compteur nouveau, pris dans `markLost()` avant le `dispatch_async`). Sans cette condition, les quatre autres peuvent être à zéro pendant que le job attend. Or `publishLoss()` commit ensuite le command buffer de secours (`MVKDevice.mm:4073`) : le device serait supprimé sous un job en cours, avant les handlers de ce command buffer.
 2. `vkDestroyDevice` :
    - si les compteurs sont à zéro, supprime le device sur place, comme aujourd'hui : une application normale garde une destruction synchrone ;
    - sinon, rend la main.
 3. Le dernier décrément qui ramène tout à zéro met la suppression en file sur une **file de dispatch série de MoltenVK**, commune au processus. La suppression ne s'exécute jamais dans un handler Metal, ni sur le fil de l'application.
-4. Le retrait vide d'abord la liste de R1. Il exécute ensuite `~MVKDevice`, sans ses attentes, puisqu'elles sont tenues par construction.
+4. Les deux chemins de retrait, sur place dans `vkDestroyDevice` comme sur la file de MoltenVK, font la même chose, dans cet ordre :
+   - ils passent en état de retrait (R1, point 1) ;
+   - ils vident la liste de R1 ;
+   - ils exécutent `~MVKDevice`, sans ses attentes, puisqu'elles sont tenues par construction. Son `dispatch_sync(_lossPublisher)` (`MVKDevice.mm:5855`) rend alors la main aussitôt.
 5. Le device retient son instance. `vkDestroyInstance` après `vkDestroyDevice` diffère donc la suppression de l'instance jusqu'à celle du device, sur la même file.
 6. Un handler ne touche plus le device après son décrément : le décrément est sa dernière instruction, comme aujourd'hui dans `commitMTLCommandBuffer()`.
 
@@ -182,12 +192,12 @@ La publication ordonnée de `c78c0289` est inchangée. Une soumission bloquée r
 
 ## 5. Oracles, à écrire avant l'implémentation
 
-Chaque oracle doit échouer sur `7758838b` (ou avec la pièce correspondante retirée) et passer après. Tous tournent sous validation Metal de l'API et des shaders, avec des handlers retardés comme les oracles actuels.
+Chaque oracle doit échouer sur `7758838b` (ou avec la pièce correspondante retirée) et passer après. Sur `7758838b`, O2 à O6 échouent d'abord par **délai dépassé** : la perte n'est pas rapportée en 2 s, et l'étape suivante n'est jamais atteinte. Leurs témoins de fond sont donc ceux de O7, pièce par pièce, sur la bibliothèque corrigée. Par exemple, pour O2, la référence faible devient nulle aussitôt après `vkDestroyBuffer` si R1 intercepte au point central, après les surcharges. Tous tournent sous validation Metal de l'API et des shaders, avec des handlers retardés comme les oracles actuels.
 
 | Oracle | Scénario | Réussite |
 | --- | --- | --- |
 | **O1** `external-queue-wait` | le reproducteur actuel | perte rapportée en moins de 2 s ; C s'exécute après le signal de l'application, sans erreur de validation |
-| **O2** destruction après le rapport | après le rapport, et pendant que C est bloqué, détruire tout ce que C utilise : `VkBuffer` (surcharge `destroyNow`), vue de buffer, vue d'image, sampler, mémoire, pipeline, pool de commandes, descriptor pool. Libérer ensuite l'événement | aucune erreur de validation, aucun plantage ; l'écriture de C arrive dans un `MTLBuffer` exporté (`VK_EXT_metal_objects`) et retenu par le test |
+| **O2** destruction après le rapport | après le rapport, et pendant que C est bloqué, détruire tout ce que C utilise : `VkBuffer` (surcharge `destroyNow`), vue de buffer, vue d'image, sampler, mémoire, pipeline, pool de commandes, descriptor pool. Libérer ensuite l'événement, puis détruire le device | aucune erreur de validation, aucun plantage. Le test **ne retient pas** le `MTLBuffer` exporté (`VK_EXT_metal_objects`) de la cible de C ; il n'en garde qu'une référence faible (`objc_storeWeak`). Celle-ci doit rester non nulle après les destructions, et montrer l'écriture de C après le signal. Elle doit être nulle après le retrait du device. Un crochet de test, `mvkTestGetDeferredDestroyCount`, compte les objets différés : c'est le repli si Metal refuse les références faibles |
 | **O3** device et instance détruits pendant le blocage | `vkDestroyDevice` puis `vkDestroyInstance` juste après le rapport | les deux rendent la main en moins de 100 ms ; après le signal, le device est supprimé une seule fois, hors d'un fil Metal, puis l'instance (crochet de test) |
 | **O4** file saturée | `maxActiveMetalCommandBuffersPerQueue=4` ; l'application garde 2 command buffers en attente sur la file exportée ; MoltenVK remplit les places restantes ; perte | rapport en temps fini ; `vkBeginCommandBuffer` avec préremplissage, appelé pendant la perte, rend la main |
 | **O5** attentes idle | `vkQueueWaitIdle` et `vkDeviceWaitIdle` après la perte, pendant que C est bloqué | `VK_ERROR_DEVICE_LOST` en moins de 2 s |
