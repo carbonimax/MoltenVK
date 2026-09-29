@@ -219,7 +219,7 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	// Both captures end the render encoder: compute for indexed draws, a render pass boundary for nonindexed ones.
 	if (const char* error = cmdEncoder->getIndexedPerVertexAttachmentError()) { reject(VK_ERROR_FEATURE_NOT_PRESENT, error); return; }
 	const auto& layout = pipeline->getPerVertexCapturedLayout();
-	auto topology = pipeline->getVkPrimitiveTopology();
+	auto topology = cmdEncoder->getVkGraphics().getPrimitiveTopology();
 	bool provokingLast = cmdEncoder->getVkGraphics().getProvokingVertexMode();
 	uint64_t primitivesPerInstance = mvkPerVertexPrimitiveCount(vertexCount, topology);
 	uint32_t replayVertices = mvkPerVertexReplayVertexCount(topology);
@@ -310,7 +310,7 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	auto& metalState = cmdEncoder->getMtlGraphics();
 	if (!indexBinding) {
 		[encoder setRenderPipelineState: directCaptureState];
-		MTLPrimitiveType captureType = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ? MTLPrimitiveTypeTriangle : MTLPrimitiveTypePoint;
+		MTLPrimitiveType captureType = pipeline->capturesPerVertexTriangleLists() ? MTLPrimitiveTypeTriangle : MTLPrimitiveTypePoint;
 		metalState.bindVertexBuffer(encoder, captured, 0, pipeline->getPerVertexCaptureBufferIndex());
 		metalState.bindVertexBuffer(encoder, captureParams, 0, pipeline->getPerVertexCaptureParamsBufferIndex());
 		cmdEncoder->getState().offsetZeroDivisorVertexBuffers(*cmdEncoder, kMVKGraphicsStageRasterization, pipeline, firstInstance);
@@ -1127,7 +1127,7 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	// Indices the GPU may gather: the Vulkan binding clipped to its Metal allocation.
 	uint64_t indexCapacity = 0;
 	if (indexBinding && indexBinding->offset <= indexBinding->mtlBuffer.length) { indexCapacity = std::min<uint64_t>(indexBinding->size, indexBinding->mtlBuffer.length - indexBinding->offset) / indexSize; }
-	auto topology = pipeline->getVkPrimitiveTopology();
+	auto topology = cmdEncoder->getVkGraphics().getPrimitiveTopology();
 	uint32_t replayVertices = mvkPerVertexReplayVertexCount(topology);
 	NSUInteger width = std::max<NSUInteger>(std::min(helper.threadExecutionWidth, helper.maxTotalThreadsPerThreadgroup), 1);
 	if (restartState) { width = std::min(width, std::min(restartState.threadExecutionWidth, restartState.maxTotalThreadsPerThreadgroup)); }
@@ -1263,7 +1263,7 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 			metalState.bindVertexBuffer(encoder, captured, 0, pipeline->getPerVertexCaptureBufferIndex());
 			metalState.bindVertexBuffer(encoder, plan, 512, pipeline->getPerVertexCaptureParamsBufferIndex());
 			if (pipeline->needsDrawIdBuffer()) { metalState.bindVertexBytes(encoder, &draw, sizeof(draw), pipeline->getImplicitBuffers(kMVKShaderStageVertex).ids[MVKImplicitBuffer::DrawId]); }
-			MTLPrimitiveType captureType = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ? MTLPrimitiveTypeTriangle : MTLPrimitiveTypePoint;
+			MTLPrimitiveType captureType = pipeline->capturesPerVertexTriangleLists() ? MTLPrimitiveTypeTriangle : MTLPrimitiveTypePoint;
 			[encoder drawPrimitives: captureType indirectBuffer: plan indirectBufferOffset: 16];
 			// A render pass boundary, not an in-pass barrier, orders the capture before the replay (see the direct draw).
 			cmdEncoder->encodeStoreActions(true);

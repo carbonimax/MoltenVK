@@ -941,6 +941,7 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
 	}
 
 	_staticStateData.primitiveType = mvkMTLPrimitiveTypeFromVkPrimitiveTopology(_vkPrimitiveTopology);
+	_staticStateData.vkPrimitiveTopology = static_cast<uint8_t>(_vkPrimitiveTopology);
 	_staticStateData.enable.set(MVKRenderStateEnableFlag::PrimitiveRestart, primitiveRestart);
 
 #if MVK_USE_METAL_PRIVATE_API
@@ -1446,7 +1447,7 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 	if (!pVertexSS || !_vertexModule || _vertexModule->getSPIRV().empty() || (!testTES && (_isTessellationPipeline || pCreateInfo->stageCount != 2))) { return unsupported("requires classic SPIR-V vertex and fragment stages."); }
 	if (getMetalFeatures().mslVersion < CompilerMSL::Options::make_msl_version(2, 4)) { return unsupported("requires MSL 2.4."); }
 	const auto* assembly = pCreateInfo->pInputAssemblyState;
-	if (!assembly || (testTES ? (assembly->topology != VK_PRIMITIVE_TOPOLOGY_PATCH_LIST || assembly->primitiveRestartEnable) : !mvkPerVertexReplayVertexCount(assembly->topology)) || _dynamicStateFlags.has(MVKRenderStateFlag::PrimitiveTopology)) { return unsupported("requires a static point, line-list/strip, or triangle-list/strip/fan topology."); }
+	if (!assembly || (testTES ? (assembly->topology != VK_PRIMITIVE_TOPOLOGY_PATCH_LIST || assembly->primitiveRestartEnable) : !mvkPerVertexReplayVertexCount(assembly->topology))) { return unsupported("requires a point, line-list/strip, or triangle-list/strip/fan topology."); }
 	uint32_t viewMask = getRenderingCreateInfo(pCreateInfo)->viewMask;
 	if ((viewMask & (viewMask - 1)) || mvkIsAnyFlagEnabled(_flags, VK_PIPELINE_CREATE_2_VIEW_INDEX_FROM_DEVICE_INDEX_BIT)) { return unsupported("supports at most one multiview view and no device-index views."); }
 	if (pCreateInfo->pRasterizationState->polygonMode != VK_POLYGON_MODE_FILL || _dynamicStateFlags.has(MVKRenderStateFlag::PolygonMode) || _dynamicStateFlags.has(MVKRenderStateFlag::RasterizerDiscardEnable)) { return unsupported("requires static filled rasterization."); }
@@ -1612,8 +1613,9 @@ bool MVKGraphicsPipeline::addPerVertexReplayShaderToPipeline(MTLRenderPipelineDe
 	plDesc.rasterizationEnabled = NO;
 	plDesc.alphaToCoverageEnabled = NO;
 	plDesc.alphaToOneEnabled = NO;
-	// Capture point/line and strip/fan vertices individually.
-	if (pCreateInfo->pInputAssemblyState->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) { plDesc.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint; }
+	// Capture point/line and strip/fan vertices individually. This runs before the pipeline records its topology.
+	_perVertexCapturesTriangleLists = pCreateInfo->pInputAssemblyState->topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST && !_dynamicStateFlags.has(MVKRenderStateFlag::PrimitiveTopology);
+	if (!_perVertexCapturesTriangleLists) { plDesc.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint; }
 	if (usesPerVertexTessEval()) {
 		plDesc.inputPrimitiveTopology = getPrimitiveTopologyClass();
 		plDesc.vertexFunction = function;

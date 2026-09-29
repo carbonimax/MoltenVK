@@ -264,6 +264,7 @@ VkResult MVKCommandBuffer::reset(VkCommandBufferResetFlags flags) {
 	_recordedTessellationPipeline = nullptr;
 	_recordedMeshPipeline = nullptr;
 	_recordedPatchControlPoints = 0;
+	_recordedPrimitiveTopology = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
 	_recordedAttachmentsKnown = false;
 	_recordedRenderingError = nullptr;
 	_recordedIndexType = VK_INDEX_TYPE_MAX_ENUM;
@@ -491,7 +492,9 @@ VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t in
 	if (_doesContinueRenderPass) { _needsInheritedPerVertexAttachments = true; }
 	VkResult result = validateIndexedPerVertexAttachments();
 	if (result != VK_SUCCESS) { return result; }
-	auto topology = _recordedPerVertexPipeline->getVkPrimitiveTopology();
+	auto topology = getRecordedPerVertexTopology();
+	// A dynamic topology may be any of its class, adjacency included, which capture and replay do not support.
+	if (!mvkPerVertexReplayVertexCount(topology)) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR draws do not support this primitive topology."); }
 	uint64_t indexScratchBytes = restart ? mvkPerVertexRestartIndexScratchSize(vertexCount) : indexed && _recordedIndexType == VK_INDEX_TYPE_UINT8 ? uint64_t(vertexCount) * sizeof(uint16_t) : 0;
 	if (indexScratchBytes > getMetalFeatures().maxMTLBufferSize) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR index scratch buffer exceeds Metal limits."); }
 	uint32_t viewMask = getViewMask();
@@ -534,7 +537,7 @@ VkResult MVKCommandBuffer::recordPerVertexIndirectDraw(bool indexed, uint32_t dr
 	if (_doesContinueRenderPass) { _needsInheritedPerVertexAttachments = true; }
 	VkResult result = validateIndexedPerVertexAttachments();
 	if (result != VK_SUCCESS) { return result; }
-	auto topology = pipeline->getVkPrimitiveTopology();
+	auto topology = getRecordedPerVertexTopology();
 	if (!mvkPerVertexReplayVertexCount(topology)) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR indirect draws do not support this primitive topology."); }
 	MVKPerVertexScratchRequest request{};
 	request.restart = restart;
@@ -689,6 +692,11 @@ void MVKCommandBuffer::recordBindPipeline(MVKCmdBindPipeline* mvkBindPipeline) {
 		_recordedTessellationPipeline = ordinaryTessellation ? graphics : nullptr;
 		_recordedMeshPipeline = graphics->isMeshPipeline() ? graphics : nullptr;
 	}
+}
+
+VkPrimitiveTopology MVKCommandBuffer::getRecordedPerVertexTopology() const {
+	bool dynamic = _recordedPerVertexPipeline->getDynamicStateFlags().has(MVKRenderStateFlag::PrimitiveTopology);
+	return dynamic ? _recordedPrimitiveTopology : _recordedPerVertexPipeline->getVkPrimitiveTopology();
 }
 
 uint32_t MVKCommandBuffer::getRecordedPatchControlPoints() const {
