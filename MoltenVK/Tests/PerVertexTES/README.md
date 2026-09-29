@@ -10,10 +10,12 @@ A PerVertexKHR pipeline with tessellation is admitted only for:
 - three input and output control points, and either domain origin (`VkPipelineTessellationDomainOriginStateCreateInfo` is the only tessellation state extension admitted; the lower-left origin reverses the corner order of the generated triangles);
 - TCS and TES without descriptor resources or push constants, because the float32 TessLevel ABI excludes Metal argument buffers (VS and fragment resources are allowed and use the pipeline's own binding model);
 - vertex inputs without divisors, static state except `VK_DYNAMIC_STATE_SCISSOR` and `VK_DYNAMIC_STATE_VIEWPORT`, one viewport and one scissor, a single view and a single sample;
-- no specialization; entry points may have any name, and Vulkan pipeline caches are allowed;
+- no specialization, stage `pNext` or stage flags; entry points may have any name, and Vulkan pipeline caches are allowed;
 - direct non-indexed draws of one instance, with any `firstVertex` and `firstInstance`, including each draw of a `vkCmdDrawMultiEXT` (the VS reads the draw's DrawID).
 
-Any other pipeline mode returns `VK_ERROR_FEATURE_NOT_PRESENT` at `vkCreateGraphicsPipelines`. Any other draw fails at `vkEndCommandBuffer`, before submission.
+Only uniform levels 1, 2 and 3 are rendered; other levels lose the device at submission (see Execution). Any other pipeline mode returns `VK_ERROR_FEATURE_NOT_PRESENT` at `vkCreateGraphicsPipelines`. Any other draw fails at `vkEndCommandBuffer`, before submission.
+
+This scope is frozen as of `66f9fd97`, where `run-pervertex-tes-tests.sh` passes 142 of 142 cases, 12 of them mutations that must be caught. It qualifies this subset only, not tessellation in general. Valid Vulkan usages outside it stay refused. Whether to support them is a separate decision, to be taken before PerVertexKHR is proposed upstream.
 
 ## Execution
 
@@ -108,7 +110,10 @@ Proven on one Apple M4 Pro (macOS 27.2, Xcode 27.1) only. Not supported:
 
 - other levels, spacings or domains;
 - point mode;
-- descriptors or push constants in TCS/TES, more than one instance, multiview, indexed, indexed multi-draw or indirect draws;
+- descriptors or push constants in TCS/TES, specialization, stage `pNext` or stage flags;
+- dynamic states other than `VK_DYNAMIC_STATE_SCISSOR` and `VK_DYNAMIC_STATE_VIEWPORT` (the `WITH_COUNT` variants included), more than one viewport or scissor, multiview, multisampling and vertex divisors;
+- more than one instance, indexed, indexed multi-draw or indirect draws;
+- `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` with a pipeline cache, which still returns `VK_PIPELINE_COMPILE_REQUIRED` because the replay is compiled at every creation;
 - other GPU families. The coordinates are copied from the M4 tessellator; on another GPU they still satisfy the Vulkan rules, but need not match that GPU's ordinary TES bit for bit.
 
 A TES PerVertex pipeline also needs one more free fragment buffer slot, for the patch-index table.

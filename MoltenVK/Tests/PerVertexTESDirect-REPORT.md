@@ -515,7 +515,7 @@ Astra a demandé de commencer par un oracle à deux dessins avec des valeurs dis
 
 **Preuves** : `build/astra/tes-drawid-before-a7fe8a15/`, `build/astra/tes-drawid-after-d3b4457d/`.
 
-## 25. Ce qui reste hors du contrat (à `d3b4457d`)
+## 25. Ce qui reste hors du contrat (à `d3b4457d` ; état figé au § 27)
 
 - **Pipeline.**
   - Les domaines quads et isolines, les espacements fractionnaires, le mode point et plus de 3 points de contrôle.
@@ -542,3 +542,58 @@ Astra a demandé de commencer par un oracle à deux dessins avec des valeurs dis
 - **Autres GPU.** Seul un M4 Pro est prouvé. M1, M3 et Intel restent pour la fin.
 
 L'extension reste fermée par défaut et n'est pas prête pour upstream.
+
+## 26. Qualification de clôture, en test seul (`66f9fd97`)
+
+Astra a recommandé de figer le périmètre TES admis, celui du README du harnais, et d'y garder le DrawID du multi-draw direct. Avant de clore, elle a demandé une qualification ciblée, sans ouvrir de nouveau refus.
+
+**1. Multi-draw à trois dessins, avec des DrawID distincts.** `drawid-multi3` dessine trois patchs de données au niveau 1 en un seul `vkCmdDrawMultiEXT`, avec un stride de 16 octets. Le VS leur fait atteindre les niveaux 1, 2 et 3.
+- Le stride non minimal est inclus parce que la boucle commune de `vkCmdDrawMultiEXT` (`vulkan.mm:4363`) n'était couverte par aucun test de cette série.
+- Résultat, pour les deux enroulements :
+  - aucun écart face au pipeline ordinaire sur 4 704 pixels ;
+  - les trois images (interpolée, ordinaire, ordonnée) égalent trois dessins ordinaires de niveaux 1, 2 et 3 ;
+  - elles diffèrent des dessins de niveaux 1, 1 et 1.
+
+**2. Interactions.**
+- **DrawID avec `firstVertex` et `firstInstance` non nuls.** `drawid-first` fait un multi-draw de deux dessins, à partir des sommets 3 et 6, avec `firstInstance = 1`. Son VS combine `gl_DrawID`, `gl_InstanceIndex` et l'attribut par instance.
+  - Les images égalent les dessins ordinaires aux niveaux attendus.
+  - Les sommes du VS sont exactes, sur les pipelines ordinaire et PerVertex : 33 pour les sommets, 6 pour l'instance, 42 pour l'attribut, 27 pour `gl_BaseVertex` (3 puis 6 par dessin), 6 pour `gl_BaseInstance`.
+- **`LOWER_LEFT` avec les états dynamiques.** `lower-left-dynamic` reprend `dynamic-both` avec l'origine `LOWER_LEFT`.
+  - Chaque dessin garde son viewport et son ciseau.
+  - Un viewport et un ciseau dynamiques sur l'image entière redonnent l'image ordonnée statique. L'ordre des coins ne dépend donc pas des états dynamiques.
+  - Le même contrôle a été ajouté à `dynamic-both`.
+
+**3. Refus aux frontières du contrat.**
+- `reject-multi-draw-instances` : deux instances dans un multi-draw, refusées à l'enregistrement.
+- `reject-multi-draw-indexed` : un `vkCmdDrawMultiIndexedEXT`, refusé à l'enregistrement.
+- `reject-dynamic-scissor-count` : `VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT` et `SCISSOR_WITH_COUNT`, avec `VK_EXT_extended_dynamic_state` activé, refusés à la création alors que la tessellation ordinaire les accepte.
+
+**Un défaut du harnais, corrigé avant le commit.** Le premier essai a fait échouer `drawid-multi`, jusque-là vert, pipeline ordinaire compris. Un booléen local nommé `three` masquait la constante de niveau `three`, ce qui fabriquait un patch de niveau 0 dans la référence. Le booléen a été renommé. Le runtime n'était pas en cause.
+
+**Preuves** : `build/astra/tes-qualification-66f9fd97/` (`EVIDENCE.sha256`, 94 entrées), sur le runtime de `d3b4457d`, que `66f9fd97` ne change pas.
+
+**Dernière passe.** Runner TES complet à `66f9fd97` : **142/142 PASS**, dont les 12 mutations, toutes détectées. `EVIDENCE.sha256` compte 1 199 entrées (sha256 du manifeste `779851b8…`, dans `build/astra/tes-runner-66f9fd97/`).
+
+## 27. Le contrat TES figé (à `66f9fd97`)
+
+Le périmètre admis est celui de `PerVertexTES/README.md`, figé à `66f9fd97` :
+- des patchs triangulaires, à espacement égal, `cw` ou `ccw`, sans mode point, avec trois points de contrôle, et l'une ou l'autre origine de domaine ;
+- des niveaux uniformes 1, 2 ou 3 ; les autres perdent le device à la soumission ;
+- un TCS et un TES sans descripteurs ni push constants ;
+- ni spécialisation, ni `pNext` ou `flags` d'étage ; les points d'entrée peuvent porter n'importe quel nom ; les caches de pipeline sont admis ;
+- un état statique, sauf `VK_DYNAMIC_STATE_SCISSOR` et `VK_DYNAMIC_STATE_VIEWPORT` ; un seul viewport et un seul ciseau ; une seule vue et un seul échantillon ; pas de diviseurs de sommets ;
+- des dessins directs non indexés d'une seule instance, avec n'importe quels `firstVertex` et `firstInstance`, y compris chaque dessin d'un `vkCmdDrawMultiEXT`.
+
+**Ce que ce contrat n'est pas.**
+- Les 142 cas qualifient ce sous-ensemble, pas la tessellation en général.
+- Le contrat reste réservé au build de test : l'admission n'est compilée qu'avec `MVK_TEST_TES_PERVERTEX_ADMISSION`, et la garde publique de l'extension reste fermée.
+- Les usages Vulkan valides encore refusés sont listés au § 25 et dans les limites du README. Avant de proposer PerVertexKHR upstream, il faudra décider séparément s'il faut les prendre en charge.
+
+**Toujours non prouvé.**
+- Un viewport dynamique qui ne couvre pas toute la hauteur, ou dont la profondeur n'est pas [0, 1].
+- Un cache relu dans un autre device ou un autre processus.
+- Les trois appels de réflexion non protégés du § 13, examinés par analyse seulement.
+- La mesure du coût du dispatch supplémentaire.
+- Les autres GPU : M1, M3 et Intel restent pour la fin.
+
+Aucun nouveau refus TES n'est ouvert. La perte de device et le protocole de soumission restent gelés. L'extension n'est pas prête pour upstream.
