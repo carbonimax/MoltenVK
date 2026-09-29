@@ -5,7 +5,7 @@
 # write imported host memory once no encoding remains (R8), and counts that work through the completed handler that
 # MVKDevice::commitMTLCommandBuffer() adds. So:
 # - commitMTLCommandBuffer() must add, whenever the inventory is open, a completed handler that decrements the inventory
-#   count, even when the command buffer has no other completed handler;
+#   count after the other completed handlers have run, even when the command buffer has no other completed handler;
 # - every function that calls it, member or free, in any source or header of the runtime, is classified:
 #   "submission" (bracketed by MVKQueue::submit()), "bracket" (brackets itself: beginEncoding(), then the acquisition of
 #   the Metal command buffer, then the commit, then endEncoding(), and any completion wait only after endEncoding(), so
@@ -133,9 +133,17 @@ for m in re.finditer(r"\bif\s*\(", commit_body[:max(completed_at, 0)]):
 	brace = commit_body.find("{", close)
 	if 0 <= brace < completed_at and matching(commit_body, brace, "{", "}") > completed_at:
 		guards.append(commit_body[m.start():close + 1])
-handler_text = commit_body[completed_at:] if completed_at >= 0 else ""
-if completed_at < 0 or "_handlersBeforeInventory--" not in handler_text:
+# The block given to addCompletedHandler, and in it the loop that runs the other completed handlers: the count must go
+# down inside that block and after that loop, as the block's last use of the inventory.
+block_at = commit_body.find("{", completed_at) if completed_at >= 0 else -1
+handler_text = commit_body[block_at:matching(commit_body, block_at, "{", "}") + 1] if block_at >= 0 else ""
+countdown_at = handler_text.find("_handlersBeforeInventory--")
+loop = re.search(r"\bfor\s*\([^)]*\bin\s+completed\s*\)\s*\{", handler_text)
+loop_end = matching(handler_text, loop.end() - 1, "{", "}") if loop else -1
+if completed_at < 0 or countdown_at < 0:
 	problems.append("MVKDevice::commitMTLCommandBuffer: no completed handler that decrements _handlersBeforeInventory")
+elif countdown_at < loop_end:
+	problems.append("MVKDevice::commitMTLCommandBuffer: its completed handler counts down before the other completed handlers have run")
 elif any("isCounted" not in g for g in guards):
 	problems.append(f"MVKDevice::commitMTLCommandBuffer: its counted completed handler depends on {guards}, not only on the inventory being open")
 missing = set(classes) - {site.split()[1] for site in sites}
