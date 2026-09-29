@@ -124,6 +124,13 @@
 //     is reported, the same synchronization runs again. Exit 0 when neither commits a Metal command buffer once the loss
 //     has begun; 1 otherwise. Without an admission check, the second one commits work that the closed loss inventory
 //     no longer counts; the first one reaches the admission check with a command buffer already acquired.
+// device-destroy-after-report, device-destroy-before-report: measurements for the design review of R5, not oracles.
+//   The application's own Metal work on queue B waits for an event, C (a buffer fill) is queued behind it, and the device
+//   is lost. -after-report: a host wait (vkDeviceWaitIdle) starts, the application releases its work 300 ms after the
+//   loss, and once the wait reports the loss, the test destroys C's objects and the device, as Vulkan allows. Exit 0
+//   when vkDestroyDevice returns within 50 ms. -before-report: the device alone is destroyed 100 ms after the loss, while
+//   C is pending, which Vulkan allows only once a wait has reported the loss: invalid usage today, legal once the loss is
+//   reported in finite time (R6). Always exit 0; the line "destroy_device" gives how long vkDestroyDevice took.
 // Exit 2 for a setup failure, 3 when the device lacks a capability.
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
@@ -1542,6 +1549,76 @@ int hostSync(Context& c, const std::string& mode) {
 	return isDry ? 0 : pass ? 0 : 1;
 }
 
+// Destroys the device and the instance itself.
+int deviceDestroy(Context& c, bool isAfterReport) {
+	id<MTLCommandQueue> mtlQueue = exportedQueue(c.device, c.qb);
+	if (!mtlQueue) { std::fprintf(stderr, "No exported MTLCommandQueue\n"); return 3; }
+	id<MTLSharedEvent> unknown = [c.mtlDevice newSharedEvent];
+	id<MTLCommandBuffer> external = [[mtlQueue commandBuffer] retain];
+	[external encodeWaitForEvent: unknown value: 1];
+	[external commit];
+	Buffer target = c.buffer(4096, false);
+	VkCommandPool pool = commandPool(c);
+	VkCommandBufferAllocateInfo commandInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+	commandInfo.commandPool = pool;
+	commandInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	commandInfo.commandBufferCount = 1;
+	VkCommandBuffer commands;
+	check(vkAllocateCommandBuffers(c.device, &commandInfo, &commands), "vkAllocateCommandBuffers");
+	VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+	check(vkBeginCommandBuffer(commands, &begin), "vkBeginCommandBuffer");
+	vkCmdFillBuffer(commands, target.buffer, 0, 4096, kMarker);
+	check(vkEndCommandBuffer(commands), "vkEndCommandBuffer");
+	VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+	submit.commandBufferCount = 1;
+	submit.pCommandBuffers = &commands;
+	check(vkQueueSubmit(c.qb, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit");
+	sleepMs(50);
+	auto ms = [](std::chrono::steady_clock::time_point from) {
+		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - from).count();
+	};
+	c.markLost(c.device);
+	auto lost = std::chrono::steady_clock::now();
+	double reportMs = -1, destroyMs = -1, releaseMs = -1;
+	VkResult waited = VK_NOT_READY;
+	if (isAfterReport) {
+		std::thread waiter([&] { waited = vkDeviceWaitIdle(c.device); reportMs = ms(lost); });
+		sleepMs(300);
+		releaseMs = ms(lost);
+		unknown.signaledValue = 1;	// the application releases its own work
+		waiter.join();
+		[external waitUntilCompleted];
+		// The loss is reported: Vulkan considers C complete, and lets the application destroy what it used.
+		vkDestroyCommandPool(c.device, pool, nullptr);
+		c.destroy(target);
+		auto start = std::chrono::steady_clock::now();
+		vkDestroyDevice(c.device, nullptr);
+		destroyMs = ms(start);
+	} else {
+		std::atomic<bool> destroyed{false};
+		std::thread destroyer([&] {
+			sleepMs(100);
+			auto start = std::chrono::steady_clock::now();
+			vkDestroyDevice(c.device, nullptr);	// C's objects are leaked: destroying them could crash, which is R1's subject
+			destroyMs = ms(start);
+			destroyed = true;
+		});
+		sleepMs(300);
+		releaseMs = ms(lost);
+		unknown.signaledValue = 1;
+		destroyer.join();
+		[external waitUntilCompleted];
+	}
+	vkDestroyInstance(c.instance, nullptr);
+	std::printf("loss_at=0 ms release_at=%.0f ms report_at=%.0f ms (wait=%d) destroy_device=%.1f ms\n", releaseMs, reportMs, int(waited), destroyMs);
+	std::printf("DEVICE_DESTROY %s\n", isAfterReport
+				? destroyMs < 50 ? "PASS: after the loss report, vkDestroyDevice returns at once" : "FAIL: after the loss report, vkDestroyDevice still waits"
+				: "MEASURED: vkDestroyDevice before the loss report (invalid usage today)");
+	[external release];
+	[unknown release];
+	return isAfterReport && destroyMs >= 50 ? 1 : 0;
+}
+
 // A swapchain of 3 images on a CAMetalLayer detached from any window.
 struct Presentation {
 	CAMetalLayer* layer = nil;
@@ -1724,15 +1801,20 @@ int main(int argc, char** argv) {
 	gPreferDiscreteGPU = isHostSync;
 	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss" && mode != "event-wait" && !isExternalWait
 		&& mode != "shared-queue-block" && mode != "timeline-listener-aba" && !isPresentation && !isFreeImported && !isTeardown && !isPrefill && !isMetalError
-		&& !isMetalErrorBatches && !isHostSync) {
+		&& !isMetalErrorBatches && !isHostSync && mode != "device-destroy-after-report" && mode != "device-destroy-before-report") {
 		std::fprintf(stderr, "usage: %s counter-race|binary-generation|destroy-after-loss|event-wait|external-queue-wait[-idle|-query]|shared-queue-block"
 					 "|timeline-listener-aba|teardown[-multi|-nil|-nil-transient]|prefill-abandon-{reset,free,pool}[-lost]"
 					 "|metal-error[-multi|-batches|-batches2|-calls]|present-scheduled-after-destroy|present-destroy-race|present-pending-destroy|free-imported-waits[-late-commit|-slow-handler]|free-imported-{late,failed}-allocation"
-					 "|host-sync-{progress,admission}-{invalidate,copy}\n", argv[0]);
+					 "|host-sync-{progress,admission}-{invalidate,copy}|device-destroy-{after,before}-report\n", argv[0]);
 		return 64;
 	}
 	@autoreleasepool {
 		Context c = createContext();
+		if (mode == "device-destroy-after-report" || mode == "device-destroy-before-report") {	// the same
+			int rc = deviceDestroy(c, mode == "device-destroy-after-report");
+			std::fflush(stdout);
+			return rc;
+		}
 		if (isTeardown) {	// destroys the device and the instance itself
 			int rc = teardown(c, mode);
 			std::fflush(stdout);
