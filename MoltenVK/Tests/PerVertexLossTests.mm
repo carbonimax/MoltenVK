@@ -89,13 +89,16 @@
 //   only after destroying the swapchain. Without a device loss this is invalid usage (the presentations have not
 //   completed); it is the situation that a loss reported in finite time would make legal (PerVertexExternalWait-DESIGN.md,
 //   R5 and R6), where a scheduled handler begins a presentation after its swapchain is gone.
-// free-imported-waits, free-imported-waits-late-commit: C fills a buffer bound to host memory the test imported
+// free-imported-waits, free-imported-waits-late-commit, free-imported-waits-slow-handler: C fills a buffer bound to host memory the test imported
 //   (VK_EXT_external_memory_host), queued behind the application's own Metal work on queue B, which waits for an event
 //   (as in external-queue-wait), so that C stays pending after the loss. The device is lost, and vkFreeMemory on that
 //   memory is called on another thread; the test releases its work 300 ms later. With -late-commit, C's encoding is
 //   held 300 ms when it creates its first Metal encoder, so that MoltenVK commits C, and counts it, only after the loss
 //   began: this passes only if the loss inventory closes once no encoding remains, not when the loss begins. Otherwise
-//   vkFreeMemory returns while C encodes, and C may then crash binding the freed buffer. Exit 0 when vkFreeMemory
+//   vkFreeMemory returns while C encodes, and C may then crash binding the freed buffer. With -slow-handler, every
+//   MoltenVK completed handler starts 200 ms late (PERVERTEX_LOSS_HANDLER_DELAY_US overrides it), and vkFreeMemory must
+//   return at least that long after the release: C's GPU work ends a few ms after the release, but the inventory counts
+//   it down only at the end of its completed handler. Exit 0 when vkFreeMemory
 //   returns only after the release, with C's value in the pages; 1 when it returns before: the pages could then be
 //   reused while C still writes them. Without a device loss reported, freeing memory that pending work uses is invalid;
 //   it is the ordering that a loss reported in finite time would make legal (PerVertexExternalWait-DESIGN.md, R6 and
@@ -1140,7 +1143,8 @@ id computeEncoderWithTypeDelayed(id self, SEL command, NSUInteger type) {
 	return reinterpret_cast<id (*)(id, SEL, NSUInteger)>(gComputeEncoderWithType)(self, command, type);
 }
 
-int freeImportedWaits(Context& c, bool isLateCommit) {
+int freeImportedWaits(Context& c, const std::string& mode) {
+	bool isLateCommit = mode == "free-imported-waits-late-commit", isSlowHandler = mode == "free-imported-waits-slow-handler";
 	VkPhysicalDeviceExternalMemoryHostPropertiesEXT hostProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
 	VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
 	properties.pNext = &hostProperties;
@@ -1204,6 +1208,8 @@ int freeImportedWaits(Context& c, bool isLateCommit) {
 		gComputeEncoderWithType = replace(bufferClass, @selector(computeCommandEncoderWithDispatchType:), reinterpret_cast<IMP>(computeEncoderWithTypeDelayed));
 		gEncoderDelayUs = 300000;
 	}
+	const char* delay = getenv("PERVERTEX_LOSS_HANDLER_DELAY_US");
+	gHandlerDelayUs = !isSlowHandler ? 0 : delay ? useconds_t(std::atoi(delay)) : 200000;
 	auto start = std::chrono::steady_clock::now();
 	auto sinceMs = [&](std::chrono::steady_clock::time_point t) { return std::chrono::duration<double, std::milli>(t - start).count(); };
 	std::thread submitter([&] {
@@ -1238,11 +1244,14 @@ int freeImportedWaits(Context& c, bool isLateCommit) {
 	submitter.join();
 	vkQueueWaitIdle(c.qb);	// reports the loss
 	bool isForced = !isLateCommit || gEncoderDelayUs.load() == 0;
-	bool pass = isForced && !freedBeforeRelease && freedAt >= released && valueAtFree == kMarker;
-	std::printf("loss_at=%.0f ms freed_at=%.0f ms released_at=%.0f ms value_at_free=%08x\n", sinceMs(lost), sinceMs(freedAt),
-				sinceMs(released), valueAtFree);
+	double freedAfterReleaseMs = sinceMs(freedAt) - sinceMs(released), handlerDelayMs = gHandlerDelayUs / 1000.0;
+	bool waitedForHandler = freedAfterReleaseMs >= handlerDelayMs;
+	bool pass = isForced && !freedBeforeRelease && freedAt >= released && valueAtFree == kMarker && waitedForHandler;
+	std::printf("loss_at=%.0f ms freed_at=%.0f ms released_at=%.0f ms value_at_free=%08x handler_delay=%.0f ms freed_after_release=%.0f ms\n",
+				sinceMs(lost), sinceMs(freedAt), sinceMs(released), valueAtFree, handlerDelayMs, freedAfterReleaseMs);
 	std::printf("FREE_IMPORTED %s\n", pass ? "PASS: vkFreeMemory returned only after the work that writes the imported pages"
 				: !isForced ? "FAIL: C created no Metal encoder, so its commit was not held after the loss"
+				: !waitedForHandler && !freedBeforeRelease && valueAtFree == kMarker ? "FAIL: vkFreeMemory returned once C's work ended, before its completed handler did"
 				: freedBeforeRelease ? "FAIL: vkFreeMemory returned while pending work could still write the imported pages"
 				: "FAIL: vkFreeMemory returned after the release, but without the pending work's value in the pages");
 	vkDestroyBuffer(c.device, buffer, nullptr);
@@ -1423,14 +1432,14 @@ int main(int argc, char** argv) {
 	bool isExternalWait = mode == "external-queue-wait" || mode == "external-queue-wait-idle" || mode == "external-queue-wait-query";
 	bool isPresentation = mode == "present-scheduled-after-destroy" || mode == "present-destroy-race" || mode == "present-pending-destroy";
 	gPresentationModes = isPresentation;
-	bool isFreeImported = mode == "free-imported-waits" || mode == "free-imported-waits-late-commit";
+	bool isFreeImported = mode == "free-imported-waits" || mode == "free-imported-waits-late-commit" || mode == "free-imported-waits-slow-handler";
 	gImportedMemoryModes = isFreeImported;
 	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss" && mode != "event-wait" && !isExternalWait
 		&& mode != "shared-queue-block" && mode != "timeline-listener-aba" && !isPresentation && !isFreeImported && !isTeardown && !isPrefill && !isMetalError
 		&& !isMetalErrorBatches) {
 		std::fprintf(stderr, "usage: %s counter-race|binary-generation|destroy-after-loss|event-wait|external-queue-wait[-idle|-query]|shared-queue-block"
 					 "|timeline-listener-aba|teardown[-multi|-nil|-nil-transient]|prefill-abandon-{reset,free,pool}[-lost]"
-					 "|metal-error[-multi|-batches|-batches2|-calls]|present-scheduled-after-destroy|present-destroy-race|present-pending-destroy|free-imported-waits[-late-commit]\n", argv[0]);
+					 "|metal-error[-multi|-batches|-batches2|-calls]|present-scheduled-after-destroy|present-destroy-race|present-pending-destroy|free-imported-waits[-late-commit|-slow-handler]\n", argv[0]);
 		return 64;
 	}
 	@autoreleasepool {
@@ -1444,7 +1453,7 @@ int main(int argc, char** argv) {
 			: mode == "event-wait" ? eventWait(c)
 			: isExternalWait ? externalQueueWait(c, mode == "external-queue-wait" ? "fence" : mode.substr(std::strlen("external-queue-wait-")))
 			: mode == "shared-queue-block" ? sharedQueueBlock(c) : mode == "timeline-listener-aba" ? timelineListenerAba(c)
-			: isPresentation ? presentation(c, mode) : isFreeImported ? freeImportedWaits(c, mode == "free-imported-waits-late-commit")
+			: isPresentation ? presentation(c, mode) : isFreeImported ? freeImportedWaits(c, mode)
 			: isPrefill ? prefillAbandon(c, mode) : isMetalError ? metalError(c, mode)
 			: isMetalErrorBatches ? metalErrorBatches(c, mode) : destroyAfterLoss(c);
 		std::fflush(stdout);
