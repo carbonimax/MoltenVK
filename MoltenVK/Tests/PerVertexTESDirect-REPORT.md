@@ -313,7 +313,7 @@ Astra a validé le cache et le correctif mesh de façon bornée. Elle a demandé
 
 **Preuves** : `build/astra/tes-scissor-before-2be0e1fb/`, `build/astra/tes-scissor-after-198aee8a/`.
 
-## 16. Ce qui reste hors du contrat (à `198aee8a`)
+## 16. Ce qui reste hors du contrat (à `198aee8a` ; état courant au § 19)
 
 - **Pipeline.**
   - Les domaines quads et isolines, les espacements fractionnaires, le mode point et plus de 3 points de contrôle.
@@ -328,6 +328,72 @@ Astra a validé le cache et le correctif mesh de façon bornée. Elle a demandé
 - **Mesh.** Un `LocalSizeId` dont un opérande est un `OpSpecConstantOp` est refusé, pas pris en charge.
 - **Non prouvé.**
   - Plusieurs ciseaux (multi-viewport) : un seul ciseau est testé.
+  - Un cache relu dans un autre device ou un autre processus.
+  - Les trois appels de réflexion non protégés du § 13, examinés par analyse seulement.
+  - La mesure du coût du dispatch supplémentaire.
+- **Autres GPU.** Seul un M4 Pro est prouvé. M1, M3 et Intel restent pour la fin.
+
+L'extension reste fermée par défaut et n'est pas prête pour upstream.
+
+## 17. Un seul viewport et un seul ciseau (oracle `1b9d581a`, correctif `1a99acf6`)
+
+Astra a validé le ciseau dynamique, mais a relevé un écart. La porte admettait `VK_DYNAMIC_STATE_SCISSOR` sans vérifier `pViewportState->scissorCount`, si bien que le « seul ciseau » annoncé n'était pas imposé. Elle a demandé de limiter l'admission à un viewport et un ciseau, ou de qualifier le cas multiple.
+
+- **L'oracle.** `reject-multi-viewport` crée le pipeline PerVertex avec deux viewports et deux ciseaux identiques, la fonctionnalité `multiViewport` étant activée. Le pipeline PerVertex doit être refusé, alors que la tessellation ordinaire l'accepte.
+- **Rouge avant** (runtime de `198aee8a`) : le pipeline PerVertex est admis (sortie 2, « PerVertex pipeline=0 expected=-8 »).
+- **Le correctif.** La porte exige `viewportCount == 1` et `scissorCount == 1`, que ces états soient statiques ou dynamiques.
+- **Vert après** (`lib-1a99acf6-tes`, `1a3f5695…`) : le pipeline est refusé, et `dynamic-scissor` reste vert.
+- Le runner complet n'a pas été lancé à `1a99acf6` ; celui de `277fc2b0` (§ 18) couvre ce commit.
+- **Preuves** : `build/astra/tes-viewport-count-before-1b9d581a/`, `build/astra/tes-viewport-count-after-1a99acf6/`.
+
+## 18. Le viewport dynamique (oracle `5461d5b6`, correctif `277fc2b0`)
+
+Astra a demandé `VK_DYNAMIC_STATE_VIEWPORT` avec un seul viewport : deux valeurs sur deux dessins de la même passe, des pixels qui changent comme attendu, et l'équivalence avec la tessellation ordinaire.
+
+**L'oracle `dynamic-viewport`.**
+- Trois patchs, un par cellule de 64 pixels, sont dessinés à travers quatre viewports :
+  - l'image entière ;
+  - sa moitié gauche ;
+  - sa moitié droite ;
+  - `lr` : deux dessins des mêmes patchs dans une même passe, à travers la moitié gauche puis la moitié droite. Chaque rejeu, relancé après les étages de calcul, doit appliquer son propre viewport.
+- Chaque image PerVertex doit concorder avec le pipeline ordinaire soumis aux mêmes commandes, et aucun pixel ne doit sortir du viewport.
+- L'image `lr` doit égaler, pixel pour pixel, l'image de gauche sur la moitié gauche et celle de droite sur la moitié droite. Ce contrôle ne dépend pas du pipeline ordinaire.
+- Les images doivent changer avec le viewport, et un viewport dynamique sur l'image entière doit donner l'image du viewport statique.
+- Le témoin `reject-dynamic-line-width` garde refusé un autre état dynamique. Il remplace `reject-dynamic-viewport`, qui ne décrit plus un refus.
+
+**Le correctif.**
+- La porte admet `VK_DYNAMIC_STATE_VIEWPORT` en plus de `VK_DYNAMIC_STATE_SCISSOR`, toujours en lisant la liste Vulkan.
+- Les variantes `WITH_COUNT`, qui donnent les mêmes drapeaux, et tous les autres états dynamiques restent refusés.
+- Le viewport passe, comme le ciseau, par l'état commun de l'encodeur.
+
+| Bibliothèque | `dynamic-viewport` ccw et cw | `reject-dynamic-line-width` |
+| --- | --- | --- |
+| **Avant** : `lib-1a99acf6-tes` (`1a3f5695…`). Son runtime est identique à `5461d5b6`. | Sortie 1 : le pipeline est refusé (« no dynamic state other than VK_DYNAMIC_STATE_SCISSOR »). | PASS |
+| **Après** : `lib-277fc2b0-tes` (`367000ce…`) | **PASS**. Image entière : 4 704 pixels (2 352 par moitié). Gauche : 2 352 et 0. Droite : 0 et 2 352. `lr` : 2 352 et 2 352, avec **0 pixel différent** des images gauche et droite sur leurs moitiés. Aucun écart face au pipeline ordinaire, aucun pixel hors du viewport. | PASS, refusé par la nouvelle garde. |
+
+**Pas de mutation**, pour la même raison que le ciseau (§ 15) : le viewport passe par l'état commun de l'encodeur.
+
+**Régression.** Runner TES complet à `277fc2b0` : **118/118 PASS**, `EVIDENCE.sha256` de 954 entrées (sha256 du manifeste `26b8119a…`, dans `build/astra/tes-runner-277fc2b0/`). Il couvre aussi `1a99acf6`.
+
+**Preuves** : `build/astra/tes-viewport-before-5461d5b6/`, `build/astra/tes-viewport-after-277fc2b0/`.
+
+## 19. Ce qui reste hors du contrat (à `277fc2b0`)
+
+- **Pipeline.**
+  - Les domaines quads et isolines, les espacements fractionnaires, le mode point et plus de 3 points de contrôle.
+  - L'origine de domaine en bas à gauche.
+  - Les descripteurs et push constants du TCS ou du TES.
+  - La spécialisation, et le `pNext` ou les `flags` d'étage.
+  - Tout état dynamique autre que `VK_DYNAMIC_STATE_SCISSOR` et `VK_DYNAMIC_STATE_VIEWPORT`, y compris leurs variantes `WITH_COUNT`.
+  - Plus d'un viewport ou d'un ciseau.
+  - Le multiview, le multi-échantillonnage et les diviseurs de sommets.
+  - `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` avec le cache.
+- **Dessins.** Les dessins indexés, indirects et indexés indirects ; plus d'une instance ; DrawID ≠ 0 (multi-draw).
+- **Niveaux.** Les niveaux non uniformes, au-dessus de 3, ou avec un niveau intérieur NaN : le device est perdu à la soumission.
+- **Mesh.** Un `LocalSizeId` dont un opérande est un `OpSpecConstantOp` est refusé, pas pris en charge.
+- **Non prouvé.**
+  - Le ciseau et le viewport dynamiques ensemble dans un même pipeline : chacun n'est testé que seul.
+  - Un viewport dynamique qui ne couvre pas toute la hauteur, ou dont la profondeur n'est pas [0, 1].
   - Un cache relu dans un autre device ou un autre processus.
   - Les trois appels de réflexion non protégés du § 13, examinés par analyse seulement.
   - La mesure du coût du dispatch supplémentaire.
