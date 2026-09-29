@@ -89,6 +89,15 @@
 //   only after destroying the swapchain. Without a device loss this is invalid usage (the presentations have not
 //   completed); it is the situation that a loss reported in finite time would make legal (PerVertexExternalWait-DESIGN.md,
 //   R5 and R6), where a scheduled handler begins a presentation after its swapchain is gone.
+// free-imported-waits, free-imported-waits-late-commit: C fills a buffer bound to host memory the test imported
+//   (VK_EXT_external_memory_host), queued behind the application's own Metal work on queue B, which waits for an event
+//   (as in external-queue-wait), so that C stays pending after the loss. The device is lost, and vkFreeMemory on that
+//   memory is called on another thread; the test releases its work 300 ms later. With -late-commit, C's Metal commit
+//   is held 300 ms, so that it happens after the loss began, while C is still encoding. Exit 0 when vkFreeMemory
+//   returns only after the release, with C's value in the pages; 1 when it returns before: the pages could then be
+//   reused while C still writes them. Without a device loss reported, freeing memory that pending work uses is invalid;
+//   it is the ordering that a loss reported in finite time would make legal (PerVertexExternalWait-DESIGN.md, R6 and
+//   R8), and this mode checks the mechanism R8 adds for it, on the submission path.
 // Exit 2 for a setup failure, 3 when the device lacks a capability.
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
@@ -117,6 +126,7 @@ void check(VkResult result, const char* step) {
 void sleepMs(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
 
 bool gPresentationModes = false;	// the present-* modes enable VK_EXT_metal_surface and VK_KHR_swapchain
+bool gImportedMemoryModes = false;	// the free-imported-* modes enable VK_EXT_external_memory_host
 
 struct Buffer {
 	VkBuffer buffer = VK_NULL_HANDLE;
@@ -186,12 +196,13 @@ VkDevice createLogicalDevice(const Context& c, VkQueue* qa, VkQueue* qb) {
 	VkPhysicalDeviceSynchronization2Features synchronization2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES};
 	synchronization2.synchronization2 = VK_TRUE;
 	timeline.pNext = &synchronization2;	// vkQueueSubmit2 in the metal-error-batches2 mode
-	const char* extensions[] = {VK_EXT_METAL_OBJECTS_EXTENSION_NAME, "VK_KHR_portability_subset", VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+	const char* extensions[] = {VK_EXT_METAL_OBJECTS_EXTENSION_NAME, "VK_KHR_portability_subset",
+		gImportedMemoryModes ? VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME : VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 	VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
 	deviceInfo.pNext = &timeline;
 	deviceInfo.queueCreateInfoCount = c.familyA == c.familyB ? 1 : 2;
 	deviceInfo.pQueueCreateInfos = queues;
-	deviceInfo.enabledExtensionCount = gPresentationModes ? 3 : 2;
+	deviceInfo.enabledExtensionCount = gPresentationModes || gImportedMemoryModes ? 3 : 2;
 	deviceInfo.ppEnabledExtensionNames = extensions;
 	VkDevice device;
 	check(vkCreateDevice(c.physical, &deviceInfo, nullptr, &device), "vkCreateDevice");
@@ -523,7 +534,7 @@ int eventWait(Context& c) {
 // its handlers start only after gFailedDispatchDelayUs.
 std::atomic<int> gHandlersCommitted{0}, gHandlersStarted{0}, gHandlersFinished{0}, gHandlersLate{0}, gFailCommandBuffers{0}, gFailNextCommits{0};
 std::atomic<bool> gDeviceDestroyed{false}, gCleanupReturned{false};
-useconds_t gHandlerDelayUs = 0, gFailedDispatchDelayUs = 0;
+useconds_t gHandlerDelayUs = 0, gFailedDispatchDelayUs = 0, gCommitDelayUs = 0;
 bool gReverseHandlers = false;
 IMP gAddCompletedHandler = nullptr, gAddScheduledHandler = nullptr, gCommit = nullptr, gCommandBuffer = nullptr, gStatus = nullptr, gError = nullptr;
 char gCompletedKey, gScheduledKey, gFailedKey;
@@ -565,6 +576,7 @@ MTLCommandBufferHandler dispatchHandlers(NSArray* handlers, bool isFailed) {
 }
 
 void commitCounted(id self, SEL command) {
+	if (gCommitDelayUs) { usleep(gCommitDelayUs); }
 	NSArray* completed = objc_getAssociatedObject(self, &gCompletedKey);
 	NSArray* scheduled = objc_getAssociatedObject(self, &gScheduledKey);
 	int claim = gFailNextCommits.load();
@@ -1112,6 +1124,107 @@ int timelineListenerAba(Context& c) {
 	return spurious ? 1 : 0;
 }
 
+int freeImportedWaits(Context& c, bool isLateCommit) {
+	VkPhysicalDeviceExternalMemoryHostPropertiesEXT hostProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+	VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+	properties.pNext = &hostProperties;
+	vkGetPhysicalDeviceProperties2(c.physical, &properties);
+	size_t size = std::max<size_t>(size_t(hostProperties.minImportedHostPointerAlignment), 16384);
+	// Pages the test owns and never unmaps, so that reading them after vkFreeMemory stays valid.
+	void* pages = nullptr;
+	if (posix_memalign(&pages, size, size)) { std::fprintf(stderr, "posix_memalign\n"); return 2; }
+	std::memset(pages, 0, size);
+	volatile uint32_t* words = static_cast<volatile uint32_t*>(pages);
+	VkMemoryHostPointerPropertiesEXT pointerProperties{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+	check(vkGetMemoryHostPointerPropertiesEXT(c.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, pages, &pointerProperties),
+		  "vkGetMemoryHostPointerPropertiesEXT");
+	VkExternalMemoryBufferCreateInfo externalBuffer{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
+	externalBuffer.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+	VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+	bufferInfo.pNext = &externalBuffer;
+	bufferInfo.size = size;
+	bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	VkBuffer buffer;
+	check(vkCreateBuffer(c.device, &bufferInfo, nullptr, &buffer), "vkCreateBuffer");
+	VkMemoryRequirements requirements;
+	vkGetBufferMemoryRequirements(c.device, buffer, &requirements);
+	uint32_t types = requirements.memoryTypeBits & pointerProperties.memoryTypeBits, type = 0;
+	while (type < 32 && !(types & (1u << type))) { ++type; }
+	if (type == 32) { std::fprintf(stderr, "No memory type for imported host memory\n"); return 3; }
+	VkImportMemoryHostPointerInfoEXT imported{VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
+	imported.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+	imported.pHostPointer = pages;
+	VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+	allocation.pNext = &imported;
+	allocation.allocationSize = size;
+	allocation.memoryTypeIndex = type;
+	VkDeviceMemory memory;
+	check(vkAllocateMemory(c.device, &allocation, nullptr, &memory), "vkAllocateMemory");
+	check(vkBindBufferMemory(c.device, buffer, memory, 0), "vkBindBufferMemory");
+
+	// The application's own Metal work, which only the test releases, ahead of C on queue B.
+	installHandlerHooks(c);
+	id<MTLCommandQueue> mtlQueue = exportedQueue(c.device, c.qb);
+	if (!mtlQueue) { std::fprintf(stderr, "No exported MTLCommandQueue\n"); return 3; }
+	id<MTLSharedEvent> unknown = [c.mtlDevice newSharedEvent];
+	id<MTLCommandBuffer> external = [[mtlQueue commandBuffer] retain];
+	[external encodeWaitForEvent: unknown value: 1];
+	[external commit];
+	VkCommandPool pool = commandPool(c);
+	VkCommandBufferAllocateInfo commandInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+	commandInfo.commandPool = pool;
+	commandInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	commandInfo.commandBufferCount = 1;
+	VkCommandBuffer commands;
+	check(vkAllocateCommandBuffers(c.device, &commandInfo, &commands), "vkAllocateCommandBuffers");
+	VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+	check(vkBeginCommandBuffer(commands, &begin), "vkBeginCommandBuffer");
+	vkCmdFillBuffer(commands, buffer, 0, 4, kMarker);
+	check(vkEndCommandBuffer(commands), "vkEndCommandBuffer");
+	auto start = std::chrono::steady_clock::now();
+	auto sinceMs = [&](std::chrono::steady_clock::time_point t) { return std::chrono::duration<double, std::milli>(t - start).count(); };
+	gCommitDelayUs = isLateCommit ? 300000 : 0;
+	std::thread submitter([&] {
+		VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+		submit.commandBufferCount = 1;
+		submit.pCommandBuffers = &commands;
+		vkQueueSubmit(c.qb, 1, &submit, VK_NULL_HANDLE);	// its result only reports a loss that began meanwhile
+	});
+	// With -late-commit, C is still encoding (its commit is held) when the loss begins.
+	sleepMs(isLateCommit ? 100 : 200);
+	c.markLost(c.device);
+	auto lost = std::chrono::steady_clock::now();
+	sleepMs(50);
+	std::atomic<bool> freed{false};
+	std::chrono::steady_clock::time_point freedAt;
+	uint32_t valueAtFree = 0;
+	std::thread freer([&] {
+		vkFreeMemory(c.device, memory, nullptr);
+		freedAt = std::chrono::steady_clock::now();
+		valueAtFree = words[0];
+		freed = true;
+	});
+	sleepMs(300);
+	bool freedBeforeRelease = freed;
+	auto released = std::chrono::steady_clock::now();
+	unknown.signaledValue = 1;	// the application releases its own work
+	[external waitUntilCompleted];
+	freer.join();
+	submitter.join();
+	gCommitDelayUs = 0;
+	vkQueueWaitIdle(c.qb);	// reports the loss
+	bool pass = !freedBeforeRelease && freedAt >= released && valueAtFree == kMarker;
+	std::printf("loss_at=%.0f ms freed_at=%.0f ms released_at=%.0f ms value_at_free=%08x\n", sinceMs(lost), sinceMs(freedAt), sinceMs(released), valueAtFree);
+	std::printf("FREE_IMPORTED %s\n", pass ? "PASS: vkFreeMemory returned only after the work that writes the imported pages"
+				: freedBeforeRelease ? "FAIL: vkFreeMemory returned while pending work could still write the imported pages"
+				: "FAIL: vkFreeMemory returned after the release, but without the pending work's value in the pages");
+	vkDestroyBuffer(c.device, buffer, nullptr);
+	vkDestroyCommandPool(c.device, pool, nullptr);
+	[external release];
+	[unknown release];
+	return pass ? 0 : 1;
+}
+
 // A swapchain of 3 images on a CAMetalLayer detached from any window.
 struct Presentation {
 	CAMetalLayer* layer = nil;
@@ -1283,12 +1396,14 @@ int main(int argc, char** argv) {
 	bool isExternalWait = mode == "external-queue-wait" || mode == "external-queue-wait-idle" || mode == "external-queue-wait-query";
 	bool isPresentation = mode == "present-scheduled-after-destroy" || mode == "present-destroy-race" || mode == "present-pending-destroy";
 	gPresentationModes = isPresentation;
+	bool isFreeImported = mode == "free-imported-waits" || mode == "free-imported-waits-late-commit";
+	gImportedMemoryModes = isFreeImported;
 	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss" && mode != "event-wait" && !isExternalWait
-		&& mode != "shared-queue-block" && mode != "timeline-listener-aba" && !isPresentation && !isTeardown && !isPrefill && !isMetalError
+		&& mode != "shared-queue-block" && mode != "timeline-listener-aba" && !isPresentation && !isFreeImported && !isTeardown && !isPrefill && !isMetalError
 		&& !isMetalErrorBatches) {
 		std::fprintf(stderr, "usage: %s counter-race|binary-generation|destroy-after-loss|event-wait|external-queue-wait[-idle|-query]|shared-queue-block"
 					 "|timeline-listener-aba|teardown[-multi|-nil|-nil-transient]|prefill-abandon-{reset,free,pool}[-lost]"
-					 "|metal-error[-multi|-batches|-batches2|-calls]|present-scheduled-after-destroy|present-destroy-race|present-pending-destroy\n", argv[0]);
+					 "|metal-error[-multi|-batches|-batches2|-calls]|present-scheduled-after-destroy|present-destroy-race|present-pending-destroy|free-imported-waits[-late-commit]\n", argv[0]);
 		return 64;
 	}
 	@autoreleasepool {
@@ -1302,7 +1417,7 @@ int main(int argc, char** argv) {
 			: mode == "event-wait" ? eventWait(c)
 			: isExternalWait ? externalQueueWait(c, mode == "external-queue-wait" ? "fence" : mode.substr(std::strlen("external-queue-wait-")))
 			: mode == "shared-queue-block" ? sharedQueueBlock(c) : mode == "timeline-listener-aba" ? timelineListenerAba(c)
-			: isPresentation ? presentation(c, mode)
+			: isPresentation ? presentation(c, mode) : isFreeImported ? freeImportedWaits(c, mode == "free-imported-waits-late-commit")
 			: isPrefill ? prefillAbandon(c, mode) : isMetalError ? metalError(c, mode)
 			: isMetalErrorBatches ? metalErrorBatches(c, mode) : destroyAfterLoss(c);
 		std::fflush(stdout);
