@@ -377,7 +377,7 @@ Astra a demandé `VK_DYNAMIC_STATE_VIEWPORT` avec un seul viewport : deux valeur
 
 **Preuves** : `build/astra/tes-viewport-before-5461d5b6/`, `build/astra/tes-viewport-after-277fc2b0/`.
 
-## 19. Ce qui reste hors du contrat (à `277fc2b0`)
+## 19. Ce qui reste hors du contrat (à `277fc2b0` ; état courant au § 22)
 
 - **Pipeline.**
   - Les domaines quads et isolines, les espacements fractionnaires, le mode point et plus de 3 points de contrôle.
@@ -393,6 +393,74 @@ Astra a demandé `VK_DYNAMIC_STATE_VIEWPORT` avec un seul viewport : deux valeur
 - **Mesh.** Un `LocalSizeId` dont un opérande est un `OpSpecConstantOp` est refusé, pas pris en charge.
 - **Non prouvé.**
   - Le ciseau et le viewport dynamiques ensemble dans un même pipeline : chacun n'est testé que seul.
+  - Un viewport dynamique qui ne couvre pas toute la hauteur, ou dont la profondeur n'est pas [0, 1].
+  - Un cache relu dans un autre device ou un autre processus.
+  - Les trois appels de réflexion non protégés du § 13, examinés par analyse seulement.
+  - La mesure du coût du dispatch supplémentaire.
+- **Autres GPU.** Seul un M4 Pro est prouvé. M1, M3 et Intel restent pour la fin.
+
+L'extension reste fermée par défaut et n'est pas prête pour upstream.
+
+## 20. Le ciseau et le viewport dynamiques ensemble, en test seul (`3a53ef58`)
+
+Astra a validé la limite d'un viewport et d'un ciseau, et le viewport dynamique. Elle a demandé de qualifier les deux états dynamiques ensemble, puisque la porte admet déjà cette combinaison.
+
+- **L'oracle `dynamic-both`.** Le pipeline déclare les deux états dynamiques. Dans une même passe, le premier dessin passe par la moitié gauche limitée à la première cellule, le second par la moitié droite limitée à la dernière.
+- **Critères.**
+  - L'image doit égaler, pixel pour pixel, l'image de gauche sur la première cellule et celle de droite sur la dernière.
+  - La cellule du milieu doit rester vide.
+  - Chaque image doit concorder avec le pipeline ordinaire.
+- **Vert sans correctif** sur le runtime de `277fc2b0`, pour les deux enroulements : 0 pixel différent sur les cellules extrêmes, 0 pixel couvert au milieu, aucun écart face au pipeline ordinaire (`build/astra/tes-dynamic-both-3a53ef58/`).
+- Les hauteurs partielles et les profondeurs autres que [0, 1] restent non prouvées.
+
+## 21. L'origine de domaine `LOWER_LEFT` (oracle `c8d41740`, correctif `866e813a`)
+
+Astra a demandé de tester l'origine de domaine en bas à gauche, pour les deux enroulements, contre la tessellation ordinaire et le modèle de coordonnées. Si l'oracle passe, seule cette structure `pNext` devait être admise, sans élargissement général de `pNext`.
+
+**Ce que fait déjà MoltenVK.**
+- Pour les triangles, la tessellation ordinaire inverse l'enroulement Metal quand l'origine est `LOWER_LEFT` (`MVKPipeline.mm:2474`).
+- SPIRV-Cross ne modifie `gl_TessCoord` que pour les autres domaines (`spirv_msl.cpp:17375`). Les coordonnées de tessellation restent donc les mêmes ; seul l'ordre des sommets des triangles générés s'inverse.
+
+**L'oracle `lower-left`.**
+- Les niveaux 1, 2 et 3 sont rendus avec `VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT`, et passent par toute la batterie du harnais :
+  - couverture et interpolation contre le TES ordinaire ;
+  - ordre barycentrique ;
+  - modèle CPU, dont l'ordre des coins s'inverse avec cette origine ;
+  - coordonnées de tessellation au bit près ;
+  - `gl_PrimitiveID`.
+- Une structure d'origine explicite `UPPER_LEFT` doit donner l'image par défaut, et l'origine `LOWER_LEFT` doit changer l'ordre des coins PerVertex.
+
+**Le correctif.**
+- **La porte** n'admet que `VkPipelineTessellationDomainOriginStateCreateInfo` dans la chaîne de l'état de tessellation. Toute autre structure reste refusée, qui serait de toute façon hors de l'usage valide Vulkan.
+- **Le générateur de topologie** inverse l'ordre des coins pour l'origine `LOWER_LEFT` : `perVertexTessReversesCorners()` combine désormais l'enroulement du TES et l'origine.
+- **La capture TES** est compilée sans l'option `tess_domain_origin_lower_left`. Le TES en calcul de SPIRV-Cross la refuse (« TES compute does not support … raster coordinate transforms »), et elle ne changerait rien pour les triangles. Le premier essai sur une construction de travail a révélé ce refus.
+
+| Bibliothèque | `lower-left` ccw et cw |
+| --- | --- |
+| **Avant** : `lib-277fc2b0-tes` (`367000ce…`). Son runtime est identique à `c8d41740`. | Sortie 1 : le pipeline est refusé (« an upper-left domain »). |
+| **Après** : `lib-866e813a-tes` (`ee363ddd…`) | **PASS**. Aucun écart face au pipeline ordinaire sur 4 704 pixels ; ordre barycentrique vert sur tous ; modèle CPU sans canal faux (20 triangles), témoin inversé en échec (36 et 37 canaux) ; 22 sommets de tessellation au bit près ; `gl_PrimitiveID` juste ; l'origine explicite `UPPER_LEFT` redonne l'image par défaut. |
+| **Mutation** `mutation-lower-left-order`, où l'origine n'inverse plus l'ordre (`78786fca…`) | Sortie 2 : 42 canaux faux au modèle CPU, et l'ordre des coins ne change plus. La couverture et l'ordre barycentrique restent verts : seul le modèle CPU distingue l'ordre des coins. |
+
+- **Tests.** Le refus `reject-lower-left` est retiré.
+- **Régression.** Runner TES complet à `866e813a` : **122/122 PASS**, `EVIDENCE.sha256` de 1 005 entrées (sha256 du manifeste `7132599d…`, dans `build/astra/tes-runner-866e813a/`).
+- **Preuves** : `build/astra/tes-lower-left-before-c8d41740/`, `build/astra/tes-lower-left-after-866e813a/`.
+
+## 22. Ce qui reste hors du contrat (à `866e813a`)
+
+- **Pipeline.**
+  - Les domaines quads et isolines, les espacements fractionnaires, le mode point et plus de 3 points de contrôle.
+  - Les descripteurs et push constants du TCS ou du TES.
+  - La spécialisation, et le `pNext` ou les `flags` d'étage.
+  - Toute structure de la chaîne de l'état de tessellation autre que l'origine de domaine.
+  - Tout état dynamique autre que `VK_DYNAMIC_STATE_SCISSOR` et `VK_DYNAMIC_STATE_VIEWPORT`, y compris leurs variantes `WITH_COUNT`.
+  - Plus d'un viewport ou d'un ciseau.
+  - Le multiview, le multi-échantillonnage et les diviseurs de sommets.
+  - `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` avec le cache.
+- **Dessins.** Les dessins indexés, indirects et indexés indirects ; plus d'une instance ; DrawID ≠ 0 (multi-draw).
+- **Niveaux.** Les niveaux non uniformes, au-dessus de 3, ou avec un niveau intérieur NaN : le device est perdu à la soumission.
+- **Mesh.** Un `LocalSizeId` dont un opérande est un `OpSpecConstantOp` est refusé, pas pris en charge.
+- **Non prouvé.**
+  - L'origine `LOWER_LEFT` avec l'élimination des faces arrière, avec des patchs qui partagent une arête, ou avec les états dynamiques : l'oracle ne combine rien de tout cela.
   - Un viewport dynamique qui ne couvre pas toute la hauteur, ou dont la profondeur n'est pas [0, 1].
   - Un cache relu dans un autre device ou un autre processus.
   - Les trois appels de réflexion non protégés du § 13, examinés par analyse seulement.
