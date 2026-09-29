@@ -121,3 +121,15 @@ Le lancement à distance exige l'image disque développeur de cette version, dé
 | Mac M4 Pro | 0,251 ms | 0,642 ms | 24 µs |
 
 Le chemin indexé paie déjà ce coût : sa capture tourne dans un encodeur de calcul.
+
+## Abandon des command buffers préremplis
+
+`TRIAL_EXTRA_ENVIRONMENT='"TRIAL_SUITE":"abandon","TRIAL_CASE":"<cas>"'` fait tourner un seul cas de la suite d'abandon, dans un nouveau processus. Les cas sont les mêmes que ceux du harnais Mac r14 :
+- `metal-abandon` : la sonde Metal pure `MacFamilyHarness/abandon-probe.mm`, sans MoltenVK ;
+- `prefill-abandon-reset`, `-free`, `-pool`, `-reset-lost` : les oracles de `PerVertexLossTests.mm`. Ils exigent `TRIAL_PREFILL=1`, qui lance l'app avec `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=1`.
+
+Un cas par lancement : les oracles remplacent des méthodes Metal et comptent les handlers pour tout le processus, comme un exécutable par cas sur macOS.
+
+```bash
+TRIAL_PREFILL=1 TRIAL_EXTRA_ENVIRONMENT='"TRIAL_SUITE":"abandon","TRIAL_CASE":"prefill-abandon-reset"' ./run-trial-device.sh <app> <UDID> <sortie> sync validated
+```
