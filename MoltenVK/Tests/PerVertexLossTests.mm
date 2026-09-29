@@ -40,8 +40,9 @@
 //   No safe runtime meets both today (see the report): this mode reproduces that blocker.
 // external-queue-wait-idle, external-queue-wait-query: the same, but the host wait has no timeout: vkQueueWaitIdle, or
 //   vkGetQueryPoolResults with VK_QUERY_RESULT_WAIT_BIT on a timestamp C writes. The Lost Device section of the Vulkan
-//   specification requires both to return in finite time, with VK_SUCCESS or VK_ERROR_DEVICE_LOST. The wait runs on a
-//   thread, given 2 s; the outcomes and the exit code are those of external-queue-wait.
+//   specification requires both to return in finite time, with VK_SUCCESS or VK_ERROR_DEVICE_LOST. The wait starts on a
+//   thread 50 ms before the loss, so that it is already blocked when the loss begins, and gets 2 s from the loss; the
+//   outcomes and the exit code are those of external-queue-wait.
 // shared-queue-block: a second VkDevice is created on the same physical device, and the test checks that its queue
 //   exports the same MTLCommandQueue as queue B of the first. The application commits four command buffers that wait a
 //   MTLSharedEvent to that Metal queue, and the first device is lost. The second device, healthy, then submits and waits
@@ -51,9 +52,10 @@
 //   behind the first device's in the Metal queue's order. The line "submit_returned_in_2s" tells the two apart.
 // timeline-listener-aba: no device loss. vkWaitSemaphores waits value n + 1 of an imported timeline semaphore for 10 ms
 //   and times out, leaving its Metal event listener registered; a second vkWaitSemaphores from the same call site then
-//   waits value n + 2, while another thread raises the event to n + 1 only. Exit 0 when the second wait never reports
-//   success below n + 2, over 5 rounds; 1 when it does: the first listener, keyed by the address of a waiter that no
-//   longer exists, woke the second one.
+//   waits value n + 2, while another thread raises the event to n + 1 only. Each round raises the event past the
+//   previous round's values, which fires their listeners while the next round's first wait is registered. Exit 0 when no
+//   wait of 10 rounds reports success below its value; 1 when one does: a listener, keyed by the address of a waiter that
+//   no longer exists, woke a later one.
 // prefill-abandon-reset, -free, -pool, and the same with -lost: under MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=1, a
 //   command buffer recorded with vkCmdUpdateBuffer, whose data MoltenVK copies to a pooled Metal buffer, is never
 //   submitted, then reset, freed, or destroyed with its pool (after a device loss with -lost). Exit 0 when the update
@@ -928,21 +930,26 @@ int externalQueueWait(Context& c, const std::string& variant) {
 	sleepMs(200);
 	uint32_t markerBeforeLoss = marker.mapped[0];
 	VkResult fenceBeforeLoss = vkGetFenceStatus(c.device, fence);
-	c.markLost(c.device);
-	auto start = std::chrono::steady_clock::now();
 	VkResult report = VK_TIMEOUT;
 	std::atomic<bool> waited{false};
 	VkResult threadResult = VK_NOT_READY;
 	uint64_t timestamp = 0;
 	std::thread waiter;
-	if (variant == "fence") {
-		report = vkWaitForFences(c.device, 1, &fence, VK_TRUE, 2000000000ull);
-	} else {
+	if (variant != "fence") {
+		// Already waiting when the loss begins.
 		waiter = std::thread([&] {
 			threadResult = variant == "idle" ? vkQueueWaitIdle(c.qb)
 				: vkGetQueryPoolResults(c.device, queries, 0, 1, sizeof(timestamp), &timestamp, sizeof(timestamp), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
 			waited = true;
 		});
+		sleepMs(50);
+	}
+	bool waitedBeforeLoss = waited;
+	c.markLost(c.device);
+	auto start = std::chrono::steady_clock::now();
+	if (variant == "fence") {
+		report = vkWaitForFences(c.device, 1, &fence, VK_TRUE, 2000000000ull);
+	} else {
 		while (!waited && std::chrono::steady_clock::now() - start < std::chrono::seconds(2)) { sleepMs(1); }
 		if (waited) { report = threadResult; }
 	}
@@ -957,8 +964,9 @@ int externalQueueWait(Context& c, const std::string& variant) {
 	uint32_t markerLater = marker.mapped[0];
 	bool reported = report == VK_ERROR_DEVICE_LOST;
 	bool ranAfterReport = reported && markerAtReport != kMarker && markerLater == kMarker;
-	std::printf("C_before_loss: fence=%d marker=%08x; %s wait_after_loss=%d in %.0f ms marker_C=%08x; after external signal: wait=%d%s marker_C=%08x\n",
-				int(fenceBeforeLoss), markerBeforeLoss, variant.c_str(), int(report), reportMs, markerAtReport, int(late),
+	std::printf("C_before_loss: fence=%d marker=%08x%s; %s wait_after_loss=%d in %.0f ms marker_C=%08x; after external signal: wait=%d%s marker_C=%08x\n",
+				int(fenceBeforeLoss), markerBeforeLoss, variant == "fence" ? "" : waitedBeforeLoss ? " host_wait_returned_before_loss=1" : " host_wait_blocked_before_loss=1",
+				variant.c_str(), int(report), reportMs, markerAtReport, int(late),
 				variant == "fence" ? "" : (" host_wait=" + std::to_string(int(threadResult))).c_str(), markerLater);
 	std::printf("EXTERNAL_QUEUE_WAIT %s\n", !reported ? "LOSS_NOT_REPORTED: the loss waits for C, which waits for the application's Metal work"
 				: ranAfterReport ? "RAN_AFTER_REPORT: C ran after the loss was reported, on resources the application could destroy"
@@ -969,7 +977,8 @@ int externalQueueWait(Context& c, const std::string& variant) {
 	c.destroy(marker);
 	[externalMarker release];
 	[unknown release];
-	return reported && !ranAfterReport && fenceBeforeLoss == VK_NOT_READY ? 0 : 1;
+	// A host wait that returned before the loss did not test the loss.
+	return reported && !ranAfterReport && fenceBeforeLoss == VK_NOT_READY && !waitedBeforeLoss ? 0 : 1;
 }
 
 int sharedQueueBlock(Context& c) {
@@ -1050,24 +1059,30 @@ int timelineListenerAba(Context& c) {
 		info.pValues = &value;
 		return vkWaitSemaphores(c.device, &info, timeout);
 	};
-	constexpr int kRounds = 5;
+	// A wait that reports success must find the counter at its value or above.
+	auto isSpurious = [&](VkResult result, uint64_t value) {
+		uint64_t counter = 0;
+		check(vkGetSemaphoreCounterValue(c.device, timeline, &counter), "vkGetSemaphoreCounterValue");
+		return result == VK_SUCCESS && counter < value;
+	};
+	constexpr int kRounds = 10;
 	int spurious = 0;
 	for (int round = 0; round < kRounds; ++round) {
 		uint64_t base = 2 * uint64_t(round);
-		event.signaledValue = base;
-		VkResult first = waitFor(base + 1, 10000000ull);		// times out, its listener stays registered at base + 1
+		event.signaledValue = base;			// fires the listeners of the previous round's waits
+		VkResult first = waitFor(base + 1, 10000000ull);		// base + 1 is not reached yet: times out, its listener stays
+		bool firstSpurious = isSpurious(first, base + 1);
 		std::thread signaler([&] { sleepMs(100); event.signaledValue = base + 1; });
 		auto start = std::chrono::steady_clock::now();
 		VkResult second = waitFor(base + 2, 1000000000ull);	// base + 2 is never reached in this round
 		double secondMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 		signaler.join();
-		uint64_t counter = 0;
-		check(vkGetSemaphoreCounterValue(c.device, timeline, &counter), "vkGetSemaphoreCounterValue");
-		bool isSpurious = second == VK_SUCCESS && counter < base + 2;
-		spurious += isSpurious;
-		std::printf("round=%d first=%d second=%d in %.0f ms counter=%llu%s\n", round, int(first), int(second), secondMs,
-					(unsigned long long)counter, isSpurious ? " SPURIOUS" : "");
+		bool secondSpurious = isSpurious(second, base + 2);
+		spurious += firstSpurious + secondSpurious;
+		std::printf("round=%d first=%d%s second=%d in %.0f ms%s\n", round, int(first), firstSpurious ? " SPURIOUS" : "",
+					int(second), secondMs, secondSpurious ? " SPURIOUS" : "");
 	}
+	std::printf("spurious_waits=%d of %d\n", spurious, 2 * kRounds);
 	std::printf("TIMELINE_LISTENER %s\n", spurious ? "FAIL: a wait reported success below its value, woken by an earlier wait's listener"
 				: "PASS: no wait reported success below its value");
 	vkDestroySemaphore(c.device, timeline, nullptr);
