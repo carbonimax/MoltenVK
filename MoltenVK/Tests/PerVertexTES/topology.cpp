@@ -146,6 +146,7 @@ int main(int argc, char** argv) {
 		scenarios["inner-nan"] = {{{{two, two, two, nan}}}, {}, true};
 		scenarios["entry-names"] = {{uniform(two), uniform(three)}, {}};
 		scenarios["entry-shared-module"] = scenarios["entry-names"];
+		scenarios["cache-reuse"] = scenarios["entry-names"];
 		for (uint32_t level : {1u, 2u, 3u}) {
 			Scenario seam{{uniform(bits(float(level))), uniform(bits(float(level)))}};
 			seam.seam = true;
@@ -251,6 +252,7 @@ int main(int argc, char** argv) {
 		queueInfo.pQueuePriorities = &priority;
 		std::vector<const char*> deviceExtensions{VK_KHR_MAINTENANCE_2_EXTENSION_NAME};
 		if (!ordinaryOnly) deviceExtensions.push_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
+		if (scenarioName == "cache-reuse") deviceExtensions.push_back(VK_EXT_PIPELINE_CREATION_FEEDBACK_EXTENSION_NAME);
 		if (hasExtension(extensions, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) deviceExtensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
 		VkPhysicalDeviceExtendedDynamicState2FeaturesEXT dynamicState2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT};
 		if (dynamicScratchLimit) {
@@ -470,7 +472,7 @@ int main(int argc, char** argv) {
 			check(vkCreateShaderModule(device, &info, nullptr, &result), "Create shader module");
 			return modules[name] = result;
 		};
-		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, cache = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; bool named = false; const char* tescEntry = nullptr; };
+		struct PipelineOptions { std::string tesc = "topology.tesc.spv", tese, frag; bool cull = false, lowerLeft = false, cache = false, uniform = false, resources = false, push = false; std::string vert = "topology.vert.spv"; int capture = 0; bool dynamicControlPoints = false; bool named = false; const char* tescEntry = nullptr; VkPipelineCache pipelineCache = VK_NULL_HANDLE; VkPipelineCreationFeedback* stageFeedback = nullptr; };
 		auto pipelineLayout = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureLayout : o.capture == 2 ? fragmentCaptureLayout : o.uniform ? uniformLayout : o.resources ? resourceLayout : o.push ? pushLayout : emptyLayout; };
 		auto descriptorSet = [&](const PipelineOptions& o) { return o.capture == 1 ? tesCaptureSet : o.capture == 2 ? fragmentCaptureSet : o.resources ? resourceSet : VK_NULL_HANDLE; };
 		auto createPipeline = [&](const PipelineOptions& o, VkPipeline& pipeline) {
@@ -537,7 +539,14 @@ int main(int argc, char** argv) {
 			info.pColorBlendState = &blend;
 			info.layout = pipelineLayout(o);
 			info.renderPass = renderPass;
-			VkPipelineCache cache = VK_NULL_HANDLE;
+			// Per-stage feedback, in the order of stages[]: vertex, control, evaluation, fragment.
+			VkPipelineCreationFeedback pipelineFeedback{};
+			VkPipelineCreationFeedbackCreateInfo feedback{VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO};
+			feedback.pPipelineCreationFeedback = &pipelineFeedback;
+			feedback.pipelineStageCreationFeedbackCount = 4;
+			feedback.pPipelineStageCreationFeedbacks = o.stageFeedback;
+			if (o.stageFeedback) info.pNext = &feedback;
+			VkPipelineCache cache = o.pipelineCache;
 			if (o.cache) {
 				VkPipelineCacheCreateInfo cacheInfo{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
 				check(vkCreatePipelineCache(device, &cacheInfo, nullptr, &cache), "Create pipeline cache");
@@ -872,6 +881,61 @@ int main(int argc, char** argv) {
 		auto verdict = [&](bool ok, const char* what) { std::printf("  %s %s\n", ok ? "ok  " : "FAIL", what); pass &= ok; };
 		auto prior = [](const std::vector<uint8_t>& rgba) { return rgba[0] == 255 && rgba[1] == 0 && rgba[2] == 255 && rgba[3] == 255; };
 
+		if (scenarioName == "cache-reuse") {
+			// Creation fills an empty Vulkan pipeline cache; a second cache created from its data must then serve every stage,
+			// add nothing, and give the same image as a pipeline created without cache.
+			auto cacheData = [&](VkPipelineCache cache) {
+				size_t size = 0;
+				check(vkGetPipelineCacheData(device, cache, &size, nullptr), "Size pipeline cache data");
+				std::vector<uint8_t> data(size);
+				check(vkGetPipelineCacheData(device, cache, &size, data.data()), "Read pipeline cache data");
+				data.resize(size);
+				return data;
+			};
+			auto hits = [](const std::array<VkPipelineCreationFeedback, 4>& stages) {
+				uint32_t count = 0;
+				for (const auto& stage : stages) count += (stage.flags & VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT) != 0;
+				return count;
+			};
+			VkPipelineCacheCreateInfo cacheInfo{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+			VkPipelineCache filled = VK_NULL_HANDLE, restored = VK_NULL_HANDLE;
+			check(vkCreatePipelineCache(device, &cacheInfo, nullptr, &filled), "Create empty pipeline cache");
+			const std::vector<uint8_t> empty = cacheData(filled);
+			const PipelineOptions plain{"topology.tesc.spv", tese, "interp.frag.spv"};
+			Image reference = render(plain, scenario.patches, "interp");
+			std::array<VkPipelineCreationFeedback, 4> fillFeedback{}, reuseFeedback{};
+			PipelineOptions fill = plain;
+			fill.pipelineCache = filled;
+			fill.stageFeedback = fillFeedback.data();
+			Image fillImage = render(fill, scenario.patches, "interp-fill");
+			const std::vector<uint8_t> data = cacheData(filled);
+			cacheInfo.initialDataSize = data.size();
+			cacheInfo.pInitialData = data.data();
+			check(vkCreatePipelineCache(device, &cacheInfo, nullptr, &restored), "Create pipeline cache from data");
+			PipelineOptions reuse = plain;
+			reuse.pipelineCache = restored;
+			reuse.stageFeedback = reuseFeedback.data();
+			Image reuseImage = render(reuse, scenario.patches, "interp-reuse");
+			const std::vector<uint8_t> after = cacheData(restored);
+			Image ordinaryImage = render({"topology.tesc.spv", tese, "ordinary.frag.spv"}, scenario.patches, "ordinary");
+			bool submitted = true;
+			for (const Image* image : {&reference, &fillImage, &reuseImage, &ordinaryImage}) submitted &= image->submit == VK_SUCCESS && image->wait == VK_SUCCESS;
+			verdict(submitted, "all submissions and fences succeed");
+			std::printf("  pipeline cache: empty=%zu filled=%zu restored_after_reuse=%zu; stage cache hits: fill=%u reuse=%u of 4\n", empty.size(), data.size(), after.size(), hits(fillFeedback), hits(reuseFeedback));
+			verdict(data.size() > empty.size(), "creating the pipeline fills the empty cache");
+			verdict(hits(fillFeedback) == 0 && hits(reuseFeedback) == 4, "no stage hits the empty cache; every stage hits the cache restored from its data");
+			verdict(after == data, "reuse adds nothing to the restored cache");
+			verdict(fillImage.rgba == reference.rgba && reuseImage.rgba == reference.rgba, "images through the filled and the restored cache equal the image without cache");
+			uint32_t coverageMismatch = 0, coveredPixels = 0;
+			for (uint32_t i = 0; i < kWidth * kHeight; ++i) { coveredPixels += covered(ordinaryImage.rgba, i); coverageMismatch += covered(ordinaryImage.rgba, i) != covered(reuseImage.rgba, i); }
+			std::printf("  ordinary vs PerVertex through the restored cache: covered=%u coverage_mismatch=%u\n", coveredPixels, coverageMismatch);
+			verdict(coveredPixels > 0 && coverageMismatch == 0, "PerVertex replay through the restored cache matches ordinary TES coverage");
+			vkDestroyPipelineCache(device, restored, nullptr);
+			vkDestroyPipelineCache(device, filled, nullptr);
+			std::printf("TES_TOPOLOGY %s %s %s\n", pass ? "PASS" : "FAIL", scenarioName.c_str(), winding.c_str());
+			vkDeviceWaitIdle(device);
+			return pass ? 0 : 2;
+		}
 		if (scenarioName == "entry-names" || scenarioName == "entry-shared-module") {
 			// Every entry point renamed: the PerVertex image must match the ordinary pipeline built from the same renamed
 			// stages, and equal byte for byte the PerVertex image of the same shaders named main. The shared module variant
