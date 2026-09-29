@@ -11,7 +11,10 @@
 #   the Metal command buffer, then the commit, then endEncoding(), and any completion wait only after endEncoding(), so
 #   that the publication, which waits for encodings, never waits for that completion), or "no-memory" (creates no blit,
 #   compute or render encoder).
-# An unclassified site, a missing classified site, a bracket out of order, or a "no-memory" site with an encoder fails.
+# - no function but commitMTLCommandBuffer() commits a Metal command buffer directly ([x commit] is allowed only on a
+#   residency set), since such a commit would escape the inventory.
+# An unclassified site, a missing classified site, a bracket out of order, a "no-memory" site with an encoder, or a
+# direct commit fails.
 # Usage: run-pervertex-commit-sites-check.sh [output directory]
 set -euo pipefail
 test_dir=$(cd "$(dirname "$0")" && pwd)
@@ -91,6 +94,10 @@ for folder, _, files in os.walk(runtime):
 		code = blank(text)
 		for function, offset, body in functions(code):
 			bodies.setdefault(function, body)
+			if function != "MVKDevice::commitMTLCommandBuffer":
+				for m in re.finditer(r"\[\s*([\w.>-]+)\s+commit\s*\]", body):
+					if "residencySet" not in m.group(1):
+						problems.append(f"{function}: commits {m.group(1)} directly, outside commitMTLCommandBuffer() and the inventory")
 			if function == "MVKDevice::commitMTLCommandBuffer" or "commitMTLCommandBuffer(" not in body: continue
 			line = code.count("\n", 0, offset) + 1
 			kind = classes.get(function)
