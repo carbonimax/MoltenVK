@@ -7,7 +7,7 @@ This is a test-only admission, not generic Vulkan tessellation support. Producti
 A PerVertexKHR pipeline with tessellation is admitted only for:
 
 - triangles, equal spacing, `cw` or `ccw`, no point mode;
-- three input and output control points, and the default upper-left domain origin (no `VkPipelineTessellationDomainOriginStateCreateInfo`);
+- three input and output control points, and either domain origin (`VkPipelineTessellationDomainOriginStateCreateInfo` is the only tessellation state extension admitted; the lower-left origin reverses the corner order of the generated triangles);
 - TCS and TES without descriptor resources or push constants, because the float32 TessLevel ABI excludes Metal argument buffers (VS and fragment resources are allowed and use the pipeline's own binding model);
 - vertex inputs without divisors, static state except `VK_DYNAMIC_STATE_SCISSOR` and `VK_DYNAMIC_STATE_VIEWPORT`, one viewport and one scissor, a single view and a single sample;
 - no specialization; entry points may have any name, and Vulkan pipeline caches are allowed;
@@ -23,7 +23,7 @@ Any other pipeline mode returns `VK_ERROR_FEATURE_NOT_PRESENT` at `vkCreateGraph
    - otherwise each level is clamped to `[1, maxTessellationGenerationLevel]` and rounded up;
    - uniform levels 1, 2 and 3 emit the Metal topologies (1, 6 and 13 triangles) that the ordinary Vulkan oracles proved on M4;
    - the tessellation coordinates are those of the M4 tessellator, in 1/65536 steps: `1.0 - x` is exact and every edge vertex `(x, 1-x)` has its exact mirror, as Vulkan invariance rules 3, 4 and 8 require, so patches sharing an edge give bitwise-equal positions on it;
-   - the corner order is clockwise in (u,v) and reversed for `ccw`, as Vulkan specifies for the upper-left origin;
+   - the corner order is clockwise in (u,v) and reversed for `ccw`, as Vulkan specifies for the upper-left origin, then reversed again for the lower-left origin;
    - a serial prefix assigns patch offsets;
    - each generated triangle records its patch index, which the fragment reads as `gl_PrimitiveID` (without a geometry shader, Vulkan gives the fragment the TES patch index, not the index of a tessellated triangle).
 3. **Refusal.** Any other level (non-uniform, above 3, NaN inner) refuses the whole draw: nothing is captured or replayed. The submission reports `VK_ERROR_DEVICE_LOST` in `finish()`, before signalling its fence. The VS and TCS of that draw have already run.
@@ -74,6 +74,7 @@ Scenarios cover:
 - dynamic viewport and scissor together: two draws in one render pass, through the left half clipped to the first cell, then the right half clipped to the last cell; the image equals the left and right images on those cells and stays empty in between;
 - a pipeline created in an empty Vulkan pipeline cache, then through a cache created from its data: every stage reports an application cache hit, the restored cache gains no entry, and both images equal the one without cache;
 - every entry point renamed (`vertMain`, `tescMain`, `teseMain`, `fragMain`): the image matches the ordinary pipeline built from the same stages and equals the one of the shaders named `main`, and a TCS descriptor behind a renamed entry point is still refused. A TCS module with two entry points, `tescDescriptor` first, then `tescMain`, renders through `tescMain` and is refused through `tescDescriptor`;
+- the lower-left domain origin for levels 1, 2 and 3, through every check above, with the CPU model's corner order reversed; an explicit upper-left origin structure renders the default image;
 - `firstVertex` 3 and `firstInstance` 1: zeroed decoy vertices precede the data, and a per-instance attribute holds a decoy tag 6 for instance 0 and 7 for instance 1. The VS adds `gl_InstanceIndex - 1` and `tag - 7` to the levels, and its storage counter also sums `gl_VertexIndex` (33), `gl_InstanceIndex` (6), the tag (42), `gl_BaseVertex` (18) and `gl_BaseInstance` (6), on the ordinary and the PerVertex pipeline;
 - level 4, non-uniform levels and a NaN inner level, which must be refused with `VK_ERROR_DEVICE_LOST` and no pixel;
 - ordinary-only draws (`ordinary-levels-*`, also on the shipping library, through each draw command, as one draw and as two draws in one render pass) where levels that half would change must render, tessellate and reach the TES exactly like their Vulkan representative: `nextafter(1, +inf)` as 2, `nextafter(2, +inf)` as 3, `1e-30` as 1 on outer and inner levels, with `+inf`, `-0` and NaN as controls.
@@ -102,7 +103,7 @@ Metal shader validation makes ordinary indirect tessellation draw nothing on M4,
 
 Proven on one Apple M4 Pro (macOS 27.2, Xcode 27.1) only. Not supported:
 
-- other levels, spacings, domains or domain origins;
+- other levels, spacings or domains;
 - point mode;
 - descriptors or push constants in TCS/TES, more than one instance, DrawID other than 0 (multi-draw), multiview, indexed or indirect draws;
 - other GPU families. The coordinates are copied from the M4 tessellator; on another GPU they still satisfy the Vulkan rules, but need not match that GPU's ordinary TES bit for bit.

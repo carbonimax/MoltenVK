@@ -1427,11 +1427,18 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 				if (state != VK_DYNAMIC_STATE_SCISSOR && state != VK_DYNAMIC_STATE_VIEWPORT) { return unsupported("TES test admits no dynamic state other than VK_DYNAMIC_STATE_SCISSOR and VK_DYNAMIC_STATE_VIEWPORT."); }
 			}
 		}
-		// The domain origin extension changes the winding convention of the generated triangles.
+		// The domain origin is the only qualified tessellation state extension. A lower-left origin reverses the corner order
+		// of the generated triangles, as the ordinary path reverses the Metal winding of triangle patches.
+		if (pCreateInfo->pTessellationState) {
+			for (const auto* next = (const VkBaseInStructure*)pCreateInfo->pTessellationState->pNext; next; next = next->pNext) {
+				if (next->sType != VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO) { return unsupported("TES test admits no tessellation state extension other than the domain origin."); }
+				_perVertexTessLowerLeft = ((const VkPipelineTessellationDomainOriginStateCreateInfo*)next)->domainOrigin == VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
+			}
+		}
 		const auto* viewports = pCreateInfo->pViewportState;
-		if (!getMetalFeatures().nonUniformThreadgroups || pCreateInfo->stageCount != 4 || !pCreateInfo->pTessellationState || pCreateInfo->pTessellationState->patchControlPoints != 3 || pCreateInfo->pTessellationState->pNext || getRenderingCreateInfo(pCreateInfo)->viewMask || pCreateInfo->pMultisampleState->rasterizationSamples != VK_SAMPLE_COUNT_1_BIT || !pCreateInfo->pVertexInputState || pCreateInfo->pVertexInputState->pNext ||
+		if (!getMetalFeatures().nonUniformThreadgroups || pCreateInfo->stageCount != 4 || !pCreateInfo->pTessellationState || pCreateInfo->pTessellationState->patchControlPoints != 3 || getRenderingCreateInfo(pCreateInfo)->viewMask || pCreateInfo->pMultisampleState->rasterizationSamples != VK_SAMPLE_COUNT_1_BIT || !pCreateInfo->pVertexInputState || pCreateInfo->pVertexInputState->pNext ||
 			!viewports || viewports->viewportCount != 1 || viewports->scissorCount != 1) {
-			return unsupported("TES test requires single-view, single-sample triangle patches with three control points, an upper-left domain, no vertex divisors, and one viewport and scissor.");
+			return unsupported("TES test requires single-view, single-sample triangle patches with three control points, no vertex divisors, and one viewport and scissor.");
 		}
 		testTES = true;
 	}
@@ -2114,6 +2121,8 @@ bool MVKGraphicsPipeline::addTessEvalShaderToPipeline(MTLRenderPipelineDescripto
 		options.argument_buffers = false; // Admission guarantees a descriptor-free TES.
 		options.tessellation_factors_float32 = true;
 		options.emulate_reversed_depth_viewport = false;
+		// For triangles, the lower-left origin changes no TES coordinate; the topology generator reverses the corner order.
+		options.tess_domain_origin_lower_left = false;
 		options.indirect_params_buffer_index = implicit[MVKImplicitBuffer::IndirectParams];
 		options.shader_output_buffer_index = implicit[MVKImplicitBuffer::Output];
 		captureConfig.options.shouldFlipVertexY = false;

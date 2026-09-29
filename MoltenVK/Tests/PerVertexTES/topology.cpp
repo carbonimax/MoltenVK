@@ -865,7 +865,6 @@ int main(int argc, char** argv) {
 			if (scenarioName == "reject-quads") o.tese = "quads.tese.spv";
 			else if (scenarioName == "reject-fractional") o.tese = "fractional.tese.spv";
 			else if (scenarioName == "reject-point-mode") o.tese = "points.tese.spv";
-			else if (scenarioName == "reject-lower-left") o.lowerLeft = true;
 			else if (scenarioName == "reject-descriptor") { o.tesc = "descriptor.tesc.spv"; o.uniform = true; }
 			// The same TCS descriptor behind renamed entry points must still be found.
 			else if (scenarioName == "reject-descriptor-named") { o = {"descriptor-named.tesc.spv", ccw ? "ccw-named.tese.spv" : "cw-named.tese.spv", "interp-named.frag.spv"}; o.vert = "topology-named.vert.spv"; o.uniform = o.named = true; }
