@@ -3,8 +3,10 @@
 // Portable PerVertexKHR with VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY. One render pass draws the same vertices with each
 // topology of a class (triangle list, strip, fan; or line list, strip), changing the topology between draws. The image
 // must equal the same draws through one static pipeline per topology, and differ from the dynamic pipeline kept at its
-// first topology, so that each change is applied. Direct or indexed draws.
-// Usage: pervertex-dynamic-topology <shader directory> triangles|lines direct|indexed
+// first topology, so that each change is applied. Direct or indexed draws. The adjacency form sets
+// VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY, valid within the triangle class but outside capture and replay:
+// recording must fail with VK_ERROR_FEATURE_NOT_PRESENT and nothing is submitted.
+// Usage: pervertex-dynamic-topology <shader directory> triangles|lines direct|indexed|adjacency
 #import <Metal/Metal.h>
 #include <vulkan/vulkan.h>
 
@@ -41,10 +43,10 @@ struct Buffer { VkBuffer buffer = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NUL
 
 int main(int argc, char** argv) {
 	@autoreleasepool {
-	if (argc != 4) { std::fprintf(stderr, "Usage: pervertex-dynamic-topology shader-dir triangles|lines direct|indexed\n"); return 2; }
+	if (argc != 4) { std::fprintf(stderr, "Usage: pervertex-dynamic-topology shader-dir triangles|lines direct|indexed|adjacency\n"); return 2; }
 	const std::string shaders = argv[1], klass = argv[2], form = argv[3];
-	if ((klass != "triangles" && klass != "lines") || (form != "direct" && form != "indexed")) { std::fprintf(stderr, "Unknown case\n"); return 2; }
-	const bool indexed = form == "indexed";
+	if ((klass != "triangles" && klass != "lines") || (form != "direct" && form != "indexed" && form != "adjacency") || (form == "adjacency" && klass != "triangles")) { std::fprintf(stderr, "Unknown case\n"); return 2; }
+	const bool indexed = form == "indexed", adjacency = form == "adjacency";
 	const std::vector<VkPrimitiveTopology> topologies = klass == "triangles"
 		? std::vector<VkPrimitiveTopology>{VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN}
 		: std::vector<VkPrimitiveTopology>{VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_STRIP};
@@ -341,7 +343,7 @@ int main(int argc, char** argv) {
 		if (mode) vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, dynamicPipeline);
 		for (size_t i = 0; i < topologies.size(); ++i) {
 			if (mode == 0) vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, statics[i]);
-			else vkCmdSetPrimitiveTopology(cb, mode == 1 ? topologies[i] : topologies[0]);
+			else vkCmdSetPrimitiveTopology(cb, adjacency && i == 1 ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY : mode == 1 ? topologies[i] : topologies[0]);
 			vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, nullptr);
 			const uint32_t firstInstance = 2 + uint32_t(i % 2);
 			if (indexed) {
@@ -359,6 +361,12 @@ int main(int argc, char** argv) {
 		toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
 		vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, nullptr, 0, nullptr);
 		VkResult ended = vkEndCommandBuffer(cb);
+		if (adjacency && mode == 1) {
+			const bool refused = ended == VK_ERROR_FEATURE_NOT_PRESENT;
+			std::printf("adjacency through the dynamic topology: vkEndCommandBuffer=%d expected=%d, nothing submitted\n", int(ended), int(VK_ERROR_FEATURE_NOT_PRESENT));
+			std::printf("PERVERTEX_DYNAMIC_TOPOLOGY %s triangles adjacency\n", refused ? "PASS" : "FAIL");
+			std::exit(refused ? 0 : 2);
+		}
 		if (ended != VK_SUCCESS) { std::printf("mode %d: vkEndCommandBuffer=%d\n", mode, int(ended)); std::exit(1); }
 		memset(effects.data, 0, 16);
 		memset(readback.data, 0, kSide * kSide * 4);
