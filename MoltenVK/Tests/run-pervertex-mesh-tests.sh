@@ -31,6 +31,10 @@ spirv-as --target-env vulkan1.3 "$output/shaders/draw-id-uint.spvasm" -o "$outpu
 spirv-val --target-env vulkan1.3 "$output/shaders/draw-id-uint.mesh.spv"
 grep -q 'OpLoad %uint %gl_DrawIDARB' "$output/shaders/draw-id-uint.spvasm"
 compile mesh.mesh buffer-address.mesh.spv -DBUFFER_ADDRESS
+# LocalSizeId from a specialization constant operation (2 x 2 by default) instead of the constant 4 glslang emits.
+spirv-dis "$output/shaders/mesh.mesh.spv" | perl -0pe 's/LocalSizeId %uint_4 /LocalSizeId %local_size_x / or die "mode"; s/(\n\s*OpDecorate %gl_LocalInvocationIndex BuiltIn LocalInvocationIndex)/\n               OpDecorate %local_size_half SpecId 0$1/ or die "decoration"; s/(\n\s*%uint_4 = OpConstant %uint 4)/$1\n%local_size_half = OpSpecConstant %uint 2\n%local_size_two = OpConstant %uint 2\n%local_size_x = OpSpecConstantOp %uint IMul %local_size_half %local_size_two/ or die "constant"' > "$output/shaders/local-size-op.spvasm"
+spirv-as --target-env vulkan1.3 "$output/shaders/local-size-op.spvasm" -o "$output/shaders/local-size-op.mesh.spv"
+spirv-val --target-env vulkan1.3 "$output/shaders/local-size-op.mesh.spv"
 compile mesh.mesh permuted.mesh.spv -DPERMUTED
 compile mesh.mesh block.mesh.spv -DBLOCK_OUTPUT
 compile mesh.mesh matrix.mesh.spv -DMATRIX_OUTPUT
@@ -121,7 +125,7 @@ run() { # library scenario
 }
 for scenario in draw grid twice pervertex pervertex-swapped pervertex-permuted pervertex-block-output barycentric barycentric-permuted pervertex-consistency \
 	$(for form in $forms grid; do echo "form-$form"; done) resource-bda resource-bda-other reject-task reject-descriptor reject-per-primitive reject-pervertex-block reject-pervertex-matrix reject-specialization reject-indirect reject-grid-limit \
-	reject-draw-id reject-draw-id-uint reject-buffer-address no-adapter; do run dev "$scenario"; done
+	reject-draw-id reject-draw-id-uint reject-buffer-address reject-local-size-op no-adapter; do run dev "$scenario"; done
 run shipping public-device-gate
 rm -f "$output"/runs/*.rgba
 ( cd "$output" && shasum -a 256 shaders/* */PROVENANCE.txt preflight/* runs/* dev/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib shipping/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib > EVIDENCE.sha256 )
