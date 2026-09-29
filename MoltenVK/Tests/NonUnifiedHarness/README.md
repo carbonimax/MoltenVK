@@ -22,7 +22,7 @@ Le verdict final est **QUALIFIED** seulement si chaque exécution donne le résu
 
 ## Prérequis
 
-- **Machine :** Mac Intel avec GPU discret ou eGPU, Terminal **x86_64 natif**. Un Mac Intel qui n'a qu'un GPU intégré a la mémoire unifiée : il sautera les cas.
+- **Machine :** Mac Intel avec GPU discret AMD, ou eGPU, Terminal **x86_64 natif**. Un Mac Intel qui n'a qu'un GPU intégré a la mémoire unifiée : il sautera les cas. Sur un GPU NVIDIA, MoltenVK n'expose qu'une file (style de sémaphore « une seule file ») : les oracles, qui en demandent deux, s'arrêtent sur « Need two Vulkan queues ».
 - **Système :** seulement les outils de macOS (Bash, Perl, `shasum`, `tar`). Ni Xcode, ni SDK Vulkan, ni Homebrew, ni réseau. macOS 11.0 au minimum.
 - **Durée :** quelques minutes, 102 exécutions bornées à 60 s chacune.
 
@@ -50,6 +50,10 @@ xattr -dr com.apple.quarantine non-unified-harness-r1
 - Il ne prouve rien sur Apple Silicon, où ces chemins ne s'exécutent pas.
 - Il ne remplace ni les essais M1 et M3, ni iOS.
 - Il ne rend pas la perte rapportée en temps fini : R6 reste fermé.
-- Un passage sous Rosetta sur un Mac Apple Silicon vérifie seulement que le bundle s'exécute (`NON_UNIFIED_SMOKE=1`). Les cas y sont sautés, ce n'est pas une qualification.
+- Un passage sous Rosetta sur un Mac Apple Silicon vérifie seulement que le bundle s'exécute. Les cas `host-sync` y sont sautés, ce n'est pas une qualification. Sous Rosetta, MoltenVK n'expose qu'une file ; il faut forcer les `MTLEvent` :
+
+```bash
+MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE=2 NON_UNIFIED_SMOKE=1 bash run.sh
+```
 
 L'identité des bibliothèques et de la source des tests est dans `PROVENANCE.txt` ; `SHA256SUMS` couvre tout le bundle et `run.sh` le vérifie avant de commencer.
