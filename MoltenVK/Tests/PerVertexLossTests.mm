@@ -156,6 +156,7 @@ bool gImportedMemoryModes = false;	// the free-imported-* modes enable VK_EXT_ex
 uint64_t gMetalBufferLimit = 0;		// free-imported-failed-allocation limits Metal buffers before creating the device
 bool gHostImageCopyModes = false;	// the host-sync-*-copy modes enable VK_EXT_host_image_copy, when the device has it
 bool gHasHostImageCopy = false;		// whether it is enabled
+bool gPreferDiscreteGPU = false;	// the host-sync modes use a discrete GPU when there is one
 
 struct Buffer {
 	VkBuffer buffer = VK_NULL_HANDLE;
@@ -282,9 +283,18 @@ Context createContext() {
 	instanceInfo.enabledExtensionCount = uint32_t(enabled.size());
 	instanceInfo.ppEnabledExtensionNames = enabled.data();
 	check(vkCreateInstance(&instanceInfo, nullptr, &c.instance), "vkCreateInstance");
-	uint32_t count = 1;
-	VkResult enumerated = vkEnumeratePhysicalDevices(c.instance, &count, &c.physical);
+	uint32_t count = 0;
+	vkEnumeratePhysicalDevices(c.instance, &count, nullptr);
+	std::vector<VkPhysicalDevice> physicals(count);
+	VkResult enumerated = vkEnumeratePhysicalDevices(c.instance, &count, physicals.data());
 	if ((enumerated != VK_SUCCESS && enumerated != VK_INCOMPLETE) || !count) { std::fprintf(stderr, "No Vulkan device\n"); std::exit(3); }
+	c.physical = physicals[0];
+	// The host-sync modes need a GPU without unified memory: on a Mac with two GPUs, the discrete one.
+	for (uint32_t i = 0; i < count && gPreferDiscreteGPU; ++i) {
+		VkPhysicalDeviceProperties properties;
+		vkGetPhysicalDeviceProperties(physicals[i], &properties);
+		if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) { c.physical = physicals[i]; break; }
+	}
 	uint32_t familyCount = 0;
 	vkGetPhysicalDeviceQueueFamilyProperties(c.physical, &familyCount, nullptr);
 	std::vector<VkQueueFamilyProperties> families(familyCount);
@@ -1711,6 +1721,7 @@ int main(int argc, char** argv) {
 		|| mode == "host-sync-admission-copy";
 	gImportedMemoryModes |= isHostSync;
 	gHostImageCopyModes = mode == "host-sync-progress-copy" || mode == "host-sync-admission-copy";
+	gPreferDiscreteGPU = isHostSync;
 	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss" && mode != "event-wait" && !isExternalWait
 		&& mode != "shared-queue-block" && mode != "timeline-listener-aba" && !isPresentation && !isFreeImported && !isTeardown && !isPrefill && !isMetalError
 		&& !isMetalErrorBatches && !isHostSync) {
