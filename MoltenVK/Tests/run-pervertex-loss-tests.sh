@@ -78,15 +78,16 @@ for name in "${modes[@]}"; do
 			fi
 			# The host-sync modes need a Mac without unified memory; elsewhere they skip, which is neither a pass nor a failure.
 			[[ $name == host-sync-* && $rc == 3 ]] && grep -q '^HOST_SYNC SKIP' "$log" && verdict=SKIP
+			[[ $name == drawable-wait-loss && $rc == 3 ]] && grep -q '^DRAWABLE_WAIT SKIP' "$log" && verdict=SKIP
 			grep -q 'Metal API Validation Enabled' "$log" || verdict=FAIL
 			[[ $verdict == BLOCKER ]] && blockers+=("$name-$mode-$run")
 			[[ $verdict == SKIP ]] && skips+=("$name-$mode-$run")
 			[[ $verdict == PASS || $verdict == BLOCKER || $verdict == SKIP ]] || failures=$((failures + 1))
 			echo "$name,$mode,$run,$expected,$rc,$verdict" >> "$output/results.csv"
-			printf '%-20s %-5s %s exit=%s %s | %s\n' "$name" "$mode" "$run" "$rc" "$verdict" "$(grep -E '^(spurious_waits|COUNTER_RACE|BINARY_GENERATION|DESTROY_AFTER_LOSS|EVENT_WAIT|TEARDOWN|EXTERNAL_QUEUE_WAIT|SHARED_QUEUE|TIMELINE_LISTENER|PREFILL_ABANDON|METAL_ERROR|HOST_SYNC)|^submit=|^C_before_loss|^shared_mtl_queue|^cleanup=|^wait=' "$log" | tr '\n' ' ' | cut -c1-200)"
+			printf '%-20s %-5s %s exit=%s %s | %s\n' "$name" "$mode" "$run" "$rc" "$verdict" "$(grep -E '^(spurious_waits|COUNTER_RACE|BINARY_GENERATION|DESTROY_AFTER_LOSS|EVENT_WAIT|TEARDOWN|EXTERNAL_QUEUE_WAIT|SHARED_QUEUE|TIMELINE_LISTENER|PREFILL_ABANDON|METAL_ERROR|HOST_SYNC|DRAWABLE_WAIT)|^submit=|^C_before_loss|^shared_mtl_queue|^cleanup=|^wait=' "$log" | tr '\n' ' ' | cut -c1-200)"
 		done
 	done
 done
 if (( ${#blockers[@]} )); then echo "BLOCKER reproduced, not passed: ${blockers[*]}"; fi
-echo "LOSS ORACLES $side: $failures unexpected, ${#blockers[@]} blocker run(s)$( (( ${#skips[@]} )) && echo ", ${#skips[@]} skipped run(s) (host-sync: needs a Mac without unified memory)")"
+echo "LOSS ORACLES $side: $failures unexpected, ${#blockers[@]} blocker run(s)$( (( ${#skips[@]} )) && echo ", ${#skips[@]} skipped run(s) (host-sync: needs a Mac without unified memory; drawable-wait-loss: no nextDrawable wait on this system)")"
 exit $(( failures ? 1 : 0 ))
