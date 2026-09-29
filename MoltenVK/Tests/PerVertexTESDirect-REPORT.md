@@ -26,7 +26,10 @@ Le cas retenu est un dessin direct non indexé, d'une seule instance, avec `firs
 - **Il ne touche que l'enregistrement et l'encodage**, pas la soumission.
 - **Le mécanisme existe déjà.** La tessellation ordinaire lance son VS en calcul sur une région stage-in d'origine (`firstVertex`, `firstInstance`).
 - **SPIRV-Cross dérive déjà les bons indices de cette origine.** Il déclare `spvDispatchBase [[grid_origin]]` (`spirv_msl.cpp:1665`) et en tire `gl_VertexIndex`, `gl_InstanceIndex`, `gl_BaseVertex` et `gl_BaseInstance` (`spirv_msl.cpp:17720-17775`).
-- **Les sorties ne bougent pas.** Elles restent indexées depuis 0, par `gl_GlobalInvocationID`. C'est vérifié dans le noyau généré, `build/astra/tes-first-after-b3baee52/dump/`.
+- **Les sorties ne bougent pas.** Elles restent indexées depuis 0, par `gl_GlobalInvocationID`.
+  - La formule d'écriture (`spvOut[gl_GlobalInvocationID.y * spvStageInputSize.x + gl_GlobalInvocationID.x]`) est la même dans toutes les variantes du VS. Elle se lit dans le noyau généré, `build/astra/tes-first-after-b3baee52/dump/`.
+  - Ce dump ne garde qu'une variante MSL par SPIR-V, la dernière compilée : ici la variante indexée.
+  - La dérivation non indexée de `gl_VertexIndex` se lit dans SPIRV-Cross (branche `IndexType::None`). Les sommes mesurées, 33 et 6, la confirment.
 
 Le chemin TES PerVertex lançait la même région à l'origine (0, 0). Il refusait donc les deux paramètres pour ne pas rendre un résultat faux.
 
@@ -49,7 +52,7 @@ Le scénario `first` de `topology.cpp` tourne pour les deux enroulements, ccw et
   - modèle CPU ;
   - coordonnées de tessellation au bit près ;
   - `gl_PrimitiveID` en fragment.
-- **Chaque paramètre est discriminé séparément** :
+- **Chaque paramètre est discriminé séparément, par construction.** La mutation exécutée remet les deux origines à zéro en même temps ; ses chiffres ne séparent donc pas les deux effets :
   - une origine x ignorée donne un patch écarté, un patch déplacé et une somme de sommets de 15 ;
   - une origine y ignorée donne les niveaux 1 et 2 au lieu de 2 et 3, et une somme d'instances de 0.
 
@@ -97,6 +100,9 @@ Preuves, chacune avec son `EVIDENCE.sha256` :
   - Plus d'une instance.
   - DrawID ≠ 0 (multi-draw).
 - **Niveaux.** Les niveaux non uniformes, au-dessus de 3, ou avec un niveau intérieur NaN : le device est perdu à la soumission.
-- **Non prouvé par cet oracle.** Les attributs de sommet par instance avec un `firstInstance` non nul. Ils suivent la même origine stage-in, mais aucun oracle n'en lit un.
+- **Non prouvé par cet oracle.**
+  - Les attributs de sommet par instance avec un `firstInstance` non nul.
+  - `gl_BaseVertex` et `gl_BaseInstance` dans le VS.
+  - Ils suivent la même origine stage-in, mais aucun VS du harnais ne les lit.
 - **Autres GPU.** Seul un M4 Pro est prouvé. M1, M3 et Intel restent pour la fin.
 - **Non fait dans cette passe.** La mesure du coût du dispatch supplémentaire, notée au plan.
