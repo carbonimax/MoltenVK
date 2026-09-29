@@ -1649,8 +1649,10 @@ id<CAMetalDrawable> MVKPresentableSwapchainImage::getCAMetalDrawable() {
 			uint32_t attemptCnt = _swapchain->getImageCount();	// Attempt a resonable number of times
 			for (uint32_t attemptIdx = 0; !_mtlDrawable && attemptIdx < attemptCnt; attemptIdx++) {
 				uint64_t startTime = getPerformanceTimestamp();
-				_mtlDrawable = [_swapchain->getCAMetalLayer().nextDrawable retain];	// retained
+				_mtlDrawable = requestNextDrawable();	// retained
 				addPerformanceInterval(getPerformanceStats().queue.retrieveCAMetalDrawable, startTime);
+				// While the device is being lost, the encoding goes on without a drawable: its submission is lost.
+				if ( !_mtlDrawable && getDevice()->isLosing() ) { return nil; }
 				hasInvalidFormat = _mtlDrawable && !_mtlDrawable.texture.pixelFormat;
 				if (hasInvalidFormat) { releaseMetalDrawable(); }
 			}
@@ -1662,6 +1664,40 @@ id<CAMetalDrawable> MVKPresentableSwapchainImage::getCAMetalDrawable() {
 		}
 	}
 	return _mtlDrawable;
+}
+
+// Requests the next drawable of the layer on the surface's drawable queue, and waits for it. The wait checks every
+// millisecond whether the device is being lost, and then gives up: an encoding, which the loss report waits for, never
+// waits in Core Animation, where nextDrawable may take a second or more. A drawable that arrives after the wait gave up
+// is released at the end of its request, which returns it to the layer. The request uses neither this image nor the
+// device. Returns the drawable retained, or nil.
+id<CAMetalDrawable> MVKPresentableSwapchainImage::requestNextDrawable() {
+	struct Request {
+		std::mutex lock;
+		std::condition_variable done;
+		id<CAMetalDrawable> drawable = nil;
+		bool isDone = false;
+		bool isAbandoned = false;
+	};
+	auto request = std::make_shared<Request>();
+	CAMetalLayer* mtlLayer = _swapchain->getCAMetalLayer();		// retained by the block
+	dispatch_async(_swapchain->_surface->getDrawableQueue(), ^{
+		@autoreleasepool {
+			id<CAMetalDrawable> drawable = mtlLayer.nextDrawable;
+			std::lock_guard<std::mutex> lock(request->lock);
+			if ( !request->isAbandoned ) { request->drawable = [drawable retain]; }
+			request->isDone = true;
+			request->done.notify_one();
+		}
+	});
+	std::unique_lock<std::mutex> lock(request->lock);
+	while ( !request->done.wait_for(lock, std::chrono::milliseconds(1), [&request]{ return request->isDone; }) ) {
+		if (getDevice()->isLosing()) {
+			request->isAbandoned = true;
+			return nil;
+		}
+	}
+	return request->drawable;
 }
 
 // If not headless, retrieve the MTLTexture directly from the CAMetalDrawable.
