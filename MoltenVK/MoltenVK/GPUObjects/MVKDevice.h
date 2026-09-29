@@ -712,8 +712,14 @@ public:
 	 */
 	VkResult markLost(bool alsoMarkPhysicalDevice = false);
 
-	/** Returns whether this device has started to be lost, even if host waits do not report it yet. */
-	bool isLosing() { return _losing.load(std::memory_order_acquire); }
+	/**
+	 * Returns whether this device has started to be lost, even if host waits do not report it yet.
+	 *
+	 * Sequentially consistent: an encoding admits itself by incrementing the count of active encodings, then reading
+	 * this, while the loss is set, then that count is read. One of the two reads must see the other write. An acquire
+	 * load may be served before the preceding increment is visible (LDAPR on arm64), and both could then miss.
+	 */
+	bool isLosing() { return _losing.load(); }
 
 	/**
 	 * Returns the result of a host wait that returned with the specified completion.
