@@ -23,7 +23,7 @@ repeats=${4:-3}
 modes=("${@:5}")
 (( ${#modes[@]} )) || modes=(counter-race binary-generation destroy-after-loss event-wait teardown teardown-multi teardown-nil teardown-nil-transient
 	prefill-abandon-reset prefill-abandon-free prefill-abandon-pool prefill-abandon-reset-lost prefill-abandon-free-lost prefill-abandon-pool-lost
-	metal-error metal-error-multi external-queue-wait)
+	metal-error metal-error-multi metal-error-batches metal-error-batches2 metal-error-calls external-queue-wait)
 [[ $side == before || $side == after ]] || { echo 'side must be before or after'; exit 64; }
 # The runner runs again as a child whose output tee records, so that the log is complete when this parent hashes it.
 if [[ -z ${PERVERTEX_RUNNER_CHILD:-} ]]; then
