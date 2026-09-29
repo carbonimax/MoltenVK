@@ -18,6 +18,37 @@ Seuls R9 (`d24159ce`) et R8 (`67dd59d4`, complété en `1deebd18` et `d4110762`)
 
 **Révision 9.** La revue de la révision 8 juge que R8 démontre le mécanisme visé, mais n'est pas clos ; R6 reste fermé, le GO limité pour R5 demeure. Elle relève trois cas que les oracles M4 ne couvrent pas. `1deebd18` les corrige (§0 septies). R5 n'est toujours pas commencé.
 
+**Révision 10.** La revue de R8 bis (`975961a2`) confirme ses trois corrections dans le code ; R8 reste à qualifier sans mémoire unifiée (le kit de §0 septies attend un Mac Intel à Radeon, en fin de parcours avec M1 et M3). Avant de coder R5, sous le GO limité, trois questions sont soumises à la revue, avec les faits mesurés qui les fondent (§0 octies). R5 n'est pas commencé.
+
+## 0 octies. R5 : questions à la revue avant toute implémentation
+
+**Fait 1 : R5 suppose R1.** Le retrait de R5 « passe en état de retrait (R1, point 1), puis vide la liste différée » (point 3), et le jeton de présentation est terminé par `MVKSwapchain::destroyNow()` (point 6), deux pièces de R1. R1 n'est pas codé ; l'ordre d'implémentation (§6) place R1 avant R5. Le GO limité ne couvre que R5 et R8.
+
+**Fait 2 : sans R6, aucune séquence valide n'expose ce que R5 change.** Aujourd'hui, `~MVKDevice` attend `_activeEncodings`, `_pendingMTLCommandBufferHandlers` et le job de publication ; `publishLoss()` attend les deux mêmes comptes avant de rapporter la perte. Une application ne peut détruire un device perdu, avec du travail en cours, qu'après qu'une attente a rapporté la perte : les attentes du destructeur sont alors déjà satisfaites. Mesure sur M4, `lib-d4110762`, 6 exécutions par cas (`device-destroy-*`, `2f15b402`) :
+
+| Séquence | `vkDestroyDevice` | Statut |
+| --- | --- | --- |
+| travail de l'application bloqué, C derrière, perte ; attente hôte ; l'application libère son travail 300 ms après la perte ; l'attente rapporte la perte 5 à 7 ms plus tard ; destruction des objets puis du device | **0,2 à 0,3 ms** | valide |
+| même début ; `vkDestroyDevice` 100 ms après la perte, C en attente | **bloque 200 à 210 ms**, jusqu'à la libération | invalide aujourd'hui ; légal une fois la perte rapportée en temps fini (R6) |
+
+- R5 ne change que la seconde ligne, et le jeton de présentation ne corrige, lui aussi, qu'une destruction de swapchain avant la fin de ses présentations, invalide sans perte (§3.13, §5.2).
+- Les rouges de R5 ne peuvent donc être, avant R6, que des **témoins de mécanisme en usage aujourd'hui invalide**, comme ceux de R8. O14 et O18 sont des gardes de non-régression : vraisemblablement verts avant comme après.
+- R1 est dans la même situation : O2 à O6 échouent aujourd'hui par délai dépassé, faute de R6 (§5).
+
+**Fait 3 : du travail à rouge en usage valide existe hors de R5 (constat statique, non reproduit).** `MVKQueryPool::getResults()` avec `VK_QUERY_RESULT_WAIT_BIT` attend sur `_availabilityBlocker`, dont le prédicat lit la perte (`MVKQueryPool.mm:86`, `117`). Mais la publication de la perte (`MVKDevice.mm:4049`) ne le réveille pas. Or une requête encodée passe à « DeviceAvailable » dès l'encodage (`MVKQueryPool.mm:38`), et ne devient jamais disponible si son command buffer est abandonné (`MVKCommandBuffer.mm:1712`), par exemple une soumission préremplie acceptée puis refusée à l'exécution par la perte. Une attente commencée avant la publication peut alors ne jamais rendre la main, contrairement à la section « Lost Device ». Cela relève de R3, sans dépendre de R6. Pour le reproduire, il faut forcer l'ordre « soumission acceptée, perte, exécution refusée » ; aucun crochet actuel ne le permet.
+
+**Options.**
+- **A.** R1 puis R5 maintenant, comme mécanismes, avec des oracles témoins en usage aujourd'hui invalide et des gardes de non-régression. C'est la plus grosse refonte de la série (vie du device, sept surcharges de `destroy()`, présentation), sans correctif visible avant R6. Relecteurs upstream : difficile à valider.
+- **B.** R5 seul maintenant, les étapes de R1 laissées vides (liste différée vide). Le retrait devient la destruction actuelle, sans attente, déclenchée par la dernière référence. Plus petit, mais le jeton de présentation reste partiel sans `MVKSwapchain::destroyNow()`.
+- **C.** Geler R1 et R5 avec R6, et les livrer ensemble quand O17 permettra d'ouvrir R6. En attendant, travailler ce qui a des rouges en usage valide et ce qui bloque R6 : reproduire O17 (`nextDrawable` bloqué), puis R3 (attentes hôte, dont le constat 3).
+
+**Recommandation : C.** Chaque pièce de R1 et R5 n'a d'effet qu'une fois la perte rapportée en temps fini. Les livrer avant R6 ajoute une refonte de la durée de vie que rien d'observable n'exerce, que les oracles ne prouveraient que par des séquences aujourd'hui invalides, et qu'une revue upstream ne pourrait pas juger sur pièces. O17 est la vraie porte de R6.
+
+**Questions à la revue.**
+1. R5 : A, B ou C ?
+2. Si A ou B : des témoins de mécanisme en usage aujourd'hui invalide suffisent-ils comme oracles rouges de R5, comme pour R8 ?
+3. La prochaine passe peut-elle prendre O17, puis R3 (constat 3 d'abord), avant R5 ?
+
 ## 0 septies. Réponse à la revue de la révision 8 (R8 non clos)
 
 | Constat | Vérifié | Correction (`1deebd18`) | Preuve |
