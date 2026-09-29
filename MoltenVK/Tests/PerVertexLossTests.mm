@@ -42,7 +42,9 @@
 //   command buffer recorded with vkCmdUpdateBuffer, whose data MoltenVK copies to a pooled Metal buffer, is never
 //   submitted, then reset, freed, or destroyed with its pool (after a device loss with -lost). Exit 0 when the update
 //   never runs and no Metal handler of it runs after the cleanup call returned (its pooled buffer and pool may be gone);
-//   1 otherwise, or a crash.
+//   1 otherwise, or a crash. With a MoltenVK test build (mvkTestGetOutstandingCommandPoolAllocations), the reset and
+//   free variants also require the pooled buffer to return to its pool exactly once: one allocation outstanding after
+//   recording, none after the cleanup, and still none after the command buffer is freed and its pool reset.
 // metal-error, metal-error-multi: C's Metal command buffer reports an error (a page fault) once complete, and Metal
 //   runs its handlers in reverse order, so that a completion handler may run before the error handler. C signals an
 //   imported binary semaphore and a fence. With -multi, C holds two Metal command buffers (deferred prefill): the first
@@ -679,9 +681,14 @@ int prefillAbandon(Context& c, const std::string& variant) {
 	check(vkAllocateCommandBuffers(c.device, &allocation, &commands), "vkAllocateCommandBuffers");
 	VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
 	check(vkBeginCommandBuffer(commands, &begin), "vkBeginCommandBuffer");
+	auto outstanding = reinterpret_cast<uint64_t (*)(VkCommandPool)>(dlsym(RTLD_DEFAULT, "mvkTestGetOutstandingCommandPoolAllocations"));
+	// Counts are unsigned: a second return of the same allocation wraps below zero.
+	bool measured = outstanding && cleanup != "pool";
+	uint64_t beforeRecord = outstanding ? outstanding(pool) : 0;
 	uint32_t data[4] = {kMarker, kMarker, kMarker, kMarker};
 	vkCmdUpdateBuffer(commands, target.buffer, 0, sizeof(data), data);
 	check(vkEndCommandBuffer(commands), "vkEndCommandBuffer");
+	uint64_t afterRecord = outstanding ? outstanding(pool) : 0;
 	if (lost) { c.markLost(c.device); sleepMs(50); }
 	int committedBefore = gHandlersCommitted;
 	if (cleanup == "reset") {
@@ -693,18 +700,31 @@ int prefillAbandon(Context& c, const std::string& variant) {
 	}
 	gCleanupReturned = true;
 	int committedByCleanup = gHandlersCommitted - committedBefore;
+	uint64_t afterCleanup = measured ? outstanding(pool) : 0;
 	sleepMs(int(gHandlerDelayUs / 1000) * 8 + 300);
+	uint64_t afterWait = measured ? outstanding(pool) : 0;
+	// Later cleanups of the same command buffer and pool must not return the allocation again.
+	if (cleanup == "reset") { vkFreeCommandBuffers(c.device, pool, 1, &commands); }
+	if (cleanup != "pool") { vkResetCommandPool(c.device, pool, 0); }
+	uint64_t afterLaterCleanups = measured ? outstanding(pool) : 0;
 	uint32_t written = target.mapped[0];
 	int late = gHandlersLate;
 	bool executed = written == kMarker;
-	std::printf("cleanup=%s lost=%d handlers_committed_by_cleanup=%d late_handlers=%d target=%08x\n",
-				cleanup.c_str(), int(lost), committedByCleanup, late, written);
-	std::printf("PREFILL_ABANDON %s: %s\n", !executed && !late ? "PASS" : "FAIL",
+	bool exactlyOnce = !measured || (afterRecord == beforeRecord + 1 && afterCleanup == beforeRecord && afterWait == beforeRecord
+									  && afterLaterCleanups == beforeRecord);
+	std::printf("cleanup=%s lost=%d handlers_committed_by_cleanup=%d late_handlers=%d target=%08x outstanding_allocations(measured=%d): "
+				"before_record=%llu after_record=%llu after_cleanup=%llu after_wait=%llu after_later_cleanups=%llu\n",
+				cleanup.c_str(), int(lost), committedByCleanup, late, written, int(measured), (unsigned long long)beforeRecord,
+				(unsigned long long)afterRecord, (unsigned long long)afterCleanup, (unsigned long long)afterWait, (unsigned long long)afterLaterCleanups);
+	bool pass = !executed && !late && exactlyOnce;
+	std::printf("PREFILL_ABANDON %s: %s\n", pass ? "PASS" : "FAIL",
 				executed ? "the abandoned vkCmdUpdateBuffer ran" : late ? "handlers ran after the cleanup returned"
+				: !exactlyOnce ? "the pooled buffer did not return to its pool exactly once"
+				: measured ? "the abandoned command never ran, its buffer returned to its pool exactly once, no handler outlived the cleanup"
 				: "the abandoned command never ran, and no handler outlived the cleanup");
 	if (cleanup != "pool") { vkDestroyCommandPool(c.device, pool, nullptr); }
 	c.destroy(target);
-	return !executed && !late ? 0 : 1;
+	return pass ? 0 : 1;
 }
 
 int metalErrorBatches(Context& c, const std::string& variant) {

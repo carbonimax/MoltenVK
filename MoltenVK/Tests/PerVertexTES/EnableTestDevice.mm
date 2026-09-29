@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Linked only by the TES and mesh test drivers, never by shipping CMake/Xcode targets.
 #include "MVKDevice.h"
+#include "MVKCommandPool.h"
 struct TestPhysicalDevice : MVKPhysicalDevice {
     static void enable(MVKPhysicalDevice* device) {
         // Use the same initialization convention as MVKPhysicalDevice::initExtensions.
@@ -43,4 +44,31 @@ struct TestDevice : MVKDevice {
 // still encoding. A loss test reads them when a host wait returns the loss, which must find both at zero.
 extern "C" void mvkTestGetLossCounters(VkDevice device, int64_t* pendingHandlers, uint32_t* activeEncodings) {
     TestDevice::getLossCounters(MVKDevice::getMVKDevice(device), pendingHandlers, activeEncodings);
+}
+
+struct TestAllocationPool : MVKMTLBufferAllocationPool {
+    static uint64_t outstanding(MVKMTLBufferAllocationPool* pool) {
+        uint64_t count = 0;
+        for (auto& tracker : pool->* &TestAllocationPool::_mtlBuffers) { count += tracker.allocationCount; }
+        return count;
+    }
+};
+struct TestAllocator : MVKMTLBufferAllocator {
+    static uint64_t outstanding(MVKMTLBufferAllocator* allocator) {
+        uint64_t count = 0;
+        for (auto* pool : allocator->* &TestAllocator::_regionPools) { count += TestAllocationPool::outstanding(pool); }
+        return count;
+    }
+};
+struct TestEncodingPool : MVKCommandEncodingPool {
+    static uint64_t outstanding(MVKCommandEncodingPool* pool) {
+        return TestAllocator::outstanding(&(pool->* &TestEncodingPool::_mtlBufferAllocator))
+             + TestAllocator::outstanding(&(pool->* &TestEncodingPool::_privateMtlBufferAllocator))
+             + TestAllocator::outstanding(&(pool->* &TestEncodingPool::_dedicatedMtlBufferAllocator));
+    }
+};
+// The temporary Metal buffer allocations of a command pool that have not been returned to it: a cleanup test checks
+// that each one returns exactly once.
+extern "C" uint64_t mvkTestGetOutstandingCommandPoolAllocations(VkCommandPool commandPool) {
+    return TestEncodingPool::outstanding(((MVKCommandPool*)commandPool)->getCommandEncodingPool());
 }
