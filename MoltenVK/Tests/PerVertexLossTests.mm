@@ -48,6 +48,11 @@
 //   imported binary semaphore and a fence. With -multi, C holds two Metal command buffers (deferred prefill): the first
 //   fails, and its handlers run 200 ms after those of the second. Exit 0 when the fence reports the loss and the
 //   semaphore is never signalled; 1 when the failed work is reported complete.
+// metal-error-batches, -batches2, -calls: the failed Metal command buffer is batch 1 of a vkQueueSubmit with two
+//   batches (vkQueueSubmit2 with -batches2), or of a first vkQueueSubmit call followed by a second one on the same
+//   queue (-calls). Only batch 2 has the fence, and signals the imported binary semaphore. Batch 1's handlers run
+//   200 ms after batch 2's. A fence covers every batch submitted before it to its queue: exit 0 when it reports the
+//   loss and the semaphore is never signalled; 1 when batch 2 reports complete work that batch 1's failure precedes.
 // Exit 2 for a setup failure, 3 when the device lacks a capability.
 #import <Metal/Metal.h>
 #include <objc/runtime.h>
@@ -137,7 +142,7 @@ Context createContext() {
 	bool hasPortability = false;
 	for (const auto& available : instanceExtensions) { hasPortability |= std::strcmp(available.extensionName, portability) == 0; }
 	VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-	app.apiVersion = VK_API_VERSION_1_2;
+	app.apiVersion = VK_API_VERSION_1_3;
 	VkInstanceCreateInfo instanceInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
 	instanceInfo.flags = hasPortability ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0;
 	instanceInfo.pApplicationInfo = &app;
@@ -168,6 +173,9 @@ Context createContext() {
 	queues[1].pQueuePriorities = priorities;
 	VkPhysicalDeviceTimelineSemaphoreFeatures timeline{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
 	timeline.timelineSemaphore = VK_TRUE;
+	VkPhysicalDeviceSynchronization2Features synchronization2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES};
+	synchronization2.synchronization2 = VK_TRUE;
+	timeline.pNext = &synchronization2;	// vkQueueSubmit2 in the metal-error-batches2 mode
 	const char* extensions[] = {VK_EXT_METAL_OBJECTS_EXTENSION_NAME, "VK_KHR_portability_subset"};
 	VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
 	deviceInfo.pNext = &timeline;
@@ -699,6 +707,79 @@ int prefillAbandon(Context& c, const std::string& variant) {
 	return !executed && !late ? 0 : 1;
 }
 
+int metalErrorBatches(Context& c, const std::string& variant) {
+	installHandlerHooks(c);
+	gFailedDispatchDelayUs = 200000;
+	id<MTLSharedEvent> event = [c.mtlDevice newSharedEvent];
+	VkSemaphore binary = importedSemaphore(c, event, false);
+	Buffer marker = c.buffer(64, true);
+	VkCommandPool pool = commandPool(c);
+	VkCommandBuffer commands[2];
+	VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+	allocation.commandPool = pool;
+	allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	allocation.commandBufferCount = 2;
+	check(vkAllocateCommandBuffers(c.device, &allocation, commands), "vkAllocateCommandBuffers");
+	for (uint32_t i = 0; i < 2; ++i) {
+		VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+		check(vkBeginCommandBuffer(commands[i], &begin), "vkBeginCommandBuffer");
+		vkCmdFillBuffer(commands[i], marker.buffer, 4 * i, 4, kMarker);
+		check(vkEndCommandBuffer(commands[i]), "vkEndCommandBuffer");
+	}
+	VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+	VkFence fence;
+	check(vkCreateFence(c.device, &fenceInfo, nullptr, &fence), "vkCreateFence");
+	gFailNextCommits = 1;	// batch 1's Metal command buffer fails
+	if (variant == "metal-error-batches2") {
+		auto submit2 = reinterpret_cast<PFN_vkQueueSubmit2>(vkGetDeviceProcAddr(c.device, "vkQueueSubmit2"));
+		if (!submit2) { std::fprintf(stderr, "vkQueueSubmit2 unavailable\n"); return 3; }
+		VkCommandBufferSubmitInfo buffers[2] = {{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO}, {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO}};
+		buffers[0].commandBuffer = commands[0];
+		buffers[1].commandBuffer = commands[1];
+		VkSemaphoreSubmitInfo signal{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+		signal.semaphore = binary;
+		signal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+		VkSubmitInfo2 batches[2] = {{VK_STRUCTURE_TYPE_SUBMIT_INFO_2}, {VK_STRUCTURE_TYPE_SUBMIT_INFO_2}};
+		batches[0].commandBufferInfoCount = 1;
+		batches[0].pCommandBufferInfos = &buffers[0];
+		batches[1].commandBufferInfoCount = 1;
+		batches[1].pCommandBufferInfos = &buffers[1];
+		batches[1].signalSemaphoreInfoCount = 1;
+		batches[1].pSignalSemaphoreInfos = &signal;
+		check(submit2(c.qb, 2, batches, fence), "vkQueueSubmit2");
+	} else {
+		VkSubmitInfo batches[2] = {{VK_STRUCTURE_TYPE_SUBMIT_INFO}, {VK_STRUCTURE_TYPE_SUBMIT_INFO}};
+		batches[0].commandBufferCount = 1;
+		batches[0].pCommandBuffers = &commands[0];
+		batches[1].commandBufferCount = 1;
+		batches[1].pCommandBuffers = &commands[1];
+		batches[1].signalSemaphoreCount = 1;
+		batches[1].pSignalSemaphores = &binary;
+		if (variant == "metal-error-calls") {
+			check(vkQueueSubmit(c.qb, 1, &batches[0], VK_NULL_HANDLE), "vkQueueSubmit batch 1");
+			check(vkQueueSubmit(c.qb, 1, &batches[1], fence), "vkQueueSubmit batch 2");
+		} else {
+			check(vkQueueSubmit(c.qb, 2, batches, fence), "vkQueueSubmit");
+		}
+	}
+	VkResult report = vkWaitForFences(c.device, 1, &fence, VK_TRUE, 5000000000ull);
+	uint64_t eventAtReport = event.signaledValue;
+	sleepMs(400);
+	std::printf("wait=%d semaphore_event_at_report=%llu semaphore_event_later=%llu marker_batches=%08x %08x\n", int(report),
+				(unsigned long long)eventAtReport, (unsigned long long)event.signaledValue, marker.mapped[0], marker.mapped[1]);
+	bool pass = report == VK_ERROR_DEVICE_LOST && !eventAtReport && !event.signaledValue;
+	std::printf("METAL_ERROR %s: %s\n", pass ? "PASS" : "FAIL",
+				report == VK_SUCCESS ? "batch 2's fence reported complete work that batch 1's failure precedes"
+				: eventAtReport || event.signaledValue ? "batch 2 signalled the binary semaphore after batch 1 failed"
+				: report != VK_ERROR_DEVICE_LOST ? "unexpected wait result" : "the failure was reported as a loss, and nothing as complete");
+	vkDestroyFence(c.device, fence, nullptr);
+	vkDestroyCommandPool(c.device, pool, nullptr);
+	c.destroy(marker);
+	vkDestroySemaphore(c.device, binary, nullptr);
+	[event release];
+	return pass ? 0 : 1;
+}
+
 int metalError(Context& c, const std::string& variant) {
 	bool multi = variant == "metal-error-multi";
 	const char* prefill = getenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS");
@@ -824,10 +905,11 @@ int main(int argc, char** argv) {
 		isPrefill |= mode == std::string("prefill-abandon-") + cleanup || mode == std::string("prefill-abandon-") + cleanup + "-lost";
 	}
 	bool isMetalError = mode == "metal-error" || mode == "metal-error-multi";
+	bool isMetalErrorBatches = mode == "metal-error-batches" || mode == "metal-error-batches2" || mode == "metal-error-calls";
 	if (mode != "counter-race" && mode != "binary-generation" && mode != "destroy-after-loss" && mode != "event-wait" && mode != "external-queue-wait"
-		&& !isTeardown && !isPrefill && !isMetalError) {
+		&& !isTeardown && !isPrefill && !isMetalError && !isMetalErrorBatches) {
 		std::fprintf(stderr, "usage: %s counter-race|binary-generation|destroy-after-loss|event-wait|external-queue-wait|teardown[-multi|-nil|-nil-transient]"
-					 "|prefill-abandon-{reset,free,pool}[-lost]|metal-error[-multi]\n", argv[0]);
+					 "|prefill-abandon-{reset,free,pool}[-lost]|metal-error[-multi|-batches|-batches2|-calls]\n", argv[0]);
 		return 64;
 	}
 	@autoreleasepool {
@@ -839,7 +921,8 @@ int main(int argc, char** argv) {
 		}
 		int rc = mode == "counter-race" ? counterRace(c) : mode == "binary-generation" ? binaryGeneration(c)
 			: mode == "event-wait" ? eventWait(c) : mode == "external-queue-wait" ? externalQueueWait(c)
-			: isPrefill ? prefillAbandon(c, mode) : isMetalError ? metalError(c, mode) : destroyAfterLoss(c);
+			: isPrefill ? prefillAbandon(c, mode) : isMetalError ? metalError(c, mode)
+			: isMetalErrorBatches ? metalErrorBatches(c, mode) : destroyAfterLoss(c);
 		std::fflush(stdout);
 		// The device is lost: destroying it is still valid, idle waits would only report the loss.
 		vkDestroyDevice(c.device, nullptr);
