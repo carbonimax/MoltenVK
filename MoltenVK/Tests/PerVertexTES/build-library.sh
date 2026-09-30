@@ -9,6 +9,7 @@
 # 16.0, for the Vulkan trial app. The
 # MoltenVK CMake project only targets macOS: its AppKit and IOKit lookups are pointed at UIKit and CoreGraphics.
 # MVK_TEST_ARCH (default arm64) selects the architecture, for example x86_64 for an Intel Mac.
+# MVK_TEST_BUILD_TYPE (default Debug) selects the CMake build type, for example Release for performance measurements.
 set -euo pipefail
 test_dir=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$test_dir/../../.." && pwd)
@@ -58,12 +59,12 @@ if [[ $platform == ios || $platform == ios-simulator ]]; then
 elif [[ $platform != macos ]]; then
 	echo "MVK_TEST_PLATFORM must be macos, ios or ios-simulator"; exit 64
 fi
-cmake -S "$output/driver" -B "$output/build" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_OSX_ARCHITECTURES="${MVK_TEST_ARCH:-arm64}" ${platform_flags[@]+"${platform_flags[@]}"} > "$output/configure.log" 2>&1
+cmake -S "$output/driver" -B "$output/build" -G Ninja -DCMAKE_BUILD_TYPE="${MVK_TEST_BUILD_TYPE:-Debug}" -DCMAKE_OSX_ARCHITECTURES="${MVK_TEST_ARCH:-arm64}" ${platform_flags[@]+"${platform_flags[@]}"} > "$output/configure.log" 2>&1
 cmake --build "$output/build" --target MoltenVK -j "$(sysctl -n hw.ncpu)" > "$output/build.log" 2>&1
 library=$output/build/moltenvk/MoltenVK/libMoltenVK.1.4.3.dylib
 {
 	echo "moltenvk_head=$(git -C "$root" rev-parse HEAD) dirty_files=$(git -C "$root" status --porcelain --untracked-files=no | wc -l | tr -d ' ')"
 	echo "spirv_cross_head=$(git -C "$cross" rev-parse HEAD)"
-	echo "admission=$admission test_device=$device extra=${extra:-none} platform=$platform$([[ ${MVK_TEST_ARCH:-arm64} == arm64 ]] || echo " arch=$MVK_TEST_ARCH")"
+	echo "admission=$admission test_device=$device extra=${extra:-none} platform=$platform$([[ ${MVK_TEST_ARCH:-arm64} == arm64 ]] || echo " arch=$MVK_TEST_ARCH")$([[ ${MVK_TEST_BUILD_TYPE:-Debug} == Debug ]] || echo " build_type=$MVK_TEST_BUILD_TYPE")"
 	echo "library_sha256=$(shasum -a 256 "$library" | cut -d' ' -f1)"
 } | tee "$output/PROVENANCE.txt"
