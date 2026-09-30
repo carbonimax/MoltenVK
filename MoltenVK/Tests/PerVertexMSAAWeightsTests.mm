@@ -10,7 +10,12 @@
 // Exit 0: identical and within the threshold; 4: identical but above the threshold (the open defect); 2: static and
 // dynamic differ. The four images are written as raw RGBA to the output directory.
 // ordinary-offset-list replaces the PerVertexKHR fragment by interpolateAtOffset on an ordinary input, as a control.
-// Usage: pervertex-msaa-weights <shader directory> offset-list|offset-strip|sample-strip|ordinary-offset-list <output directory>
+// samples-list and samples-strip check the ordinary reference itself, without PerVertexKHR: its fragment stores every
+// sample's unquantized colour and gl_SamplePosition. Each sample must sit at the Vulkan standard 4x location, and its
+// colour must match the perspective-correct interpolation computed in double on the CPU at that location, within one
+// 8-bit step (1/255). Exit 0: all samples within; 4: some above (the reference defect); 2: a position or coverage error.
+// Usage: pervertex-msaa-weights <shader directory> offset-list|offset-strip|sample-strip|ordinary-offset-list|samples-list|
+//        samples-strip <output directory>
 #import <Metal/Metal.h>
 #include <vulkan/vulkan.h>
 
@@ -50,10 +55,11 @@ struct Vertex { float position[4], color[4]; };
 
 int main(int argc, char** argv) {
 	@autoreleasepool {
-	if (argc != 4) { std::fprintf(stderr, "Usage: pervertex-msaa-weights shader-dir offset-list|offset-strip|sample-strip|ordinary-offset-list output-dir\n"); return 2; }
+	if (argc != 4) { std::fprintf(stderr, "Usage: pervertex-msaa-weights shader-dir offset-list|offset-strip|sample-strip|ordinary-offset-list|samples-list|samples-strip output-dir\n"); return 2; }
 	const std::string shaders = argv[1], name = argv[2], output = argv[3];
-	if (name != "offset-list" && name != "offset-strip" && name != "sample-strip" && name != "ordinary-offset-list") { std::fprintf(stderr, "Unknown case\n"); return 2; }
-	const bool strip = name == "offset-strip" || name == "sample-strip";
+	const bool samplesCase = name == "samples-list" || name == "samples-strip";
+	if (name != "offset-list" && name != "offset-strip" && name != "sample-strip" && name != "ordinary-offset-list" && !samplesCase) { std::fprintf(stderr, "Unknown case\n"); return 2; }
+	const bool strip = name == "offset-strip" || name == "sample-strip" || name == "samples-strip";
 	const VkPrimitiveTopology topology = strip ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
 	uint32_t count = 0;
@@ -88,10 +94,11 @@ int main(int argc, char** argv) {
 	VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 	features.pNext = &barycentric;
 	vkGetPhysicalDeviceFeatures2(physical, &features);
-	if (!barycentric.fragmentShaderBarycentric || !features.features.sampleRateShading) { std::fprintf(stderr, "Required features are unavailable\n"); return 3; }
+	if (!barycentric.fragmentShaderBarycentric || !features.features.sampleRateShading || (samplesCase && !features.features.fragmentStoresAndAtomics)) { std::fprintf(stderr, "Required features are unavailable\n"); return 3; }
 	VkPhysicalDeviceFeatures2 enabled{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 	enabled.pNext = &barycentric;
 	enabled.features.sampleRateShading = VK_TRUE;
+	enabled.features.fragmentStoresAndAtomics = samplesCase;
 	vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, nullptr);
 	std::vector<VkQueueFamilyProperties> families(count);
 	vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, families.data());
@@ -223,6 +230,40 @@ int main(int argc, char** argv) {
 	VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
 	VkPipelineLayout layout = VK_NULL_HANDLE;
 	check(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &layout), "Create pipeline layout");
+	// The samples cases: two vec4 per sample (colour; gl_SamplePosition and gl_FragCoord.xy), in a set of their own.
+	const VkDeviceSize samplesSize = VkDeviceSize(kSide) * kSide * 4 * 2 * 16;
+	Buffer samples = makeBuffer(samplesCase ? samplesSize : 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+	VkDescriptorSet set = VK_NULL_HANDLE;
+	if (samplesCase) {
+		VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+		VkDescriptorSetLayoutCreateInfo setLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+		setLayoutInfo.bindingCount = 1;
+		setLayoutInfo.pBindings = &binding;
+		VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+		check(vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &setLayout), "Create set layout");
+		VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+		VkDescriptorPoolCreateInfo descriptorPoolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+		descriptorPoolInfo.maxSets = 1;
+		descriptorPoolInfo.poolSizeCount = 1;
+		descriptorPoolInfo.pPoolSizes = &poolSize;
+		VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+		check(vkCreateDescriptorPool(device, &descriptorPoolInfo, nullptr, &descriptorPool), "Create descriptor pool");
+		VkDescriptorSetAllocateInfo setInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+		setInfo.descriptorPool = descriptorPool;
+		setInfo.descriptorSetCount = 1;
+		setInfo.pSetLayouts = &setLayout;
+		check(vkAllocateDescriptorSets(device, &setInfo, &set), "Allocate descriptor set");
+		VkDescriptorBufferInfo samplesInfo{samples.buffer, 0, VK_WHOLE_SIZE};
+		VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+		write.dstSet = set;
+		write.descriptorCount = 1;
+		write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		write.pBufferInfo = &samplesInfo;
+		vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+		layoutInfo.setLayoutCount = 1;
+		layoutInfo.pSetLayouts = &setLayout;
+		check(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &layout), "Create samples pipeline layout");
+	}
 
 	auto module = [&](const std::string& file) {
 		auto code = readSpirv(shaders + "/" + file);
@@ -234,7 +275,8 @@ int main(int argc, char** argv) {
 		return result;
 	};
 	VkShaderModule vertex = module("msaa-weights.vert.spv");
-	VkShaderModule test = module(name == "sample-strip" ? "msaa-sample.frag.spv" : name == "ordinary-offset-list" ? "msaa-ordinary-offset.frag.spv" : "msaa-offset.frag.spv"), reference = module("msaa-reference.frag.spv");
+	VkShaderModule test = samplesCase ? VK_NULL_HANDLE : module(name == "sample-strip" ? "msaa-sample.frag.spv" : name == "ordinary-offset-list" ? "msaa-ordinary-offset.frag.spv" : "msaa-offset.frag.spv");
+	VkShaderModule reference = module(samplesCase ? "msaa-samples.frag.spv" : "msaa-reference.frag.spv");
 	// A dynamic topology pipeline is created with a triangle list, as the CTS does (primitiveTopologyCastToList).
 	auto graphicsPipeline = [&](VkShaderModule fragment, bool dynamicTopology) {
 		VkPipelineShaderStageCreateInfo stages[2]{{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
@@ -325,6 +367,7 @@ int main(int argc, char** argv) {
 		pass.pClearValues = &clear;
 		vkCmdBeginRenderPass(cb, &pass, VK_SUBPASS_CONTENTS_INLINE);
 		vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+		if (samplesCase) vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, nullptr);
 		VkDeviceSize offset = 0;
 		vkCmdBindVertexBuffers(cb, 0, 1, &vertexBuffer.buffer, &offset);
 		vkCmdDraw(cb, uint32_t(vertices.size()), 1, 0, 0);
@@ -334,9 +377,9 @@ int main(int argc, char** argv) {
 		copy.imageExtent = {kSide, kSide, 1};
 		vkCmdCopyImageToBuffer(cb, resolveImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1, &copy);
 		VkMemoryBarrier toHost{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-		toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
 		toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-		vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, nullptr, 0, nullptr);
+		vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, nullptr, 0, nullptr);
 		check(vkEndCommandBuffer(cb), "End command buffer");
 		memset(readback.data, 0, kSide * kSide * 4);
 		check(vkResetFences(device, 1, &fence), "Reset fence");
@@ -350,6 +393,60 @@ int main(int argc, char** argv) {
 		vkDestroyPipeline(device, pipeline, nullptr);
 		return rgba;
 	};
+	if (samplesCase) {
+		memset(samples.data, 0, samplesSize);
+		render(reference, false, "reference-static.rgba");
+		std::ofstream(output + "/samples.bin", std::ios::binary).write(reinterpret_cast<const char*>(samples.data), std::streamsize(samplesSize));
+		// Vulkan standard sample locations for 4 samples (VkPhysicalDeviceLimits::standardSampleLocations).
+		const double locations[4][2] = {{0.375, 0.125}, {0.875, 0.375}, {0.125, 0.625}, {0.625, 0.875}};
+		// Triangles as the topology assembles them; each vertex in window coordinates, with its w and colour.
+		std::vector<uint32_t> triangles = strip ? std::vector<uint32_t>{0, 1, 2, 1, 2, 3} : std::vector<uint32_t>{0, 1, 2, 3, 4, 5};
+		auto window = [&](const Vertex& v, int axis) { return (double(v.position[axis]) / double(v.position[3]) + 1.0) * 0.5 * kSide; };
+		const float* data = reinterpret_cast<const float*>(samples.data);
+		uint32_t written = 0, misplaced = 0, outside = 0, above = 0, onDiagonal = 0;
+		double worst = 0;
+		uint32_t worstPixel = 0, worstSample = 0;
+		for (uint32_t pixel = 0; pixel < kSide * kSide; ++pixel) {
+			for (uint32_t sample = 0; sample < 4; ++sample) {
+				const float* value = data + (size_t(pixel) * 4 + sample) * 8;
+				if (value[3] != 1.0f) continue;
+				++written;
+				if (std::abs(double(value[4]) - locations[sample][0]) > 1e-6 || std::abs(double(value[5]) - locations[sample][1]) > 1e-6) ++misplaced;
+				const double px = pixel % kSide + locations[sample][0], py = pixel / kSide + locations[sample][1];
+				// The triangle that contains the sample, or the nearest one; on the strip's shared edge both give the same value.
+				double best = -1e30, expected[3] = {};
+				for (size_t t = 0; t < triangles.size(); t += 3) {
+					const Vertex* v[3] = {&vertices[triangles[t]], &vertices[triangles[t + 1]], &vertices[triangles[t + 2]]};
+					double x[3], y[3], l[3];
+					for (int i = 0; i < 3; ++i) { x[i] = window(*v[i], 0); y[i] = window(*v[i], 1); }
+					const double area = (x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]);
+					l[0] = ((x[1] - px) * (y[2] - py) - (x[2] - px) * (y[1] - py)) / area;
+					l[1] = ((x[2] - px) * (y[0] - py) - (x[0] - px) * (y[2] - py)) / area;
+					l[2] = 1 - l[0] - l[1];
+					const double inside = std::min(l[0], std::min(l[1], l[2]));
+					if (inside <= best) continue;
+					best = inside;
+					double sum = 0, b[3];
+					for (int i = 0; i < 3; ++i) { b[i] = l[i] / double(v[i]->position[3]); sum += b[i]; }
+					for (int c = 0; c < 3; ++c) expected[c] = (b[0] * v[0]->color[c] + b[1] * v[1]->color[c] + b[2] * v[2]->color[c]) / sum;
+				}
+				outside += best < -1e-9;
+				double error = 0;
+				for (int c = 0; c < 3; ++c) error = std::max(error, std::abs(double(value[c]) - expected[c]));
+				if (error > worst) { worst = error; worstPixel = pixel; worstSample = sample; }
+				if (error > 1.0 / 255) { ++above; onDiagonal += pixel % kSide == pixel / kSide; }
+			}
+		}
+		std::printf("samples: written=%u of %u, off the standard location=%u, outside every triangle=%u\n", written, kSide * kSide * 4, misplaced, outside);
+		std::printf("samples vs CPU interpolation: above_1/255=%u (on the diagonal %u), max_error=%.6f (%.2f/255) at pixel (%u, %u) sample %u\n",
+		            above, onDiagonal, worst, worst * 255, worstPixel % kSide, worstPixel / kSide, worstSample);
+		const int exitCode = written == 0 || misplaced ? 2 : above ? 4 : 0;
+		std::printf("PERVERTEX_MSAA_WEIGHTS %s %s\n", exitCode == 0 ? "PASS" : exitCode == 4 ? "ABOVE_ONE_STEP" : "FAIL", name.c_str());
+		vkDeviceWaitIdle(device);
+		vkDestroyDevice(device, nullptr);
+		vkDestroyInstance(instance, nullptr);
+		return exitCode;
+	}
 	const auto testStatic = render(test, false, "test-static.rgba"), testDynamic = render(test, true, "test-dynamic.rgba");
 	const auto referenceStatic = render(reference, false, "reference-static.rgba"), referenceDynamic = render(reference, true, "reference-dynamic.rgba");
 
