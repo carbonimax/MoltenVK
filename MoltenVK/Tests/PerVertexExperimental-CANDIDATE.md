@@ -39,7 +39,7 @@ spirv-val (SPIRV-Tools v2026.3), GNU timeout 9.11, Python 3.12.8. CTS : VK-GL-CT
   du dossier courant ; la révision embarquée doit être celle du candidat.
 - **Activation expérimentale explicite :** l'application appelle `mvkEnableTESFixtureDevice(VkPhysicalDevice)`
   (recherché par `dlsym`). Malgré son nom historique, cette fonction n'ouvre que `VK_KHR_fragment_shader_barycentric`,
-  là où Metal fournit les coordonnées barycentriques (`EnableTestDevice.mm:5-9, 25`). Sans cet appel, l'extension reste
+  là où Metal fournit les coordonnées barycentriques (`EnableTestDevice.mm:8-12, 25`). Sans cet appel, l'extension reste
   fermée (`MVKDevice.mm:3632-3636`).
 - **Contenu de test assumé :** la bibliothèque exporte aussi les crochets de test de `EnableTestDevice.mm`
   (`mvkTestMarkDeviceLost`, `mvkTestLimitMetalBufferSize`, compteurs). C'est une bibliothèque expérimentale, pas une
