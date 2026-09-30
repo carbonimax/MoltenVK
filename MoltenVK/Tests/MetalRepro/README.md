@@ -14,7 +14,8 @@ writes to a device buffer, the strip and the fan-indexed draw are shaded per sam
 ## Environment
 
 - Apple M4 Pro, macOS 27.2 (26B5091g), Metal 4.
-- Standalone Metal program, no Vulkan layer. The shaders are the MSL that MoltenVK generates for the Vulkan CTS test
+- Standalone Metal program, no Vulkan layer. The shaders are the MSL that MoltenVK generates for the reference
+  fragment of `PerVertexMSAAWeightsTests.mm` (case `sample-strip`), which mirrors the Vulkan CTS test
   `dEQP-VK.fragment_shading_barycentric.weights.*.msaa_sample_qualifier.triangle_strip`, compiled with
   `MTLMathModeFast`, `MTLMathFloatingPointFunctionsFast`, `preserveInvariance = NO`.
 
