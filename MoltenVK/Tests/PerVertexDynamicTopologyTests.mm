@@ -3,10 +3,12 @@
 // Portable PerVertexKHR with VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY. One render pass draws the same vertices with each
 // topology of a class (triangle list, strip, fan; or line list, strip), changing the topology between draws. The image
 // must equal the same draws through one static pipeline per topology, and differ from the dynamic pipeline kept at its
-// first topology, so that each change is applied. Direct or indexed draws. The adjacency form sets
-// VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY, valid within the triangle class but outside capture and replay:
-// recording must fail with VK_ERROR_FEATURE_NOT_PRESENT and nothing is submitted.
-// Usage: pervertex-dynamic-topology <shader directory> triangles|lines direct|indexed|adjacency
+// first topology, so that each change is applied. Direct, indexed, indirect or indexed indirect draws. The adjacency
+// form sets VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY, valid within the triangle class but outside capture and
+// replay: recording must fail with VK_ERROR_FEATURE_NOT_PRESENT and nothing is submitted. The ordinary fragment has no
+// PerVertexKHR input, so the same draws test MoltenVK's ordinary path, which converts triangle fans to triangles.
+// Usage: pervertex-dynamic-topology <shader directory> triangles|lines direct|indexed|indirect|indexed-indirect|adjacency
+//        [pervertex|ordinary]
 #import <Metal/Metal.h>
 #include <vulkan/vulkan.h>
 
@@ -43,10 +45,11 @@ struct Buffer { VkBuffer buffer = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NUL
 
 int main(int argc, char** argv) {
 	@autoreleasepool {
-	if (argc != 4) { std::fprintf(stderr, "Usage: pervertex-dynamic-topology shader-dir triangles|lines direct|indexed|adjacency\n"); return 2; }
-	const std::string shaders = argv[1], klass = argv[2], form = argv[3];
-	if ((klass != "triangles" && klass != "lines") || (form != "direct" && form != "indexed" && form != "adjacency") || (form == "adjacency" && klass != "triangles")) { std::fprintf(stderr, "Unknown case\n"); return 2; }
-	const bool indexed = form == "indexed", adjacency = form == "adjacency";
+	if (argc != 4 && argc != 5) { std::fprintf(stderr, "Usage: pervertex-dynamic-topology shader-dir triangles|lines direct|indexed|indirect|indexed-indirect|adjacency [pervertex|ordinary]\n"); return 2; }
+	const std::string shaders = argv[1], klass = argv[2], form = argv[3], fragmentKind = argc == 5 ? argv[4] : "pervertex";
+	const bool indexed = form == "indexed" || form == "indexed-indirect", indirect = form == "indirect" || form == "indexed-indirect";
+	const bool adjacency = form == "adjacency", ordinary = fragmentKind == "ordinary";
+	if ((klass != "triangles" && klass != "lines") || (form != "direct" && !indexed && !indirect && !adjacency) || (adjacency && (klass != "triangles" || ordinary)) || (!ordinary && fragmentKind != "pervertex")) { std::fprintf(stderr, "Unknown case\n"); return 2; }
 	const std::vector<VkPrimitiveTopology> topologies = klass == "triangles"
 		? std::vector<VkPrimitiveTopology>{VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN}
 		: std::vector<VkPrimitiveTopology>{VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_STRIP};
@@ -85,13 +88,14 @@ int main(int argc, char** argv) {
 	VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 	features.pNext = &features11;
 	vkGetPhysicalDeviceFeatures2(physical, &features);
-	if (!barycentric.fragmentShaderBarycentric || !features11.shaderDrawParameters || !features.features.vertexPipelineStoresAndAtomics) { std::fprintf(stderr, "Required features are unavailable\n"); return 3; }
+	if (!barycentric.fragmentShaderBarycentric || !features11.shaderDrawParameters || !features.features.vertexPipelineStoresAndAtomics || (indirect && !features.features.drawIndirectFirstInstance)) { std::fprintf(stderr, "Required features are unavailable\n"); return 3; }
 	VkPhysicalDeviceVulkan11Features enable11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
 	enable11.shaderDrawParameters = VK_TRUE;
 	enable11.pNext = &barycentric;
 	VkPhysicalDeviceFeatures2 enabled{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 	enabled.pNext = &enable11;
 	enabled.features.vertexPipelineStoresAndAtomics = VK_TRUE;
+	enabled.features.drawIndirectFirstInstance = indirect;
 	vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, nullptr);
 	std::vector<VkQueueFamilyProperties> families(count);
 	vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, families.data());
@@ -114,7 +118,7 @@ int main(int argc, char** argv) {
 	vkGetDeviceQueue(device, family, 0, &queue);
 	VkPhysicalDeviceProperties properties{};
 	vkGetPhysicalDeviceProperties(physical, &properties);
-	std::printf("DEVICE=%s class=%s form=%s\n", properties.deviceName, klass.c_str(), form.c_str());
+	std::printf("DEVICE=%s class=%s form=%s fragment=%s\n", properties.deviceName, klass.c_str(), form.c_str(), fragmentKind.c_str());
 
 	auto memoryType = [&](uint32_t bits, VkMemoryPropertyFlags flags) {
 		VkPhysicalDeviceMemoryProperties memory{};
@@ -147,6 +151,12 @@ int main(int argc, char** argv) {
 	Buffer effects = makeBuffer(16 + (1u << 18) * 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 	Buffer indices = makeBuffer(14 * sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 	for (uint32_t i = 0; i < 14; ++i) reinterpret_cast<uint32_t*>(indices.data)[i] = i;
+	// One command per draw, with the arguments of the direct and indexed forms.
+	Buffer commands = makeBuffer(3 * sizeof(VkDrawIndexedIndirectCommand), VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+	for (uint32_t i = 0; i < 3; ++i) {
+		if (indexed) reinterpret_cast<VkDrawIndexedIndirectCommand*>(commands.data)[i] = {6, 1, 4, 0, 2 + i % 2};
+		else reinterpret_cast<VkDrawIndirectCommand*>(commands.data)[i] = {6, 1, 4, 2 + i % 2};
+	}
 	Buffer readback = makeBuffer(kSide * kSide * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 
 	VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -249,7 +259,7 @@ int main(int argc, char** argv) {
 		return result;
 	};
 	// The PORTABLE fragment also reads BaryCoordKHR, so every pipeline takes the portable capture and replay.
-	VkShaderModule vertex = module("indirect.vert.spv"), fragment = module("pervertex-portable.frag.spv");
+	VkShaderModule vertex = module("indirect.vert.spv"), fragment = module(ordinary ? "ordinary.frag.spv" : "pervertex-portable.frag.spv");
 	auto graphicsPipeline = [&](VkPrimitiveTopology topology, bool dynamicTopology, VkPipeline& result) {
 		VkPipelineShaderStageCreateInfo stages[2]{{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
 		stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -307,7 +317,7 @@ int main(int argc, char** argv) {
 	VkPipeline dynamicPipeline = VK_NULL_HANDLE;
 	VkResult dynamicCreated = graphicsPipeline(topologies[0], true, dynamicPipeline);
 	std::printf("dynamic topology pipeline: vkCreateGraphicsPipelines=%d\n", int(dynamicCreated));
-	if (dynamicCreated != VK_SUCCESS) { std::printf("PERVERTEX_DYNAMIC_TOPOLOGY FAIL %s %s: the dynamic topology pipeline is refused\n", klass.c_str(), form.c_str()); return 1; }
+	if (dynamicCreated != VK_SUCCESS) { std::printf("PERVERTEX_DYNAMIC_TOPOLOGY FAIL %s %s %s: the dynamic topology pipeline is refused\n", klass.c_str(), form.c_str(), fragmentKind.c_str()); return 1; }
 
 	VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
 	poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -346,10 +356,11 @@ int main(int argc, char** argv) {
 			else vkCmdSetPrimitiveTopology(cb, adjacency && i == 1 ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY : mode == 1 ? topologies[i] : topologies[0]);
 			vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, nullptr);
 			const uint32_t firstInstance = 2 + uint32_t(i % 2);
-			if (indexed) {
-				vkCmdBindIndexBuffer(cb, indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-				vkCmdDrawIndexed(cb, 6, 1, 4, 0, firstInstance);
-			} else vkCmdDraw(cb, 6, 1, 4, firstInstance);
+			if (indexed) vkCmdBindIndexBuffer(cb, indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+			if (indirect && indexed) vkCmdDrawIndexedIndirect(cb, commands.buffer, i * sizeof(VkDrawIndexedIndirectCommand), 1, sizeof(VkDrawIndexedIndirectCommand));
+			else if (indirect) vkCmdDrawIndirect(cb, commands.buffer, i * sizeof(VkDrawIndirectCommand), 1, sizeof(VkDrawIndirectCommand));
+			else if (indexed) vkCmdDrawIndexed(cb, 6, 1, 4, 0, firstInstance);
+			else vkCmdDraw(cb, 6, 1, 4, firstInstance);
 		}
 		vkCmdEndRenderPass(cb);
 		VkBufferImageCopy copy{};
@@ -391,8 +402,11 @@ int main(int argc, char** argv) {
 	const uint32_t expected = uint32_t(topologies.size()) * 6;
 	std::printf("static vs dynamic: covered=%u pixel_mismatches=%u; dynamic differs from its first topology kept=%d; VS invocations static=%u dynamic=%u expected=%u\n",
 	            covered, mismatches, int(changed), staticResult.invocations, dynamicResult.invocations, expected);
-	const bool pass = covered > 0 && mismatches == 0 && changed && staticResult.invocations == expected && dynamicResult.invocations == expected;
-	std::printf("PERVERTEX_DYNAMIC_TOPOLOGY %s %s %s\n", pass ? "PASS" : "FAIL", klass.c_str(), form.c_str());
+	// The ordinary path may shade a vertex more than once (a converted fan is indexed): it must only match static.
+	const bool invocationsMatch = ordinary ? staticResult.invocations >= expected && dynamicResult.invocations == staticResult.invocations
+	                                       : staticResult.invocations == expected && dynamicResult.invocations == expected;
+	const bool pass = covered > 0 && mismatches == 0 && changed && invocationsMatch;
+	std::printf("PERVERTEX_DYNAMIC_TOPOLOGY %s %s %s %s\n", pass ? "PASS" : "FAIL", klass.c_str(), form.c_str(), fragmentKind.c_str());
 	vkDeviceWaitIdle(device);
 	vkDestroyDevice(device, nullptr);
 	vkDestroyInstance(instance, nullptr);
