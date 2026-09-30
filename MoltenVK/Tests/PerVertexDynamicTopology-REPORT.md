@@ -333,7 +333,7 @@ Mêmes étapes que `final-r6`, plus l'oracle de topologie dynamique complet et l
 
 Avec `+ 0.5`, l'image d'offset PerVertexKHR est identique au bit près à l'image d'offset ordinaire et à la référence, dans les deux modes.
 
-**Conclusion.** Sur Apple M4, le décalage de 1/16 explique à lui seul l'écart d'offset, et `+ 0.5` ne dégrade aucun cas CTS mesuré. Le commentaire de SPIRV-Cross dit que `+ 0.5` casse des tests CTS sur Intel ; ce n'est pas vérifié ici. Aucun correctif n'est proposé avant la validation Intel.
+**Conclusion.** Sur Apple M4, le décalage de 1/16 explique à lui seul l'écart d'offset, et `+ 0.5` ne dégrade aucun cas CTS mesuré. Deux listes ont été mesurées : la liste barycentrique exécutable (2 851 cas) et `multisample_interpolation.*offset*` (73 cas). Les autres groupes CTS qui utilisent `interpolateAtOffset`, sous `glsl` par exemple, n'ont pas été lancés. Le commentaire de SPIRV-Cross dit que `+ 0.5` casse des tests CTS sur Intel ; ce n'est pas vérifié ici. Aucun correctif n'est proposé avant la validation Intel.
 
 **Preuves** (`build/astra/`, chacune avec son `EVIDENCE.sha256`) :
 - `lib-dd2a8957-offset-half/` ;
@@ -365,11 +365,22 @@ Chaque échantillon doit se trouver à l'emplacement standard 4× de Vulkan (`st
 | Au premier échantillon couvert | 55/77 | 67/77 |
 | Au centroïde des échantillons couverts | 51/77 | 77/77 |
 
-En `plain`, la référence ordinaire sans effet de bord est donc interpolée au centre du pixel sur les pixels partagés par les deux triangles de la bande. L'échantillonnage par échantillon (`sampleShadingEnable`, `minSampleShading = 1`, entrée `sample`) n'y est pas appliqué. Il l'est sous validation Metal, et il l'est aussi en `plain` dès que le fragment écrit dans un buffer.
+Sur toute l'image, les deux modèles principaux donnent :
+
+| Modèle | Accord avec l'image `plain` | Accord avec l'image validée |
+| --- | --- | --- |
+| Interpolation à chaque échantillon | 16 359/16 384 | **16 384/16 384** |
+| Interpolation au centre du pixel | **16 384/16 384** | 16 360/16 384 |
+
+En `plain`, la référence ordinaire sans effet de bord se comporte donc comme une interpolation au centre du pixel, **au moins** sur les pixels partagés par les deux triangles de la bande. Ailleurs, les deux modèles sont indiscernables à ±1 : je ne peux pas dire si le centre du pixel sert seulement sur l'arête ou partout. L'échantillonnage par échantillon (`sampleShadingEnable`, `minSampleShading = 1`, entrée `sample`) n'y est pas appliqué. Il l'est sous validation Metal, et aussi en `plain` dès que le fragment écrit dans un buffer.
 - Le MSL est identique entre les modes : la cause se situe sous le MSL. Elle n'est pas établie davantage.
 - La liste, avec la même arête diagonale, n'est pas touchée.
 
 **La CTS ordinaire ne le voit pas.** Le groupe `dEQP-VK.pipeline.monolithic.multisample_interpolation.*` (247 cas) donne des résultats identiques dans les deux modes : 84 réussites, 3 échecs antérieurs (`nonuniform_interpolant_indexing.*`), 160 non pris en charge.
+
+**Rôle de chaque essai.**
+- **Détecteur.** C'est `msaa-weights sample-strip` en `plain` : sortie 4, 25 pixels au-dessus du seuil, tous sur la diagonale.
+- **Référence vérifiée.** Les cas `samples-*` sont la référence contrôlée par le CPU : ils prouvent que l'interpolation elle-même est juste. Ils ne peuvent pas détecter le défaut, puisque l'observation le fait disparaître.
 
 **Statut.** C'est un défaut du chemin ordinaire en mode `plain`, distinct de PerVertexKHR. Il est suivi, mais pas corrigé.
 
@@ -377,7 +388,7 @@ En `plain`, la référence ordinaire sans effet de bord est donc interpolée au 
 
 ## 17. Référence triangulée avec des `w` différents (`0e1c187c`, `d3d389ee`, test seul)
 
-**La variation de `w`.** Sous `VARIED_W`, le VS du harnais et celui de la référence multiplient la position de clip de chaque sommet par `1 + 0,75 × (v mod 3)`. La position à l'écran ne change pas, mais les trois coins d'un triangle ont des `w` différents. Le SPIR-V par défaut des cinq shaders est inchangé, vérifié octet par octet.
+**La variation de `w`.** Sous `VARIED_W`, le VS du harnais et celui de la référence multiplient la position de clip de chaque sommet par `1 + 0,75 × (v mod 3)`. La position à l'écran ne change pas, mais les trois coins d'un triangle ont des `w` différents. Les cinq SPIR-V par défaut (produits par trois fichiers source) sont inchangés, vérifiés octet par octet.
 
 **Deux nouveaux fragments.**
 - `weights-w` : `BaryCoordKHR`, comparé au poids de référence interpolé avec perspective.
@@ -392,14 +403,14 @@ En `plain`, la référence ordinaire sans effet de bord est donc interpolée au 
 - référence tournée : 1 488 pixels en écart ;
 - référence de l'autre interpolation : 1 487 pixels en écart, écart maximal 29.
 
-Les formes déjà qualifiées (`weights`, `pervertex`, `ordinary`, lignes) restent vertes sur le même binaire.
+Sur le même binaire, la série complète du harnais passe : 29 cas sur 29 (`build/astra/dyntopo-all-eab15045/`). Elle comprend les 17 cas de la section 9, les 4 formes `weights` et les 8 formes à `w` variés.
 
 **Limites.**
 - Sommet provoquant « premier » seulement.
 - Triangles seulement.
 - Pas de MSAA dans cette référence.
 
-**Preuves** : `build/astra/dyntopo-weights-w-0e1c187c/` (avant le témoin d'interpolation), `build/astra/dyntopo-weights-w-d3d389ee/`.
+**Preuves** : `build/astra/dyntopo-weights-w-0e1c187c/` (avant le témoin d'interpolation), `build/astra/dyntopo-weights-w-d3d389ee/`, `build/astra/dyntopo-all-eab15045/`.
 
 ## 18. État et décisions demandées
 
