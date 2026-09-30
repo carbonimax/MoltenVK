@@ -5,9 +5,9 @@
 #   --verify-only  integrity, signatures, library identity and the identity probe (a Metal device and a Vulkan instance,
 #                  no GPU work submitted).
 #   --qualify      the same, then the closed test list, in order: B dynamic topology oracle, C capture/replay split,
-#                  D CTS minimal scope, E CTS ordinary topologies, F CTS minimal scope on the candidate library without
-#                  activation. Each step compares every case, by name and status, with expected/; the first divergence
-#                  or failure stops every later step (NOT-RUN).
+#                  D CTS minimal scope, F CTS minimal scope on the candidate library without activation, and last E, CTS
+#                  ordinary topologies, whose expected statuses depend most on the Mac. Each step compares every case,
+#                  by name and status, with expected/; the first divergence or failure stops every later step (NOT-RUN).
 # Each invocation writes reports/<UTC>-<PID>/ and reports/<UTC>-<PID>.tar.gz, to send back even on failure.
 # Exit: 0 every step identical to its expected file, 1 failure or divergence, 64 usage, 75 another run is active.
 set -euo pipefail
@@ -103,7 +103,7 @@ problems=
 say "IDENTITY PASS: source_commit=$source_commit mvk_revision=$(cap vk.mvk_revision) loaded=$images loaded_sha256=$loaded_sha256"
 say "  metal=\"$(cap mtl.name)\" vulkan=\"$(cap vk.device_name)\" os=\"$(cap os.version)\" apple7=$(cap mtl.family.apple7) apple9=$(cap mtl.family.apple9) apple10=$(cap mtl.family.apple10)"
 say "  guard: fragmentShaderBarycentric without activation=$(cap vk.public.feature.fragmentShaderBarycentric), after mvkEnableTESFixtureDevice=$(cap vk.feature.fragmentShaderBarycentric)"
-say 'PLAN: B dynamic topology (14), C split (2), D CTS minimal scope (1201), E CTS ordinary (562), F CTS without activation (1201)'
+say 'PLAN: B dynamic topology (14), C split (2), D CTS minimal scope (1201), F CTS without activation (1201), E CTS ordinary (562)'
 [[ "$mode" == --qualify ]] || { say 'VERIFY-ONLY COMPLETE: no GPU work submitted'; completed=1; exit 0; }
 
 # 3. The closed test list, in order. A failure or a divergence stops every later step.
@@ -153,8 +153,9 @@ step() { # NAME DESCRIPTION FUNCTION ARGS...
 step B 'dynamic topology oracle' program_step B dynamic-topology dynamic "$root/expected/B.txt" 0 'PERVERTEX_DYNAMIC_TOPOLOGY PASS @CASE@$' PASS
 step C 'capture/replay split, memoryless attachments' program_step C split split "$root/expected/C.txt" 4 'SPLIT_ATTACHMENT REFUSED' REFUSED
 step D 'CTS minimal scope, candidate activated through the CTS shim' cts_step D "$root/lib/libpervertex-cts-shim.dylib" experimental-vsfs-barycentric.txt D.csv PERVERTEX_CTS_MOLTENVK="$library"
-step E 'CTS ordinary topologies and fans, through the CTS shim' cts_step E "$root/lib/libpervertex-cts-shim.dylib" ordinary-fan-topology.txt E.csv PERVERTEX_CTS_MOLTENVK="$library"
 step F 'CTS minimal scope, candidate library without activation' cts_step F "$library" experimental-vsfs-barycentric.txt F.csv
+# E last: its expected statuses were measured on M4; a Mac with other capabilities may differ without a candidate defect.
+step E 'CTS ordinary topologies and fans, through the CTS shim' cts_step E "$root/lib/libpervertex-cts-shim.dylib" ordinary-fan-topology.txt E.csv PERVERTEX_CTS_MOLTENVK="$library"
 /usr/bin/shasum -a 256 -c SHA256SUMS > "$report/integrity-after.log" 2>&1 || { say 'VERIFY FAIL after the qualification: SHA256SUMS'; exit 1; }
 completed=1
 if [[ $failed != 0 ]]; then say 'QUALIFICATION FAIL'; exit 1; fi

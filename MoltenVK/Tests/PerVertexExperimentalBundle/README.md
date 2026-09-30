@@ -37,9 +37,9 @@ distribution.
 Dans le répertoire de l'archive et de son `.sha256` :
 
 ```bash
-shasum -a 256 -c pervertex-experimental-c2.tar.gz.sha256
-tar -xzf pervertex-experimental-c2.tar.gz
-cd pervertex-experimental-c2
+shasum -a 256 -c pervertex-experimental-c3.tar.gz.sha256
+tar -xzf pervertex-experimental-c3.tar.gz
+cd pervertex-experimental-c3
 ./run.sh --verify-only
 ./run.sh --qualify
 ```
@@ -62,14 +62,19 @@ quarantaine du répertoire extrait, puis recommencez : `xattr -dr com.apple.quar
 | B | Oracle de topologie dynamique : 14 cas (triangles et lignes ; direct et indexé ; fragments `pervertex`, `ordinary`, et pour les triangles `weights`, `weights-w`, `weights-w-noperspective`) | `PASS` chacun | 60 s par cas |
 | C | Séparation capture/rejeu, attachements memoryless (profondeur, stencil) | `REFUSED` chacun (sortie 4) | 60 s par cas |
 | D | CTS `fragment_shading_barycentric`, périmètre minimal, 1 201 cas, candidat activé par le shim CTS | `Pass` chacun | paquets de 200, 1 800 s par paquet |
-| E | CTS ordinaire, topologies et éventails, 562 cas, par le shim CTS | statut de chaque cas identique à la référence | idem |
-| F | **Bibliothèque candidate sans activation** : la liste D, `deqp-vk` recevant directement la bibliothèque | `NotSupported` chacun (prévu, jamais mesuré avant ce bundle) | idem |
+| F | **Bibliothèque candidate sans activation** : la liste D, `deqp-vk` recevant directement la bibliothèque | `NotSupported` chacun | idem |
+| E | CTS ordinaire, topologies et éventails, 562 cas, par le shim CTS, **en dernier** | statut de chaque cas identique à la référence M4 | idem |
 
 Chaque étape compare **chaque cas, par son nom et son statut**, au fichier de `expected/` : un cas absent, en trop ou de
 statut différent est une divergence (`compare-<étape>.txt`). Les totaux sont affichés mais ne décident rien. Un saut ou un
 `NotSupported` là où `Pass` est attendu est une absence de preuve, donc une divergence. Chaque journal doit aussi annoncer
 la validation Metal, ne contenir aucune erreur de validation ou d'exécution, et ne charger que la bibliothèque du bundle.
 **La première divergence ou le premier échec arrête toutes les étapes suivantes** (`NOT-RUN`).
+
+E passe en dernier parce que ses statuts attendus ont été mesurés sur M4 et dépendent le plus du Mac : ses 5 `Fail`
+(`*_bind_unused_ms`) supposent l'adaptateur mesh ouvert, donc Metal 3 (macOS 13 ou plus). Une divergence de E sur un autre
+Mac est une donnée à attribuer (capacité ou défaut) avant tout correctif ; elle ne remet pas en cause les étapes déjà
+passées.
 
 **F n'est pas un build de production.** Dans F, l'adaptateur reste lié à la bibliothèque candidate mais n'est jamais
 appelé. Un build de production sans adaptateur (`test_device OFF`) n'est ni contenu ni testé par ce bundle.
