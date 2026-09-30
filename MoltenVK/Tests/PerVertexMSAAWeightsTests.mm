@@ -13,7 +13,8 @@
 // samples-list and samples-strip check the ordinary reference itself, without PerVertexKHR: its fragment stores every
 // sample's unquantized colour and gl_SamplePosition. Each sample must sit at the Vulkan standard 4x location, and its
 // colour must match the perspective-correct interpolation computed in double on the CPU at that location, within one
-// 8-bit step (1/255). Exit 0: all samples within; 4: some above (the reference defect); 2: a position or coverage error.
+// 8-bit step (1/255). The geometry covers the whole image, so every one of the 128 x 128 x 4 samples must be written
+// and inside a triangle. Exit 0: all samples within; 4: some above; 2: a position or coverage error.
 // Usage: pervertex-msaa-weights <shader directory> offset-list|offset-strip|sample-strip|ordinary-offset-list|samples-list|
 //        samples-strip <output directory>
 #import <Metal/Metal.h>
@@ -440,7 +441,7 @@ int main(int argc, char** argv) {
 		std::printf("samples: written=%u of %u, off the standard location=%u, outside every triangle=%u\n", written, kSide * kSide * 4, misplaced, outside);
 		std::printf("samples vs CPU interpolation: above_1/255=%u (on the diagonal %u), max_error=%.6f (%.2f/255) at pixel (%u, %u) sample %u\n",
 		            above, onDiagonal, worst, worst * 255, worstPixel % kSide, worstPixel / kSide, worstSample);
-		const int exitCode = written == 0 || misplaced ? 2 : above ? 4 : 0;
+		const int exitCode = written != kSide * kSide * 4 || misplaced || outside ? 2 : above ? 4 : 0;
 		std::printf("PERVERTEX_MSAA_WEIGHTS %s %s\n", exitCode == 0 ? "PASS" : exitCode == 4 ? "ABOVE_ONE_STEP" : "FAIL", name.c_str());
 		vkDeviceWaitIdle(device);
 		vkDestroyDevice(device, nullptr);
