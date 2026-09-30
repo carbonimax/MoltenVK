@@ -494,7 +494,7 @@ La bibliothèque A/B de la section 15 venait du commit `5114c453` du même clone
 
 **Ce que cela établit.**
 1. **Le défaut est dans Metal.** Pour la bande, l'image Metal seul est identique au bit près à la référence MoltenVK, en `plain` comme en validé. L'éventail indexé donne une image identique à celle de la bande, donc le même accord avec les modèles (le modèle du centre du pixel l'explique sur 16 384 pixels sur 16 384).
-2. **Ce qui rétablit l'exécution par échantillon :** une écriture en mémoire, même sans lecture de `sample_id` ni de la position. Une lecture de `sample_id`, même non repliable, ne suffit pas.
+2. **Ce qui rétablit l'exécution par échantillon :** une écriture en mémoire, même sans lecture de `sample_id` ni de la position. Une lecture de `sample_id`, même non repliable, ne suffit pas. *(Retiré en section 24 : cette lecture n'atteignait qu'un alpha déjà saturé en `RGBA8Unorm`.)*
 3. **Le déclencheur** n'est ni la primitive bande seule, ni le partage de sommets. La bande et l'éventail indexé divergent ; la liste et la liste indexée dans l'ordre de la bande restent justes. Je ne l'ai pas isolé davantage.
 4. Hors de l'arête commune, les deux modèles restent indiscernables à ±1.
 
@@ -520,3 +520,60 @@ Le verdict exige maintenant les 128 × 128 × 4 échantillons, tous écrits et t
 **Décisions demandées.**
 1. **Envoyer le signalement à Apple ?** Le brouillon est prêt ; l'envoi reste à ta main.
 2. **Défaut 1 : faut-il élargir la mesure avant Intel ?** Par exemple, les groupes CTS `glsl` qui utilisent `interpolateAtOffset`.
+
+## 24. Quatrième avis d'Astra et fin du volet MSAA (30 septembre 2026)
+
+**Avis.**
+- Le dossier Apple est prêt à être envoyé par l'utilisateur, après deux nuances.
+- Arrêt avant tout contournement dans MoltenVK.
+- GO pour un dernier A/B CTS borné du candidat SPIRV-Cross, puis gel jusqu'aux essais Intel.
+- Cette qualification ne bloque pas davantage le jalon expérimental PerVertexKHR.
+
+**Les deux nuances du signalement** (`7ad54a6b`).
+1. **Formulation.** Le texte décrit une divergence **compatible** avec une interpolation au centre du pixel. La fréquence d'exécution n'est comptée que dans la variante avec incrément atomique (65 536 invocations, une par échantillon). Pour les autres variantes, elle n'est pas mesurée.
+2. **Variante retirée.** La variante « lecture non repliable de `sample_id` » est retirée du programme et du texte. Elle n'atteignait qu'un alpha déjà saturé en `RGBA8Unorm`, donc sa dépendance observable n'était pas garantie. Le point 2 de la section 21 est annoté en ce sens.
+
+Nouvelle passe du programme réduit à 4 variantes, 32 exécutions (`build/astra/metal-repro-7ad54a6b/`) : chiffres inchangés, et image de la bande toujours identique au bit près à celle de MoltenVK, dans les deux modes.
+
+Le brouillon `MoltenVK/Tests/MetalRepro/README.md` est prêt. **Il reste à envoyer par l'utilisateur.** Aucun contournement n'est fait dans MoltenVK.
+
+## 25. Dernier A/B CTS du candidat SPIRV-Cross
+
+**Sélection.** J'ai relevé les usages d'`interpolateAtOffset` dans les sources et les données de la CTS : quatre fichiers.
+- `vktFragmentShadingBarycentricTests.cpp` et le groupe `multisample_interpolation` monolithique : déjà couverts (section 15).
+- **Non couverts jusqu'ici :**
+  - `vktDrawMultisampleLinearInterpolationTests.cpp` (`dEQP-VK.draw.*.linear_interpolation.*`, 60 cas) ;
+  - les constructions de pipeline non monolithiques de `multisample_interpolation.*offset*` (360 cas).
+- La liste compte 420 cas : `build/cts-lists/ordinary-interpolate-offset-remaining.txt`, dont la provenance est dans `ordinary-lists.txt` et `SHA256SUMS`.
+
+**A/B** avec le runner CTS existant :
+- base : `lib-fb3970cc-tes`, SPIRV-Cross `6af5a67f` ;
+- candidat : `lib-d99c34fb-candidate-6e51dee7` ;
+- même runtime MoltenVK dans les deux bibliothèques.
+
+| | Validé | `plain` |
+| --- | --- | --- |
+| Base | 36 réussites, 384 non pris en charge | 36 réussites, 384 non pris en charge |
+| Candidat | 36 réussites, 384 non pris en charge | 36 réussites, 384 non pris en charge |
+| Changements de statut | 0 | 0 |
+
+- Les 36 cas exécutés sont les `linear_interpolation` à 1, 2 et 4 échantillons, sans offset, offset minimal et offset maximal (0,4375).
+- Les 384 cas non pris en charge sont les bibliothèques de pipeline, les shader objects, et 8 échantillons ou plus.
+
+**Preuves** : `build/astra/cts-offset-remaining-ab/`.
+
+**Gel.** Le candidat est gelé par l'étiquette annotée `candidate-frozen-until-intel` sur `6e51dee7`, dans le clone isolé. Le fork SPIRV-Cross n'est pas modifié.
+
+**Bilan du candidat sur Apple M4.** Sur les 2 851 cas barycentriques et les 493 cas ordinaires d'offset (73 + 420), il n'y a aucune régression. Il corrige les 8 résultats faux validés de l'offset. Il reste non vérifié sur Intel, où l'ancienne valeur était nécessaire selon SPIRV-Cross.
+
+## 26. État à la fin du volet MSAA
+
+- **Admission.** `162a23a4` reste expérimental, et l'extension publique reste fermée.
+- **Éventails dynamiques.**
+  - Le chemin ordinaire est corrigé (`fb3970cc`).
+  - PerVertexKHR est vérifié contre la référence triangulée : poids et ordre, `w` variés, avec et sans perspective, sommet provoquant « premier ».
+- **Défaut 1** (offset SPIRV-Cross). Un candidat est prêt et gelé jusqu'aux essais Intel. Sans lui, 8 résultats faux restent en validé dans la CTS barycentrique.
+- **Défaut 2** (divergence Metal hors validation). Il est reproduit en Metal seul. Le signalement est prêt, à envoyer par l'utilisateur. Il est hors PerVertexKHR, sans contournement.
+- **Sommet provoquant « dernier ».** Explicitement non qualifié.
+- **Gelés.** TES et soumission restent gelés.
+- **Matériel.** M1, M3 et Intel restent pour la fin.
