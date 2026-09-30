@@ -41,7 +41,7 @@ quiet() {
 	if [[ -n $busy ]]; then echo "STOP: another GPU workload is running:"; echo "$busy"; exit 1; fi
 }
 state() {
-	{ date -u; pmset -g therm 2>/dev/null; ps -Ao pid,pcpu,pmem,comm -r | head -8; } > "$1"
+	{ date -u; pmset -g therm 2>/dev/null; ps -Ao pid,pcpu,pmem,comm -r | awk 'NR <= 8'; } > "$1"
 }
 step() { # name expected-exit validated(0|1) form samples order [--no-anchor]
 	local name=$1 expected=$2 validated=$3 run=$output/runs/$1
