@@ -138,3 +138,165 @@ Tout tourne sous validation Metal, sauf la CTS en mode `plain` (et, comme avant,
    - Sans ce correctif, les 24 cas d'éventail restent faux dans la CTS.
 2. **Les 6 à 14 écarts de précision MSAA du chemin portable.** Ils sont à accepter comme limite documentée, ou à ouvrir comme prochain écart. Les ouvrir demanderait d'abord un oracle statique en MSAA, puisque la CTS n'en a pas.
 3. **Garder `162a23a4`.** L'admission est juste là où elle est vérifiée, et aucun cas CTS ne régresse. La CTS n'est pas verte pour autant.
+
+## 8. Suite de la revue d'Astra (30 septembre 2026)
+
+Verdict d'Astra : `162a23a4` reste dans l'admission expérimentale, sans que les éventails dynamiques ni le MSAA soient déclarés qualifiés. Trois suites sont demandées, chacune en série de commits séparée :
+- corriger le défaut des éventails du chemin ordinaire dans un changement séparé ;
+- qualifier les éventails PerVertexKHR contre une référence indépendante, triangulée explicitement, qui vérifie les poids et l'ordre des sommets ;
+- traiter les écarts MSAA comme un défaut ouvert, au seuil CTS inchangé, avec un cas offset et un cas de bande comparés en statique et en dynamique, avec et sans validation Metal.
+
+## 9. Éventails dynamiques du chemin ordinaire (`d9bc1271`, `fb3970cc`)
+
+**Le défaut.** Metal n'a pas d'éventail : MoltenVK dessine un éventail en triangles indexés. Les quatre commandes de dessin choisissaient cette conversion d'après la topologie statique du pipeline.
+
+| Ligne de `MVKCmdDraw.mm` | Fonction |
+| --- | --- |
+| 565 | `MVKCmdDraw::encode` |
+| 847 | `MVKCmdDrawIndexed::encode` |
+| 1506 | `MVKCmdDrawIndirect::encode` |
+| 1902 | `MVKCmdDrawIndexedIndirect::encode` |
+
+`upstream/main` (`a63d4863`, 24 septembre 2026) a le même défaut aux quatre endroits.
+
+**L'oracle (`d9bc1271`, test seul).** Le harnais de la section 2 gagne :
+- un fragment ordinaire, sans PerVertexKHR (`pervertex-dynamic-topology.frag`), qui fait passer les mêmes dessins par le chemin ordinaire ;
+- les formes `indirect` et `indexed-indirect`, qui atteignent les quatre endroits.
+
+Pour le fragment ordinaire, le nombre d'invocations VS doit être égal entre statique et dynamique, et au moins 6 par dessin : un éventail converti est indexé et peut ombrer un sommet plusieurs fois.
+
+**Le correctif (`fb3970cc`).** Les quatre endroits lisent la topologie effective de l'encodeur (`getVkGraphics().getPrimitiveTopology()`). Rien d'autre ne dépend de l'éventail à la création du pipeline : la seule autre lecture est l'avertissement sur le redémarrage (`MVKPipeline.mm:960`).
+
+| Bibliothèque | Résultat |
+| --- | --- |
+| **Avant** : `lib-162a23a4-tes` (runtime identique à `d9bc1271`) | Rouge. Les 4 formes ordinaires de triangles : 362 pixels en écart sur 1 488, 30 invocations VS en statique contre 24 en dynamique. Témoins verts : les 4 formes ordinaires de lignes, et les formes indirectes PerVertexKHR (triangles et lignes). |
+| **Après** : `lib-fb3970cc-tes` (`72663e35…`) | Vert. 17 cas sur 17 : triangles et lignes, 4 formes, fragments ordinaire et PerVertexKHR, plus le refus de l'adjacence. |
+| **Mutations**, un endroit remis à la topologie statique à la fois | Les 4 détectées, chacune par sa forme : 362 pixels en écart. |
+| **Mutation** de `MVKCmdDraw.mm:1130` (encodage indirect PerVertexKHR, `162a23a4`) | Détectée par `triangles:indirect:pervertex` : 1 112 pixels en écart. Cette ligne n'était couverte par aucun oracle avant ce jalon. |
+
+**CTS ordinaire.** Aucun cas CTS ordinaire n'utilise un éventail en topologie dynamique ; seule la référence de la CTS barycentrique le fait. Le filet de régression rassemble les 562 cas qui touchent les éventails ou la topologie dynamique hors barycentrique (`build/cts-lists/ordinary-fan-topology.txt`, `e814c9d5…`) :
+- les éventails statiques de `dEQP-VK.draw.*` ;
+- `input_assembly` pour les éventails, et `restart_mix` en topologie dynamique ;
+- `extended_dynamic_state.*.topology_*` ;
+- les cas de topologie dynamique de `rasterization` et de `dynamic_state`.
+
+Avant et après, sous validation : 258 réussites, 5 échecs, 299 non pris en charge, identiques cas par cas. Les 5 échecs sont antérieurs : deux `restart_disabled_triangle_fan` (Metal ne sait pas désactiver le redémarrage) et trois `bind_unused_ms` refusés.
+
+**Preuves** (chaque dossier de `build/astra/` a son `EVIDENCE.sha256`) :
+- `dyntopo-ordinary-before-d9bc1271/` ;
+- `cts-ordinary-before-d9bc1271/` ;
+- `dyntopo-ordinary-after-fb3970cc/` ;
+- `dyntopo-ordinary-mutations-fb3970cc/` ;
+- `cts-ordinary-after-fb3970cc/`.
+
+**Effet sur la CTS barycentrique** (`final-r7`, section 12). Avec une référence juste, 22 des 24 cas d'éventail passent en validé et 14 en `plain`. Ceux qui échouent encore sont tous MSAA en perspective. Ils rejoignent la famille de la section 11, avec des écarts identiques à ceux de la bande.
+
+## 10. Éventails PerVertexKHR : référence triangulée indépendante (`99796ed3`, test seul)
+
+**La référence.**
+- **Même rendu, sans PerVertexKHR.** Le harnais rend les mêmes trois dessins (liste, bande, éventail) par un pipeline ordinaire en liste de triangles (`pervertex-dynamic-reference.vert`).
+- **Sommets.** Chaque sommet de la référence est un coin d'un triangle explicite. Il porte les valeurs des trois coins en `flat`, et un poids barycentrique à un seul 1, interpolé.
+- **Ordre des coins.** Il suit la table d'ordre barycentrique de Vulkan, sommet provoquant « premier », telle que la CTS l'encode (`getDataVertexFormula` de `vktFragmentShadingBarycentricTests.cpp`) :
+  - liste : (3p, 3p+1, 3p+2) ;
+  - bande : (p, pair ? p+1 : p+2, pair ? p+2 : p+1) ;
+  - éventail : (p+1, p+2, 0).
+- **Fragment `weights`.** R et G portent les deux premiers poids barycentriques ; B combine les trois valeurs de sommet avec des poids fixes par indice. Une permutation cohérente des coins et des poids garde `Σ c[i]·bc[i]`, la seule grandeur que mesure le groupe `weights` de la CTS, mais change les trois canaux.
+- **Témoin négatif intégré.** La même référence, avec les coins de chaque triangle tournés d'un cran, doit différer.
+
+**Résultat** sur `lib-fb3970cc-tes`, 4 formes (directe, indexée, indirecte, indexée indirecte) :
+- pipeline statique et pipeline dynamique égaux à la référence au bit près (0 pixel en écart sur 1 488) ;
+- référence tournée : 1 488 pixels en écart sur 1 488.
+
+**Ce que seule cette référence voit.** Deux mutations remplacent l'ordre de l'éventail (p+1, p+2, 0) par (0, p+1, p+2), c'est-à-dire la même rotation pour le pipeline statique et pour le pipeline dynamique : l'une dans la table CPU (`MVKPerVertexReplay.h`, dessins directs), l'autre dans la table GPU (`MVKCommandPipelineStateFactoryShaderSource.h`, dessins indirects).
+
+| Oracle | Mutation CPU (`triangles:direct`) | Mutation GPU (`triangles:indirect`) |
+| --- | --- | --- |
+| Statique contre dynamique (section 2) | **Aveugle** : PASS, 0 écart | **Aveugle** : PASS, 0 écart |
+| Référence triangulée | Détectée : 744 pixels en écart | Détectée : 744 pixels en écart |
+| CTS, groupe `weights` (8 cas d'éventail, statiques et dynamiques) | **Aveugle** : 8 réussites | — |
+| CTS, groupe `data` (8 cas d'éventail) | Détectée : 8 échecs | — |
+
+**Limites.**
+- Seul le sommet provoquant « premier » est couvert : le harnais n'active pas `VK_EXT_provoking_vertex`.
+- Les lignes ne sont pas couvertes par cette référence.
+
+**Preuves** :
+- `build/astra/dyntopo-weights-99796ed3/` ;
+- `build/astra/dyntopo-weights-mutations-99796ed3/`. Ce dossier contient aussi deux journaux `triangles-ights-pervertex.log` : une erreur de ma ligne de commande (zsh a lu `$form:weights` comme un modificateur), rejetée par le programme avec « Unknown case », puis relancée correctement.
+
+## 11. MSAA : statique contre dynamique, avec et sans validation (`22bf878a`, `7c932571`, test seul)
+
+**Le test** (`PerVertexMSAAWeightsTests.mm`). Il reprend le test `weights` de la CTS : mêmes sommets et couleurs, sommets de droite à w = 16, MSAA 4× avec échantillonnage par échantillon, 128 × 128.
+- **Images rendues.** Pour chaque cas, quatre images :
+  - le fragment PerVertexKHR, par un pipeline statique ;
+  - le même fragment, par un pipeline à topologie dynamique créé en liste, comme la CTS ;
+  - le fragment de référence (couleur interpolée à l'échantillon, sans PerVertexKHR), par ces deux mêmes pipelines.
+- **Codes de sortie.**
+  - 2 : statique et dynamique diffèrent.
+  - 4 : ils sont identiques, mais l'image PerVertexKHR dépasse le seuil CTS de 1 face à la référence. C'est le défaut ouvert, au seuil inchangé.
+  - 0 : identiques et dans le seuil.
+- **Modes.** Le runner prend un mode `validated` ou `plain` et vide le MSL généré (`MVK_CONFIG_SHADER_DUMP_DIR`). Le mode `plain` n'est utilisé que pour ce point, à la demande d'Astra.
+
+**Résultats** sur `lib-fb3970cc-tes` :
+
+| Cas | Mode | Statique contre dynamique | Face à la référence (seuil 1) |
+| --- | --- | --- | --- |
+| offset, liste | validé | identiques (test et référence) | 148 pixels au-dessus, écart 2, colonnes 125 à 127 |
+| offset, liste | `plain` | identiques | 148 pixels, écart 2, colonnes 125 à 127 |
+| offset, bande | validé | identiques | 148 pixels, écart 2, colonnes 125 à 127 |
+| offset, bande | `plain` | identiques | 168 pixels, écart 4, dont 21 sur l'arête commune |
+| échantillon, bande | validé | identiques | 0 pixel, écart 0 |
+| échantillon, bande | `plain` | identiques | 25 pixels, écart 5, tous sur l'arête commune |
+
+Ces chiffres reproduisent ceux de la CTS au pixel près.
+
+**Attribution.**
+1. **L'admission n'y est pour rien.** Dans tous les cas et les deux modes, les images statiques et dynamiques sont identiques au bit près, pour PerVertexKHR comme pour la référence. C'est la mesure qui manquait pour les bandes : jusqu'ici, ce point n'était déduit que du chemin de code.
+2. **L'écart commun aux deux modes vient de la traduction de l'offset par SPIRV-Cross, pas de PerVertexKHR.**
+   - Le MSL généré lit `interpolate_at_offset(gl_SamplePosition - float2(0.5) + 0.4375)`. SPIRV-Cross ajoute 0,4375, et non 0,5, à tout `interpolateAtOffset`, avec ce commentaire dans `spirv_msl.cpp` : « It has to be (1/2 - 1/16) and not 1/2, or several CTS tests subtly break on Intel ». Le point interpolé est donc décalé de 1/16 de pixel.
+   - Le contrôle `ordinary-offset-list` applique `interpolateAtOffset` à une entrée ordinaire, sans PerVertexKHR. Il donne le même écart (148 pixels, écart 2, colonnes 125 à 127), et une image **identique au bit près** à l'image PerVertexKHR, dans les deux modes.
+   - La CTS ordinaire d'interpolation par offset (`multisample_interpolation.*offset*`, 73 cas) passe : 24 réussites, 1 échec antérieur (`nonuniform_interpolant_indexing.offset`), 48 non pris en charge. Ses géométries n'ont pas la perspective forte du test barycentrique.
+3. **Les écarts propres au mode `plain` viennent de la référence, pas de PerVertexKHR.**
+   - Entre `plain` et validé, les images PerVertexKHR sont identiques au bit près dans les trois cas, et le MSL vidé est identique fichier pour fichier.
+   - Ce sont les images de **référence** des bandes (pipeline ordinaire) qui changent : 77 pixels, écart maximal 5, tous sur l'arête commune aux deux triangles.
+   - À MSL égal, la différence naît donc sous le MSL, dans la compilation ou l'exécution Metal du pipeline de référence selon que la validation est active ou non. Je ne sais pas laquelle des deux références est juste.
+   - Le MSL vidé couvre les shaders de l'application ; les shaders de capture et de rejeu de MoltenVK n'y figurent pas. Cela ne change pas la conclusion, puisque les images PerVertexKHR ne varient pas.
+
+**Défaut ouvert, au seuil CTS inchangé.** 8 cas en validé : l'offset en perspective sur ligne, liste, bande et éventail, pour les deux sommets provoquants. 24 cas en `plain`. Aucun n'est déclaré qualifié.
+
+**Preuves** : `build/astra/msaa-weights-22bf878a/`, `build/astra/msaa-weights-7c932571/`, `build/astra/cts-ordinary-offset-fb3970cc/` (liste `build/cts-lists/ordinary-interpolate-offset.txt`).
+
+## 12. Régression complète : `build/astra/final-r7-fb3970cc/`
+
+Mêmes étapes que `final-r6`, plus l'oracle de topologie dynamique complet et le filet CTS ordinaire. `EVIDENCE.sha256` compte 2 596 entrées (sha256 du manifeste `60630397…`).
+
+| Étape | Résultat |
+| --- | --- |
+| Oracles de perte | 0 écart inattendu, 24 exécutions « blocker » connues |
+| Suite de perte, binaire, continuation, oracles TES | 12/12, 21/21, 40/40, 14/14 |
+| Attachements séparés | 0 écart inattendu |
+| Matrice indirecte | 127/127 |
+| TES restreint | 142/142 |
+| Mesh | 41/41 |
+| Contrôles hôte | 10 suites PASS |
+| Topologie dynamique | 17/17 |
+| CTS ordinaire (562 cas) | 258 réussites, 5 échecs antérieurs, 299 non pris en charge |
+| CTS mesh | 9 réussites, inchangé |
+| CTS `fragment_shading_barycentric` | validé 1 325 réussites (+22 face à `final-r6`), `plain` 1 309 (+14) ; aucun cas de Pass à Fail |
+
+**Résultats faux restants** dans la CTS barycentrique : tous dans la famille MSAA de la section 11.
+- Validé, 8 cas : l'offset sur ligne, liste, bande et éventail.
+- `plain`, 24 cas : les mêmes 8, plus les sous-types centroïde et échantillon sur bande et sur éventail.
+
+## 13. Contrat et décisions demandées
+
+**Contrat.**
+- L'extension publique reste fermée, et l'admission reste expérimentale.
+- Les éventails dynamiques sont vérifiés contre la référence triangulée, en sommet provoquant « premier ».
+- Le MSAA reste un défaut ouvert, au seuil CTS inchangé.
+- TES et soumission restent gelés.
+
+**Décisions.**
+1. **Écart d'offset.** Il vient de la traduction générique de SPIRV-Cross. Faut-il l'ouvrir, puisqu'il touche tout `interpolateAtOffset` sur GPU Apple et pas seulement PerVertexKHR ? Le décalage de 1/16 est un compromis voulu pour Intel ; le changer demande des preuves sur Intel, qui restent pour la fin.
+2. **Écarts propres au mode `plain`.** Ils naissent dans le pipeline de référence ordinaire, sous le MSL. Faut-il les suivre, ou les documenter ?
+3. **Éventails en sommet provoquant « dernier ».** Ils restent non vérifiés par la référence triangulée, faute de `VK_EXT_provoking_vertex` dans le harnais.
