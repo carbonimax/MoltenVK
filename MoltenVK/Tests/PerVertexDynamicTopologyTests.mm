@@ -13,7 +13,8 @@
 // every triangle's corners turned by one must differ, so that the check sees vertex order, not only coverage.
 // weights-w and weights-w-noperspective give each corner of a triangle a different w (same window position), so that
 // perspective and linear interpolation differ: BaryCoordKHR against the reference weight interpolated with perspective,
-// BaryCoordNoPerspKHR against the one interpolated without.
+// BaryCoordNoPerspKHR against the one interpolated without. The reference interpolated the other way must differ, so
+// that w reaches the result.
 // Usage: pervertex-dynamic-topology <shader directory> triangles|lines direct|indexed|indirect|indexed-indirect|adjacency
 //        [pervertex|ordinary|weights|weights-w|weights-w-noperspective]
 #import <Metal/Metal.h>
@@ -333,6 +334,8 @@ int main(int argc, char** argv) {
 	for (size_t i = 0; i < topologies.size(); ++i) check(graphicsPipeline(topologies[i], false, statics[i], vertex, fragment, layout), "Create static pipeline");
 	VkPipeline referencePipeline = VK_NULL_HANDLE;
 	if (weights) check(graphicsPipeline(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, referencePipeline, module(variedW ? "reference-w.vert.spv" : "reference.vert.spv"), module(noPerspective ? "reference-noperspective.frag.spv" : "reference.frag.spv"), referenceLayout), "Create reference pipeline");
+	VkPipeline otherReferencePipeline = VK_NULL_HANDLE;
+	if (variedW) check(graphicsPipeline(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, otherReferencePipeline, module("reference-w.vert.spv"), module(noPerspective ? "reference.frag.spv" : "reference-noperspective.frag.spv"), referenceLayout), "Create reference pipeline interpolated the other way");
 	VkPipeline dynamicPipeline = VK_NULL_HANDLE;
 	VkResult dynamicCreated = graphicsPipeline(topologies[0], true, dynamicPipeline, vertex, fragment, layout);
 	std::printf("dynamic topology pipeline: vkCreateGraphicsPipelines=%d\n", int(dynamicCreated));
@@ -355,7 +358,8 @@ int main(int argc, char** argv) {
 
 	// Draw i: corners 4..9 of the VS, one instance at firstInstance 2 or 3 (left or right), so that the draws overlap
 	// in pairs. mode 0: one static pipeline per topology; 1: the dynamic pipeline, changing topology between draws;
-	// 2: the dynamic pipeline kept at the first topology; 3: the triangulated reference; 4: the reference turned by one.
+	// 2: the dynamic pipeline kept at the first topology; 3: the triangulated reference; 4: the reference turned by one;
+	// 5: the reference interpolated the other way (weights-w kinds).
 	struct Result { std::vector<uint8_t> rgba; uint32_t invocations = 0; };
 	auto render = [&](int mode) {
 		check(vkResetCommandBuffer(cb, 0), "Reset command buffer");
@@ -370,7 +374,7 @@ int main(int argc, char** argv) {
 		pass.pClearValues = &clear;
 		vkCmdBeginRenderPass(cb, &pass, VK_SUBPASS_CONTENTS_INLINE);
 		if (mode >= 3) {
-			vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, referencePipeline);
+			vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, mode == 5 ? otherReferencePipeline : referencePipeline);
 			for (uint32_t i = 0; i < uint32_t(topologies.size()); ++i) {
 				const ReferenceDraw draw{uint32_t(topologies[i]), uint32_t(mode == 4)};
 				vkCmdPushConstants(cb, referenceLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(draw), &draw);
@@ -444,7 +448,9 @@ int main(int argc, char** argv) {
 		const uint32_t staticDiffers = compare(staticResult, reference, "static vs reference");
 		const uint32_t dynamicDiffers = compare(dynamicResult, reference, "dynamic vs reference");
 		const uint32_t turnedDiffers = compare(dynamicResult, turned, "dynamic vs reference turned by one (must differ)");
-		referenceMatches = referenceCovered == covered && staticDiffers == 0 && dynamicDiffers == 0 && turnedDiffers > 0;
+		uint32_t otherDiffers = 1;
+		if (variedW) otherDiffers = compare(dynamicResult, render(5), "dynamic vs reference interpolated the other way (must differ)");
+		referenceMatches = referenceCovered == covered && staticDiffers == 0 && dynamicDiffers == 0 && turnedDiffers > 0 && otherDiffers > 0;
 	}
 	const bool changed = dynamicResult.rgba != unchanged.rgba;
 	const uint32_t expected = uint32_t(topologies.size()) * 6;
