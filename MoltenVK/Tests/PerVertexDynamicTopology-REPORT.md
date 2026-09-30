@@ -564,7 +564,7 @@ Le brouillon `MoltenVK/Tests/MetalRepro/README.md` est prêt. **Il reste à envo
 
 **Gel.** Le candidat est gelé par l'étiquette annotée `candidate-frozen-until-intel` sur `6e51dee7`, dans le clone isolé. Le fork SPIRV-Cross n'est pas modifié.
 
-**Bilan du candidat sur Apple M4.** Sur les 2 851 cas barycentriques et les 493 cas ordinaires d'offset (73 + 420), il n'y a aucune régression. Il corrige les 8 résultats faux validés de l'offset. Il reste non vérifié sur Intel, où l'ancienne valeur était nécessaire selon SPIRV-Cross.
+**Bilan du candidat sur Apple M4.** Il n'y a aucune régression, que ce soit sur les 2 851 cas barycentriques ou sur les 493 cas ordinaires d'offset (73 + 420, dont 432 non pris en charge, donc 61 réellement exécutés). Il corrige les 8 résultats faux validés de l'offset. Il reste non vérifié sur Intel, où l'ancienne valeur était nécessaire selon SPIRV-Cross.
 
 ## 26. État à la fin du volet MSAA
 
