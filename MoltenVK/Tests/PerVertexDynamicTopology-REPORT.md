@@ -573,7 +573,7 @@ Le brouillon `MoltenVK/Tests/MetalRepro/README.md` est prêt. **Il reste à envo
   - Le chemin ordinaire est corrigé (`fb3970cc`).
   - PerVertexKHR est vérifié contre la référence triangulée : poids et ordre, `w` variés, avec et sans perspective, sommet provoquant « premier ».
 - **Défaut 1** (offset SPIRV-Cross). Un candidat est prêt et gelé jusqu'aux essais Intel. Sans lui, 8 résultats faux restent en validé dans la CTS barycentrique.
-- **Défaut 2** (divergence Metal hors validation). Il est reproduit en Metal seul. Le signalement est prêt, à envoyer par l'utilisateur. Il est hors PerVertexKHR, sans contournement.
+- **Défaut 2** (divergence Metal hors validation). Il est reproduit en Metal seul. Le signalement a été envoyé à Apple par l'utilisateur (**FB25000318**, section 27). Il est hors PerVertexKHR, sans contournement.
 - **Sommet provoquant « dernier ».** Explicitement non qualifié.
 - **Gelés.** TES et soumission restent gelés.
 - **Matériel.** M1, M3 et Intel restent pour la fin.
