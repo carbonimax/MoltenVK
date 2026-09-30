@@ -8,7 +8,9 @@
 #   3. Timing: three series without Metal validation, alternating the first arm and the order of the forms.
 # Before each step the runner refuses to start if another GPU test is running, and it records the thermal state and
 # the busiest processes. Timing runs set MoltenVK's performance tracking, synchronous submits and no prefill.
-# Usage: run-pervertex-cost-bench.sh <libMoltenVK> <output directory> <samples per series>
+# With the optional fourth argument "indirect", the runner checks and measures the indirect and indexed-indirect forms
+# instead: validation, then two series per grid (ordinary first, then PerVertexKHR first), without calibration.
+# Usage: run-pervertex-cost-bench.sh <libMoltenVK> <output directory> <samples per series> [indirect]
 set -euo pipefail
 test_dir=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$test_dir/../.." && pwd)
@@ -69,6 +71,20 @@ step() { # name expected-exit validated(0|1) form grid samples order [--no-ancho
 	grep -E '^(images|BENCH)' "$run/run.log" | grep -E 'images|paired_difference|memory' | sed 's/^/    /' | cut -c1-160 || true
 	if [[ $verdict != PASS ]]; then echo "STOP: inspect $run/run.log"; exit 1; fi
 }
+if [[ ${4:-} == indirect ]]; then
+	for grid in 64 256; do
+		step validated-indirect-$grid 0 1 indirect $grid 2 ordinary-first
+		step validated-indexed-indirect-$grid 0 1 indexed-indirect $grid 2 ordinary-first
+	done
+	for grid in 64 256; do
+		step series1-indirect-$grid 0 0 indirect $grid "$samples" ordinary-first
+		step series1-indexed-indirect-$grid 0 0 indexed-indirect $grid "$samples" ordinary-first
+		step series2-indexed-indirect-$grid 0 0 indexed-indirect $grid "$samples" pervertex-first
+		step series2-indirect-$grid 0 0 indirect $grid "$samples" pervertex-first
+	done
+	echo "COST_BENCH DONE"
+	exit 0
+fi
 for grid in 64 256; do
 	step validated-direct-$grid 0 1 direct $grid 2 ordinary-first
 	step validated-indexed-$grid 0 1 indexed $grid 2 ordinary-first
