@@ -242,12 +242,21 @@ Les étiquettes sont génériques (« convert indirect buffers », « vertex and
 
 **Le dispatch supplémentaire du chemin TES :** environ +50 µs sur l'encodeur compute, plus un second compute d'environ 10 µs, et une coupure en deux command buffers. La trace ne sépare pas les dispatchs à l'intérieur d'un même encodeur. La charge est minuscule, deux patchs : ce n'est qu'un témoin.
 
-## 14. Conclusion de ce lot
+## 14. Conclusion : chantier clos sur « coût GPU non qualifié »
 
-- **Coût CPU d'encodage : observé et reproductible** dans les séries appariées (section 11).
-- **Mémoire.** Le pic mesuré en direct égale le scratch calculé. Les résidus ne sont pas attribués.
-- **Coût GPU : non qualifié.** La contention a persisté dans la fenêtre choisie (`mediaanalysisd`, `/usr/bin/log`), et la grille 256 reste bimodale. Selon la consigne d'Astra, **les répétitions s'arrêtent ici**.
-- **Encodeurs.** Les traces isolent la capture et les dispatchs supplémentaires des chemins direct, indexé, indirect et TES. Ce sont des mesures exploratoires, sur une seule exécution chacune.
+Astra a validé la clôture le 30 septembre 2026, sans nouvelle campagne. Les corrections du banc et les chiffres rapportés sont vérifiés.
+
+**Ce qui est établi.**
+- **Coût CPU d'encodage, formes directe et indexée : reproductible** dans les séries appariées (section 11). Environ +100 µs sur la grille 64, environ +1 045 µs sur la grille 256.
+- **Encodeurs.** Les traces distinguent, dans les chemins direct, indexé, indirect et TES, les encodeurs de capture, de plan et de rejeu. Ce sont des mesures exploratoires, sur une exécution chacune.
+
+**Coût GPU : non qualifié.** La contention a persisté dans la fenêtre choisie (`mediaanalysisd`, `/usr/bin/log`), et la grille 256 reste bimodale. Les répétitions s'arrêtent ici.
+
+**Réserves à conserver.**
+1. **CPU indirect.** Le coût CPU n'est reproductible qu'en direct et en indexé. En indirect, `encode` inclut l'attente CPU du plan GPU : ce n'est pas un coût d'encodage.
+2. **GPU indirect.** Les métriques indirectes ne donnent pas le temps GPU actif total. `execution` ne mesure que le dernier des deux command buffers. `timestamp` couvre les deux, aller-retour CPU compris.
+3. **TES.** Les traces distinguent les encodeurs, pas chaque dispatch. Le coût isolé du dispatch TES supplémentaire reste inconnu : les environ +50 µs de la section 13 portent sur tout l'encodeur compute.
+4. **Mémoire.** La mémoire échantillonnée ne prouve ni le pic exhaustif ni la libération du scratch. L'accord du pic direct avec la formule du scratch est observé à trois instants par soumission. Les résidus ne sont pas attribués.
 
 **Preuves supplémentaires** (chaque dossier de `build/astra/` a son `EVIDENCE.sha256`) :
 
