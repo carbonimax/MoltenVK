@@ -70,11 +70,12 @@ child() {
 	/usr/bin/perl "$root/timeout.pl" "$seconds" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" "$@"
 }
 validation_env='MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1'
-# loaded LOG: dyld's list must name the bundled library, and no other MoltenVK; prints the images it found.
+# loaded LOG: dyld's list must name the bundled library, and no other MoltenVK; prints the images it found. Recent dyld
+# versions put the image UUID, as <UUID>, before the path.
 loaded() {
 	local images
-	images=$(/usr/bin/sed -n 's/^dyld\[[0-9]*\]: \(.*libMoltenVK.*\)$/\1/p' "$1" | LC_ALL=C /usr/bin/sort -u)
-	echo "${images:-none}" | tr '\n' ' '
+	images=$(/usr/bin/sed -n 's/^dyld\[[0-9]*\]: \(<[^>]*> \)\{0,1\}\(.*libMoltenVK.*\)$/\2/p' "$1" | LC_ALL=C /usr/bin/sort -u)
+	echo "${images:-none}" | /usr/bin/paste -sd' ' -
 	[[ $images == "$library" ]]
 }
 checked_log() { # LOG: Metal validation announced, no validation or execution error, only the bundled library loaded
