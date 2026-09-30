@@ -30,11 +30,17 @@ spirv-val (SPIRV-Tools v2026.3), GNU timeout 9.11, Python 3.12.8. CTS : VK-GL-CT
 
 - **Driver existant :** `MoltenVK/Tests/PerVertexTES/build-library.sh <sortie> OFF ON` : **admission TES OFF**,
   adaptateur de test **lié**, Debug arm64 (configuration de toutes les preuves antérieures ; Release n'est pas qualifiée),
-  **`MVK_USE_METAL_PRIVATE_API` OFF** (valeur par défaut de CMake, à vérifier dans `CMakeCache.txt`).
+  **`MVK_USE_METAL_PRIVATE_API` OFF** (valeur par défaut de CMake, à vérifier dans `CMakeCache.txt`). Le driver a changé
+  depuis `fb3970cc` (`53a5a54c` : choix du type de build par `MVK_TEST_BUILD_TYPE`, Debug par défaut) ; ce n'est pas du
+  runtime.
+- **Admission TES OFF :** `MVK_TEST_TES_PERVERTEX_ADMISSION` n'agit que dans le bloc `if (_isTessellationPipeline)`
+  de `MVKPipeline.mm:1398-1446` ; les pipelines VS/FS n'en dépendent pas.
 - **Lancé depuis la racine du fork :** le CMake de MoltenVK grave dans `mvkRevString` le `git rev-parse --short HEAD`
   du dossier courant ; la révision embarquée doit être celle du candidat.
 - **Activation expérimentale explicite :** l'application appelle `mvkEnableTESFixtureDevice(VkPhysicalDevice)`
-  (recherché par `dlsym`). Sans cet appel, l'extension reste fermée (`MVKDevice.mm:3632-3636`).
+  (recherché par `dlsym`). Malgré son nom historique, cette fonction n'ouvre que `VK_KHR_fragment_shader_barycentric`,
+  là où Metal fournit les coordonnées barycentriques (`EnableTestDevice.mm:5-9, 25`). Sans cet appel, l'extension reste
+  fermée (`MVKDevice.mm:3632-3636`).
 - **Contenu de test assumé :** la bibliothèque exporte aussi les crochets de test de `EnableTestDevice.mm`
   (`mvkTestMarkDeviceLost`, `mvkTestLimitMetalBufferSize`, compteurs). C'est une bibliothèque expérimentale, pas une
   bibliothèque de distribution.
@@ -76,15 +82,23 @@ Toutes les exécutions GPU se font sous validation Metal (`MTL_DEBUG_LAYER=1`, `
 GPU à la fois. **Un saut ou un `NotSupported` dans une liste attendue « Pass » est une absence de preuve, pas une
 réussite.** Toute sortie différente de l'attendu arrête la qualification.
 
-| Réf. | Test existant | Commande | Attendu (référence `final-r7-fb3970cc`) |
+**La configuration du candidat (admission OFF, adaptateur lié) n'a jamais exécuté cette liste : l'étape 3 en sera la
+première exécution.** Les résultats de référence viennent de bibliothèques avec admission ON (`final-r7-fb3970cc`,
+`lib-fb3970cc-tes`) ; ils ne valent que comme attendus, que l'admission OFF ne devrait pas changer hors TES.
+
+| Réf. | Test existant | Commande | Attendu (et référence) |
 |---|---|---|---|
 | A | 8 suites hôte : `prefill`, `helper-preflight`, `scratch`, `draw-size`, `restart`, `topology`, `capture-variant`, `memoryless` | `run-pervertex-<suite>-tests.sh <sortie>` | PASS chacune |
-| B | Oracle de topologie dynamique, 14 cas : `triangles:{direct,indexed}:{pervertex,ordinary,weights,weights-w,weights-w-noperspective}`, `lines:{direct,indexed}:{pervertex,ordinary}` | `run-pervertex-dynamic-topology-tests.sh <lib> <sortie> 0 <cas>…` | PASS chacun |
+| B | Oracle de topologie dynamique, 14 cas : `triangles:{direct,indexed}:{pervertex,ordinary,weights,weights-w,weights-w-noperspective}`, `lines:{direct,indexed}:{pervertex,ordinary}` | `run-pervertex-dynamic-topology-tests.sh <lib> <sortie> 0 <cas>…` | PASS chacun. Référence : `pervertex` et `ordinary` dans `final-r7-fb3970cc` ; `weights` dans `dyntopo-weights-99796ed3`, `weights-w*` dans `dyntopo-weights-w-0e1c187c` et `-d3d389ee`, **avant** `fb3970cc`, jamais relancés depuis |
 | C | Séparation capture/rejeu, variantes `memoryless-depth`, `memoryless-stencil` | `run-pervertex-split-tests.sh <lib> <sortie> after memoryless-depth memoryless-stencil` | REFUSED (sortie 4) chacune |
 | D | CTS `fragment_shading_barycentric`, périmètre minimal : **1 201 cas** (`experimental-vsfs-barycentric.txt`, sha256 `58e51b2a…`, produit par `PerVertexCTS/select-experimental-scope.py` depuis `barycentric-runnable.txt`, `18c82875…`) | `run-pervertex-cts.sh <cts> <lib> <liste> <sortie> validated` | **1 201 Pass** (1 201/1 201 à `final-r7`) |
 | E | CTS ordinaire, topologies et éventails : 562 cas (`ordinary-fan-topology.txt`, `e814c9d5…`) | idem | ensembles identiques à `final-r7` : 258 Pass, 299 NotSupported, 5 Fail `VK_ERROR_FEATURE_NOT_PRESENT` (`*_bind_unused_ms`) |
-| F | Garde publique : la liste D sans adaptateur | `PERVERTEX_CTS_DIRECT=1 run-pervertex-cts.sh … validated` | 0 Pass, 0 Fail, 1 201 NotSupported |
+| F | Garde publique : la liste D sans adaptateur | `PERVERTEX_CTS_DIRECT=1 run-pervertex-cts.sh … validated` | prévu, jamais mesuré : 0 Pass, 0 Fail, 1 201 NotSupported (sans l'adaptateur, l'extension est absente et la CTS rend `NotSupported`) |
 | G | Identité : empreinte, `mvkRevString`, `pipelineCacheUUID`, bibliothèque chargée | étape 2 | égalité avec le candidat |
+
+Provenance de D : `barycentric-runnable.txt` vient d'un tri antérieur de `barycentric.txt` (mustpass, `5b7210a3…`)
+qui n'est pas versionné ; il est figé par son empreinte, inscrite dans `build/cts-lists/SHA256SUMS` avec celle de la
+liste D. La liste D se reproduit à partir de cette empreinte et du script versionné.
 
 Composition de D : 1 176 cas de données (588 statiques, 588 dynamiques, dont 168 avec `ClipDistance`), 24 cas de poids
 sur triangles (18 statiques, 6 dynamiques mono-échantillon), 1 cas `pervertex_correctness`. Exclus des 2 851 cas
