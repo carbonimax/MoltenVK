@@ -63,7 +63,7 @@ Seul un Apple M4 Pro sous macOS 27.2 est prouvé.
 
 **Les preuves manquantes.**
 - **Chemin natif Apple10.** Jamais rendu à travers Vulkan, faute de matériel.
-- **Sommet provoquant « dernier ».** Il n'est exposé qu'avec l'API privée Metal (`MVKDevice.mm:791`), et seuls les contrôles hôte en vérifient l'ordre. À `7ce08935`, aucun essai GPU ne l'utilisait. Depuis `162a23a4`, les cas CTS `weights.provoking_last.pipeline_topology_dynamic` rendent sur le GPU des pipelines créés en mode « dernier », mais leur formule ne dépend pas de l'ordre des sommets.
+- **Sommet provoquant « dernier ».** Il n'est exposé qu'avec l'API privée Metal (`MVKDevice.mm:791`), et seuls les contrôles hôte en vérifient l'ordre. À `7ce08935`, aucun essai GPU ne l'utilisait. Depuis `162a23a4`, les cas CTS `weights.provoking_last.pipeline_topology_dynamic` rendent sur le GPU des pipelines créés en mode « dernier », mais leur formule ne dépend pas de l'ordre des sommets. Il reste **explicitement non qualifié** (avis d'Astra du 30 septembre 2026) : aucun oracle n'en vérifie l'ordre sur le GPU.
 - **Autres GPU.** M1, M3, Intel et iOS ne sont pas testés ; ils restent pour la fin.
 
 **Les points gelés ou bornés.**

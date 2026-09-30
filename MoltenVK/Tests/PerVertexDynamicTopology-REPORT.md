@@ -301,3 +301,116 @@ Mêmes étapes que `final-r6`, plus l'oracle de topologie dynamique complet et l
 1. **Écart d'offset.** Il vient de la traduction générique de SPIRV-Cross. Faut-il l'ouvrir, puisqu'il touche tout `interpolateAtOffset` sur GPU Apple et pas seulement PerVertexKHR ? Le décalage de 1/16 est un compromis voulu pour Intel ; le changer demande des preuves sur Intel, qui restent pour la fin.
 2. **Écarts propres au mode `plain`.** Ils naissent dans le pipeline de référence ordinaire, sous le MSL. Faut-il les suivre, ou les documenter ?
 3. **Éventails en sommet provoquant « dernier ».** Ils restent non vérifiés par la référence triangulée, faute de `VK_EXT_provoking_vertex` dans le harnais.
+
+## 14. Deuxième avis d'Astra (30 septembre 2026)
+
+- Les deux défauts MSAA sont ouverts. `162a23a4` reste expérimental.
+- Le sommet provoquant « dernier » est **explicitement non qualifié** : les réussites CTS `weights` ne prouvent pas son ordre, et aucun oracle ne le vérifie.
+- Trois demandes :
+  - un A/B ciblé `0,4375 → 0,5` sur Apple, au seuil CTS inchangé, sans correctif générique avant la validation Intel ;
+  - un oracle d'interpolation ordinaire, échantillon par échantillon, avec des positions attendues calculées indépendamment ;
+  - une référence triangulée avec des `w` différents, qui distingue les interpolations perspective et sans perspective.
+
+## 15. Défaut 1 : l'offset de SPIRV-Cross, A/B `0,4375 → 0,5`
+
+**La bibliothèque A/B** (`build/astra/lib-dd2a8957-offset-half/`, `b139eb61…`, non commitée) :
+- construite à `dd2a8957`, avec un clone de SPIRV-Cross à `6af5a67f` où `spirv_msl.cpp` émet `+ 0.5` au lieu de `+ 0.4375` (`mutation.diff`) ;
+- le changement est commité dans ce clone seulement (`5114c453…`, enregistré par `PROVENANCE.txt`) ;
+- le dépôt SPIRV-Cross partagé n'est pas modifié.
+
+**Résultats au seuil CTS de 1**, face à `lib-fb3970cc-tes`, dont le runtime et SPIRV-Cross sont ceux de `dd2a8957` avant l'A/B :
+
+| Essai | `+ 0.4375` | `+ 0.5` (A/B) |
+| --- | --- | --- |
+| `msaa-weights` offset, liste (validé et `plain`) | 148 pixels, écart 2 | **0 pixel, écart 0** |
+| `msaa-weights` offset, bande, validé | 148 pixels, écart 2 | **0 pixel, écart 0** |
+| `msaa-weights` offset, bande, `plain` | 168 pixels, écart 4 | 25 pixels, écart 5, tous sur l'arête commune (défaut 2) |
+| `msaa-weights` échantillon, bande (témoin) | validé 0 ; `plain` 25 pixels, écart 5 | inchangé |
+| `msaa-weights` offset ordinaire, liste | 148 pixels, écart 2 | **0 pixel, écart 0** |
+| CTS barycentrique, validé | 8 résultats faux (offset) | **0 résultat faux** ; 8 cas de Fail à Pass, aucun de Pass à Fail |
+| CTS barycentrique, `plain` | 24 résultats faux | 20, tous bande ou éventail (défaut 2) ; 4 cas de Fail à Pass, aucun de Pass à Fail |
+| CTS ordinaire `multisample_interpolation.*offset*` (73 cas), validé et `plain` | 24 réussites, 1 échec, 48 non pris en charge | identique cas par cas |
+
+Avec `+ 0.5`, l'image d'offset PerVertexKHR est identique au bit près à l'image d'offset ordinaire et à la référence, dans les deux modes.
+
+**Conclusion.** Sur Apple M4, le décalage de 1/16 explique à lui seul l'écart d'offset, et `+ 0.5` ne dégrade aucun cas CTS mesuré. Le commentaire de SPIRV-Cross dit que `+ 0.5` casse des tests CTS sur Intel ; ce n'est pas vérifié ici. Aucun correctif n'est proposé avant la validation Intel.
+
+**Preuves** (`build/astra/`, chacune avec son `EVIDENCE.sha256`) :
+- `lib-dd2a8957-offset-half/` ;
+- `msaa-weights-offset-half-dd2a8957/` ;
+- `cts-offset-half-dd2a8957/` ;
+- `cts-ordinary-offset-plain-fb3970cc/` (ligne de base `plain` de la CTS ordinaire d'offset).
+
+## 16. Défaut 2 : la référence ordinaire en mode `plain`
+
+**L'oracle** (`2f001a79`, test seul). Les cas `samples-list` et `samples-strip` rendent la référence ordinaire avec un fragment qui écrit dans un buffer, pour chaque échantillon :
+- sa couleur, non quantifiée ;
+- `gl_SamplePosition`.
+
+Chaque échantillon doit se trouver à l'emplacement standard 4× de Vulkan (`standardSampleLocations = VK_TRUE`), et sa couleur doit égaler, à un pas de 8 bits près, l'interpolation perspective calculée en double sur le CPU à cet emplacement. `gl_PrimitiveID` n'est pas utilisé : il demanderait la capacité `Geometry`, que MoltenVK n'expose pas. Le triangle couvrant est choisi sur le CPU ; sur l'arête commune, les deux triangles donnent la même valeur.
+
+**Résultats**, liste et bande, validé et `plain` :
+- 65 536 échantillons écrits sur 65 536, tous à l'emplacement standard ;
+- erreur maximale sous 5·10⁻⁷ face au CPU, soit l'arrondi flottant ;
+- les données par échantillon et l'image résolue sont identiques entre les deux modes.
+
+**Ce que cela montre.** Quand ses échantillons sont observés, l'interpolation ordinaire est juste dans les deux modes. Or l'image résolue de ce fragment, en `plain`, est **juste** : elle est égale à la référence validée. La référence sans effet de bord, elle, diffère en `plain` sur 77 pixels de l'arête commune de la bande. L'observation change donc le résultat.
+
+**Mécanisme.** Sur ces 77 pixels, j'ai modélisé plusieurs hypothèses sur le CPU, avec l'image résolue en entier sur 8 bits :
+
+| Hypothèse | Accord avec l'image `plain` (écart ≤ 1) | Accord avec l'image validée |
+| --- | --- | --- |
+| Interpolation à chaque échantillon | 52/77 | **77/77** |
+| Interpolation au centre du pixel, pour chaque triangle | **77/77** | 53/77 |
+| Au premier échantillon couvert | 55/77 | 67/77 |
+| Au centroïde des échantillons couverts | 51/77 | 77/77 |
+
+En `plain`, la référence ordinaire sans effet de bord est donc interpolée au centre du pixel sur les pixels partagés par les deux triangles de la bande. L'échantillonnage par échantillon (`sampleShadingEnable`, `minSampleShading = 1`, entrée `sample`) n'y est pas appliqué. Il l'est sous validation Metal, et il l'est aussi en `plain` dès que le fragment écrit dans un buffer.
+- Le MSL est identique entre les modes : la cause se situe sous le MSL. Elle n'est pas établie davantage.
+- La liste, avec la même arête diagonale, n'est pas touchée.
+
+**La CTS ordinaire ne le voit pas.** Le groupe `dEQP-VK.pipeline.monolithic.multisample_interpolation.*` (247 cas) donne des résultats identiques dans les deux modes : 84 réussites, 3 échecs antérieurs (`nonuniform_interpolant_indexing.*`), 160 non pris en charge.
+
+**Statut.** C'est un défaut du chemin ordinaire en mode `plain`, distinct de PerVertexKHR. Il est suivi, mais pas corrigé.
+
+**Preuves** : `build/astra/msaa-samples-2f001a79/`, `build/astra/cts-multisample-interpolation-fb3970cc/`.
+
+## 17. Référence triangulée avec des `w` différents (`0e1c187c`, `d3d389ee`, test seul)
+
+**La variation de `w`.** Sous `VARIED_W`, le VS du harnais et celui de la référence multiplient la position de clip de chaque sommet par `1 + 0,75 × (v mod 3)`. La position à l'écran ne change pas, mais les trois coins d'un triangle ont des `w` différents. Le SPIR-V par défaut des cinq shaders est inchangé, vérifié octet par octet.
+
+**Deux nouveaux fragments.**
+- `weights-w` : `BaryCoordKHR`, comparé au poids de référence interpolé avec perspective.
+- `weights-w-noperspective` : `BaryCoordNoPerspKHR`, comparé au poids interpolé sans perspective (`noperspective`).
+
+**Témoins.** Deux témoins négatifs doivent différer :
+- la référence aux coins tournés d'un cran ;
+- la référence interpolée dans l'autre mode. Ce second témoin prouve que `w` atteint le résultat.
+
+**Résultats**, 4 formes par fragment, sur `lib-fb3970cc-tes` :
+- statique et dynamique égaux à la référence au bit près (0 pixel en écart sur 1 488) ;
+- référence tournée : 1 488 pixels en écart ;
+- référence de l'autre interpolation : 1 487 pixels en écart, écart maximal 29.
+
+Les formes déjà qualifiées (`weights`, `pervertex`, `ordinary`, lignes) restent vertes sur le même binaire.
+
+**Limites.**
+- Sommet provoquant « premier » seulement.
+- Triangles seulement.
+- Pas de MSAA dans cette référence.
+
+**Preuves** : `build/astra/dyntopo-weights-w-0e1c187c/` (avant le témoin d'interpolation), `build/astra/dyntopo-weights-w-d3d389ee/`.
+
+## 18. État et décisions demandées
+
+**État.**
+- L'extension publique reste fermée. L'admission de `162a23a4` reste expérimentale.
+- Les éventails dynamiques sont vérifiés contre la référence triangulée, poids et ordre, avec ou sans perspective et avec des `w` variés, en sommet provoquant « premier ».
+- **Défaut 1** (offset SPIRV-Cross) : ouvert. L'A/B montre que `+ 0.5` supprime tous les résultats faux validés sur Apple M4, sans régression CTS mesurée. Il n'y a pas de correctif avant la validation Intel.
+- **Défaut 2** (référence ordinaire en `plain`) : ouvert et caractérisé. C'est une interpolation au centre du pixel sur l'arête commune de la bande, sous le MSL. Il est hors PerVertexKHR.
+- **Sommet provoquant « dernier »** : explicitement non qualifié.
+- TES et soumission restent gelés.
+
+**Décisions demandées.**
+1. **Défaut 1.** Préparer le correctif `+ 0.5` pour SPIRV-Cross, en attente des preuves Intel, ou attendre le passage Intel pour décider ?
+2. **Défaut 2.** Le signaler comme comportement Metal, ou chercher un contournement dans MoltenVK ? Ce contournement forcerait l'exécution par échantillon, comme le fait un effet de bord. Dans les deux cas, cela sort de PerVertexKHR.
