@@ -21,7 +21,7 @@ Audit sans nouveau runtime ni essai GPU. Code examiné à `ec8d70b2` (runtime de
   - les codes d'épuisement mémoire, pour un vrai manque de mémoire.
 - **Convention de MoltenVK.** Son README demande de signaler par une erreur un écart à la spécification que Metal ne permet pas de combler. C'est une convention du projet, pas un mécanisme légal au sens de Vulkan.
 
-**Capacités exposées qui croisent PerVertexKHR** (MoltenVK public, `MVKDevice.mm`) :
+**Capacités exposées qui croisent PerVertexKHR** (`MVKDevice.mm`). Elles valent pour les deux configurations par défaut : la distribution Xcode, et CMake, dont `MVK_USE_METAL_PRIVATE_API` vaut `OFF`. Les bibliothèques de test (`build-library.sh`) ont cette même configuration, avec l'adaptateur de test en plus.
 - `tessellationShader`, `multiview` (32 vues), `fillModeNonSolid`, `sampleRateShading`, `multiDraw`, `indexTypeUint8`, `storageInputOutput16`, `shaderInt64` ;
 - `extendedDynamicState` et `extendedDynamicState2` ; `extendedDynamicState3PolygonMode` ;
 - `vertexAttributeInstanceRateZeroDivisor` ;
@@ -49,16 +49,16 @@ Classes :
 | 2 | Appareils sans MSL 2.4 | Refus à la création du pipeline | — | C (à faire) | N'exposer l'extension que sur les appareils capables (`8081becf` en pose le principe) |
 | 3 | Chemin natif Apple10 | Pris sur Apple10, MSL 4 et triangles, sans `BaryCoord` | — | Choix interne, non prouvé | Le désactiver, ou le prouver (aucun matériel) |
 | 4 | Étage géométrie | Refusé (étages VS/FS seulement) | `geometryShader` non exposé | N | — |
-| 5 | Adjacence, topologie statique | Refusée | VUID-VkPipelineInputAssemblyStateCreateInfo-topology-00429 | N | — ; voir aussi la note CTS (section 3) |
+| 5 | Adjacence, topologie statique | Refusée (CTS : 792 cas d'adjacence refusés, dont 96 en topologie dynamique) | VUID-VkPipelineInputAssemblyStateCreateInfo-topology-00429 | N | — ; voir aussi la note CTS (section 3) |
 | 6 | Adjacence en valeur dynamique | Refusée à l'enregistrement | Aucune VUID trouvée | ? | Si l'usage est valide, le chemin ordinaire est lui aussi faux (`mvk_datatypes.mm:497`) |
-| 7 | Topologie dynamique hors de la classe du pipeline | Non gérée | `dynamicPrimitiveTopologyUnrestricted = false` | L | — ; admission dans la classe : `162a23a4` (expérimental) |
+| 7 | Topologie dynamique hors de la classe du pipeline | Non gérée | `dynamicPrimitiveTopologyUnrestricted = false` ; VUID-vkCmdDraw-dynamicPrimitiveTopologyUnrestricted-07500 et équivalents des autres dessins | N | — ; admission dans la classe : `162a23a4` (expérimental ; CTS : 120 cas, dont 8 résultats faux en validé, tous d'offset MSAA) |
 | 8 | `polygonMode` POINT | Refusé | VUID-VkPipelineRasterizationStateCreateInfo-pointPolygons-04458 | N (portabilité) | — |
-| 9 | `polygonMode` LINE, statique ou dynamique | Refusé | `primsrast-barycentric` : valeurs **indéfinies** hors `FILL` | B léger | Admettre le pipeline ; toute valeur est conforme |
+| 9 | `polygonMode` LINE, statique ou dynamique | Refusé | `primsrast-barycentric` : `PerVertexKHR` et `BaryCoord*` **indéfinis** hors `FILL` | B | Admettre le pipeline. Les valeurs barycentriques sont libres ; les autres entrées du fragment et le mode ligne doivent rester justes |
 | 10 | Rastérisation désactivée en dynamique | Refusée | `extendedDynamicState2` exposé | B | Admettre ; aucun fragment, les effets du VS restent dus |
-| 11 | Sommet provoquant dynamique ou « dernier » | Refus du dynamique ; « dernier » non prouvé sur GPU | Tables `primsrast-barycentric-order-table-last-vertex` | C par défaut ; B avec l'API privée | Garder ces features fermées sans API privée, ou qualifier « dernier » |
+| 11 | Sommet provoquant dynamique ou « dernier » | Refus du dynamique ; « dernier » jamais exercé sur GPU. La CTS construit `weights.provoking_last` avec `provokingVertexLast = false` | Tables `primsrast-barycentric-order-table-last-vertex` | C dans les configurations par défaut ; B dans un build avec API privée | Garder ces features fermées sans API privée, ou qualifier « dernier » |
 | 12 | Multiview à plus d'une vue ; vues par index de device | Refusés | `multiview` exposé, 32 vues | B ; ? pour l'index de device | Capture et rejeu par vue |
-| 13 | Tessellation | Contrat TES restreint, figé à `66f9fd97` ; niveaux anormaux : device perdu | `tessellationShader` exposé | B, gelé | Isolines et mode point : N (VUID-RuntimeSpirv-tessellationShader-06326 et -06327). Le reste bloque |
-| 14 | Mesh | Adaptateur de test seulement | `VK_EXT_mesh_shader` fermé | C | — |
+| 13 | Tessellation | Contrat TES restreint, figé à `66f9fd97` ; niveaux anormaux : device perdu (CTS : 36 cas refusés) | `tessellationShader` exposé | B, gelé | Isolines et mode point : N (VUID-RuntimeSpirv-tessellationShader-06326 et -06327). Le reste bloque |
+| 14 | Mesh | Adaptateur de test seulement (CTS : 690 cas refusés) | `VK_EXT_mesh_shader` fermé | C | — |
 | 15 | Indirect avec liaisons à diviseur nul | Refusé | `vertexAttributeInstanceRateZeroDivisor` exposé | B | Gérer les copies de diviseur nul dans le plan GPU |
 | 16 | Indirect sous préremplissage Metal immédiat | Refusé | Réglage MoltenVK non standard | L (réglage) | Ne pas exposer l'extension quand ce réglage est actif |
 | 17 | Capture indexée et attachements | Refus : attachements paresseux, résolutions logicielles et certaines résolutions profondeur/stencil, suspension avec résolution, attachements inconnus à l'enregistrement | Usages valides ; mémoire paresseuse exposée | B | Capture qui préserve ces attachements |
@@ -74,11 +74,14 @@ Classes :
 ## 3. Inconnues explicites
 
 1. **Adjacence en valeur dynamique** sans `geometryShader` : aucune VUID trouvée dans `f6a2970`. Il faut trancher entre usage valide et oubli de la spécification.
-2. **La CTS teste l'adjacence sans `geometryShader`.** `fragment_shading_barycentric` lance 792 cas à adjacence sans vérifier cette feature (`checkSupport`, `vktFragmentShadingBarycentricTests.cpp`), alors que la VUID-00429 les rend invalides sur MoltenVK. Il faut vérifier la CTS amont, puis signaler si besoin. Tant que ce n'est pas fait, ces cas restent des échecs formels.
+2. **La CTS teste l'adjacence sans `geometryShader`.** `fragment_shading_barycentric` lance 792 cas à adjacence sans vérifier cette feature, alors que la VUID-00429 les rend invalides sur MoltenVK.
+   - Le `checkSupport` du test n'en demande que pour ses sous-types géométrie.
+   - Aucun contrôle commun n'a été trouvé dans `vkPipelineConstructionUtil.cpp` ni dans `vktTestCase.cpp`.
+   - Il faut vérifier la CTS amont, puis signaler si besoin. Tant que ce n'est pas fait, ces cas restent des échecs formels.
 3. **Formes SPIR-V valides refusées** (ligne 20) : aucun inventaire exhaustif.
 4. **Vues par index de device** : on ne sait pas si l'usage est atteignable avec les groupes de devices de MoltenVK.
 5. **Limites exposées** : on ne sait pas si elles laissent déjà la marge des emplacements de buffer privés (ligne 18).
-6. **Matériel.** Chemin natif Apple10, iOS, M1 et M3 : aucune preuve. Intel est annulé.
+6. **Matériel.** Chemin natif Apple10, iOS, M1 et M2 : aucune preuve pour l'instant. Les essais finaux sont prévus sur M1 et M2 ; aucun M3 n'est disponible, et Intel est annulé.
 7. **Conformité de MoltenVK.** Une exposition qui garderait des écarts signalés suit la convention du projet, mais sa compatibilité avec une revendication de conformité n'est pas établie.
 
 ## 4. Composants livrables séparément
