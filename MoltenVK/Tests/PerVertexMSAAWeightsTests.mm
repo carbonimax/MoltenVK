@@ -9,7 +9,8 @@
 // the CTS threshold of 1 per channel.
 // Exit 0: identical and within the threshold; 4: identical but above the threshold (the open defect); 2: static and
 // dynamic differ. The four images are written as raw RGBA to the output directory.
-// Usage: pervertex-msaa-weights <shader directory> offset-list|offset-strip|sample-strip <output directory>
+// ordinary-offset-list replaces the PerVertexKHR fragment by interpolateAtOffset on an ordinary input, as a control.
+// Usage: pervertex-msaa-weights <shader directory> offset-list|offset-strip|sample-strip|ordinary-offset-list <output directory>
 #import <Metal/Metal.h>
 #include <vulkan/vulkan.h>
 
@@ -49,10 +50,10 @@ struct Vertex { float position[4], color[4]; };
 
 int main(int argc, char** argv) {
 	@autoreleasepool {
-	if (argc != 4) { std::fprintf(stderr, "Usage: pervertex-msaa-weights shader-dir offset-list|offset-strip|sample-strip output-dir\n"); return 2; }
+	if (argc != 4) { std::fprintf(stderr, "Usage: pervertex-msaa-weights shader-dir offset-list|offset-strip|sample-strip|ordinary-offset-list output-dir\n"); return 2; }
 	const std::string shaders = argv[1], name = argv[2], output = argv[3];
-	if (name != "offset-list" && name != "offset-strip" && name != "sample-strip") { std::fprintf(stderr, "Unknown case\n"); return 2; }
-	const bool strip = name != "offset-list";
+	if (name != "offset-list" && name != "offset-strip" && name != "sample-strip" && name != "ordinary-offset-list") { std::fprintf(stderr, "Unknown case\n"); return 2; }
+	const bool strip = name == "offset-strip" || name == "sample-strip";
 	const VkPrimitiveTopology topology = strip ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
 	uint32_t count = 0;
@@ -233,7 +234,7 @@ int main(int argc, char** argv) {
 		return result;
 	};
 	VkShaderModule vertex = module("msaa-weights.vert.spv");
-	VkShaderModule test = module(name == "sample-strip" ? "msaa-sample.frag.spv" : "msaa-offset.frag.spv"), reference = module("msaa-reference.frag.spv");
+	VkShaderModule test = module(name == "sample-strip" ? "msaa-sample.frag.spv" : name == "ordinary-offset-list" ? "msaa-ordinary-offset.frag.spv" : "msaa-offset.frag.spv"), reference = module("msaa-reference.frag.spv");
 	// A dynamic topology pipeline is created with a triangle list, as the CTS does (primitiveTopologyCastToList).
 	auto graphicsPipeline = [&](VkShaderModule fragment, bool dynamicTopology) {
 		VkPipelineShaderStageCreateInfo stages[2]{{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
@@ -372,8 +373,8 @@ int main(int argc, char** argv) {
 	uint32_t covered = 0;
 	for (uint32_t p = 0; p < kSide * kSide; ++p) covered += testStatic[4 * p + 3] != 0;
 	std::printf("covered=%u\n", covered);
-	const bool identical = compare(testStatic, testDynamic, 0, "PerVertexKHR static vs dynamic") == 0 && compare(referenceStatic, referenceDynamic, 0, "reference static vs dynamic") == 0;
-	const bool withinThreshold = compare(testStatic, referenceStatic, 1, "PerVertexKHR vs reference (CTS threshold 1)") == 0;
+	const bool identical = compare(testStatic, testDynamic, 0, "test static vs dynamic") == 0 && compare(referenceStatic, referenceDynamic, 0, "reference static vs dynamic") == 0;
+	const bool withinThreshold = compare(testStatic, referenceStatic, 1, "test vs reference (CTS threshold 1)") == 0;
 	const int exitCode = covered == 0 || !identical ? 2 : withinThreshold ? 0 : 4;
 	std::printf("PERVERTEX_MSAA_WEIGHTS %s %s\n", exitCode == 0 ? "PASS" : exitCode == 4 ? "ABOVE_CTS_THRESHOLD" : "FAIL", name.c_str());
 	vkDeviceWaitIdle(device);

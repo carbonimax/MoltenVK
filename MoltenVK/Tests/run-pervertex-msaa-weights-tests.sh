@@ -26,6 +26,7 @@ if [[ ! -x $program ]]; then
 	compile pervertex-msaa-weights.frag msaa-offset.frag.spv -DOFFSET
 	compile pervertex-msaa-weights.frag msaa-sample.frag.spv -DSAMPLE
 	compile pervertex-msaa-weights.frag msaa-reference.frag.spv
+	compile pervertex-msaa-weights.frag msaa-ordinary-offset.frag.spv -DORDINARY_OFFSET
 	xcrun clang++ -arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -I"$root/External/Vulkan-Headers/include" \
 		"$test_dir/PerVertexMSAAWeightsTests.mm" "$library" -Wl,-rpath,"$(dirname "$library")" -framework Metal -framework Foundation -o "$program"
 	shasum -a 256 "$library" "$shaders"/*.spv "$program" "$test_dir/PerVertexMSAAWeightsTests.mm" "$test_dir/pervertex-msaa-weights.vert" "$test_dir/pervertex-msaa-weights.frag" > "$output/INPUTS.sha256"
@@ -47,6 +48,6 @@ for name in "${@:5}"; do
 	elif grep -q 'Validation Enabled' "$run/run.log"; then verdict=FAIL; fi
 	if grep -qiE 'Shader Validation|GPU Address Sanitizer|validation error|Execution of the command buffer was aborted|execution failed' "$run/run.log"; then verdict=FAIL; fi
 	printf '%s:%s exit=%s %s\n' "$mode" "$name" "$rc" "$verdict"
-	grep -E '^(covered|PerVertexKHR|reference|PERVERTEX_MSAA)|mvk-error' "$run/run.log" | sed 's/^/    /' | cut -c1-200 || true
+	grep -E '^(covered|test|reference|PERVERTEX_MSAA)|mvk-error' "$run/run.log" | sed 's/^/    /' | cut -c1-200 || true
 	if [[ $verdict != PASS ]]; then echo "STOP: inspect $run/run.log before any further GPU work"; exit 1; fi
 done
