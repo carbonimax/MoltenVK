@@ -145,9 +145,19 @@ int main() {
 		emit("vk.driver_version", properties.driverVersion);
 		emit("vk.vendor_id", properties.vendorID);
 		emit("vk.device_id", properties.deviceID);
+		// MoltenVK stores its git revision, big-endian, in the first four bytes of the pipeline cache UUID.
+		char revision[9];
+		std::snprintf(revision, sizeof(revision), "%02x%02x%02x%02x", properties.pipelineCacheUUID[0], properties.pipelineCacheUUID[1],
+		              properties.pipelineCacheUUID[2], properties.pipelineCacheUUID[3]);
+		emit("vk.mvk_revision", revision);
 		probeDevice(physical, "vk.public.");
 		auto tes = reinterpret_cast<void (*)(VkPhysicalDevice)>(dlsym(RTLD_DEFAULT, "mvkEnableTESFixtureDevice"));
+#ifdef PROBE_BARYCENTRIC_ADAPTER_ONLY
+		// The experimental candidate activates only VK_KHR_fragment_shader_barycentric.
+		void (*mesh)(VkPhysicalDevice) = nullptr;
+#else
 		auto mesh = reinterpret_cast<void (*)(VkPhysicalDevice)>(dlsym(RTLD_DEFAULT, "mvkEnableMeshTestDevice"));
+#endif
 		emit("vk.adapter.tes_linked", tes != nullptr);
 		emit("vk.adapter.mesh_linked", mesh != nullptr);
 		if (tes) tes(physical);
