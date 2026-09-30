@@ -119,6 +119,7 @@ Tout tourne sous validation Metal, sauf la CTS en mode `plain` (et, comme avant,
     - Une bibliothèque A/B force la capture en classe triangle, comme pour une liste statique (`build/astra/dyntopo-ab-list-capture-162a23a4/`, `880114ec…`, non commitée).
     - Sur les 12 cas `triangle_list`, en `plain` et en validé, elle donne les mêmes verdicts et des images **identiques au bit près** à `lib-162a23a4-tes`.
 - **Pourquoi ces écarts n'étaient pas visibles.** Le groupe statique `weights.*.pipeline_topology_static` n'a pas de variante MSAA : ces écarts n'apparaissaient donc pas. Un pipeline statique de même forme donnerait le même résultat. C'est une limite de précision du chemin portable en MSAA, que l'admission rend visible.
+- **Attribution revue en section 11.** Ces écarts ne viennent pas du chemin portable : l'écart d'offset vient de la traduction générique de SPIRV-Cross, et les écarts propres au mode `plain` du pipeline de référence.
 
 **Durée de la CTS validée.** 18 s au lieu de 161 s pour `final-r5`. Les 2 851 résultats sont présents et `crashes.txt` est vide. Le temps gagné vient du cache de shaders Metal : chaque paquet de 200 cas prend environ 1 s au lieu de 7 à 20 s.
 
@@ -136,7 +137,7 @@ Tout tourne sous validation Metal, sauf la CTS en mode `plain` (et, comme avant,
    - Le correctif serait petit : les quatre endroits de `MVKCmdDraw.mm` liraient la topologie effective de l'encodeur (`getVkGraphics().getPrimitiveTopology()`, ajoutée par `162a23a4`) au lieu de la topologie statique.
    - Il toucherait tous les dessins MoltenVK, pas seulement PerVertexKHR.
    - Sans ce correctif, les 24 cas d'éventail restent faux dans la CTS.
-2. **Les 6 à 14 écarts de précision MSAA du chemin portable.** Ils sont à accepter comme limite documentée, ou à ouvrir comme prochain écart. Les ouvrir demanderait d'abord un oracle statique en MSAA, puisque la CTS n'en a pas.
+2. **Les 6 à 14 écarts de précision MSAA du chemin portable.** Ils sont à accepter comme limite documentée, ou à ouvrir comme prochain écart. Les ouvrir demanderait d'abord un oracle statique en MSAA, puisque la CTS n'en a pas. (Traité en section 11, qui revoit aussi l'attribution.)
 3. **Garder `162a23a4`.** L'admission est juste là où elle est vérifiée, et aucun cas CTS ne régresse. La CTS n'est pas verte pour autant.
 
 ## 8. Suite de la revue d'Astra (30 septembre 2026)
@@ -214,7 +215,7 @@ Avant et après, sous validation : 258 réussites, 5 échecs, 299 non pris en ch
 | Statique contre dynamique (section 2) | **Aveugle** : PASS, 0 écart | **Aveugle** : PASS, 0 écart |
 | Référence triangulée | Détectée : 744 pixels en écart | Détectée : 744 pixels en écart |
 | CTS, groupe `weights` (8 cas d'éventail, statiques et dynamiques) | **Aveugle** : 8 réussites | — |
-| CTS, groupe `data` (8 cas d'éventail) | Détectée : 8 échecs | — |
+| CTS, groupe `data` : 8 cas `data.provoking_first.dynamic.triangle_fan.*` (`dynamic` y désigne l'indexation dynamique ; la topologie est statique), 8 réussites à `fb3970cc` | Détectée : 8 échecs | — |
 
 **Limites.**
 - Seul le sommet provoquant « premier » est couvert : le harnais n'active pas `VK_EXT_provoking_vertex`.
