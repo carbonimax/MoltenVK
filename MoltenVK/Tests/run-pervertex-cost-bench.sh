@@ -66,7 +66,7 @@ step() { # name expected-exit validated(0|1) form grid samples order [--no-ancho
 	elif grep -q 'Validation Enabled' "$run/run.log"; then verdict=FAIL; fi
 	if grep -qiE 'Shader Validation|GPU Address Sanitizer|validation error|Execution of the command buffer was aborted|execution failed' "$run/run.log"; then verdict=FAIL; fi
 	printf '%-28s exit=%s %s\n' "$name" "$rc" "$verdict"
-	grep -E '^(images|BENCH)' "$run/run.log" | grep -E 'images|completion_us|execution_us|timestamp_us|encode_us|memory|mtl_buffers' | sed 's/^/    /' | cut -c1-160 || true
+	grep -E '^(images|BENCH)' "$run/run.log" | grep -E 'images|paired_difference|memory' | sed 's/^/    /' | cut -c1-160 || true
 	if [[ $verdict != PASS ]]; then echo "STOP: inspect $run/run.log"; exit 1; fi
 }
 for grid in 64 256; do

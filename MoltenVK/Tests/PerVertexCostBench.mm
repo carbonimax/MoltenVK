@@ -21,6 +21,7 @@
 // currentAllocatedSize) is sampled before each submit, right after it returns (scratch is reserved at submission)
 // and after completion; each arm reports its peak above the level measured before the phase, and the level left
 // after the PerVertexKHR submissions (memory MoltenVK keeps).
+// The report also gives, per measure, the paired difference (PerVertexKHR minus ordinary within the same pair).
 // Every sample checks that its arm's image equals that arm's first image; the two arms must agree within 2/255.
 // Usage: pervertex-cost-bench <shader directory> direct|indexed 64|256 <samples 1..500> ordinary-first|pervertex-first
 //        [--no-anchor]
@@ -370,14 +371,15 @@ int main(int argc, char** argv) {
 		submit.commandBufferCount = 1;
 		submit.pCommandBuffers = &commands[arm];
 		Series& s = series[arm];
-		const VkDeviceSize before = heapUsage();
+		// Memory is sampled only in the memory phase, never inside a timed sample.
+		const VkDeviceSize before = measured ? 0 : heapUsage();
 		const auto start = Clock::now();
 		check(vkQueueSubmit(queue, 1, &submit, fence), "Submit");
 		const auto submitted = Clock::now();
-		const VkDeviceSize inFlight = heapUsage();
+		const VkDeviceSize inFlight = measured ? 0 : heapUsage();
 		check(vkWaitForFences(device, 1, &fence, VK_TRUE, 20ull * 1000 * 1000 * 1000), "Wait");
 		const auto completed = Clock::now();
-		s.peak = std::max({s.peak, before, inFlight, heapUsage()});
+		if (!measured) s.peak = std::max({s.peak, before, inFlight, heapUsage()});
 		uint64_t ticks[2]{};
 		check(vkGetQueryPoolResults(device, timestamps, 2 * arm, 2, sizeof(ticks), ticks, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT), "Read timestamps");
 		check(stats(device, &perf, &perfSize), "Read MoltenVK statistics");
@@ -416,6 +418,17 @@ int main(int argc, char** argv) {
 		differing += d > 2;
 	}
 	std::printf("images: covered=%u above_2=%u max_channel_difference=%u\n", covered, differing, worst);
+	// Paired differences: PerVertexKHR minus ordinary within the same pair, which cancels load shared by the pair.
+	auto paired = [&](const char* what, const std::vector<double>& ordinary, const std::vector<double>& pervertex) {
+		std::vector<double> d;
+		for (size_t i = 0; i < ordinary.size(); ++i) d.push_back(pervertex[i] - ordinary[i]);
+		summarize("paired_difference", what, d);
+	};
+	paired("submit_us", series[0].submit, series[1].submit);
+	paired("completion_us", series[0].completion, series[1].completion);
+	paired("encode_us", series[0].encode, series[1].encode);
+	paired("execution_us", series[0].execution, series[1].execution);
+	paired("timestamp_us", series[0].timestamp, series[1].timestamp);
 	for (int arm = 0; arm < 2; ++arm) {
 		Series& s = series[arm];
 		summarize(armNames[arm], "submit_us", s.submit);
