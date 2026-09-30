@@ -425,3 +425,98 @@ Sur le même binaire, la série complète du harnais passe : 29 cas sur 29 (`bui
 **Décisions demandées.**
 1. **Défaut 1.** Préparer le correctif `+ 0.5` pour SPIRV-Cross, en attente des preuves Intel, ou attendre le passage Intel pour décider ?
 2. **Défaut 2.** Le signaler comme comportement Metal, ou chercher un contournement dans MoltenVK ? Ce contournement forcerait l'exécution par échantillon, comme le fait un effet de bord. Dans les deux cas, cela sort de PerVertexKHR.
+
+## 19. Troisième avis d'Astra (30 septembre 2026)
+
+- Préparer le patch expérimental `+ 0.5` dans un clone isolé, sans intégration générique. Les cas Intel cités par SPIRV-Cross, et les autres usages d'`interpolateAtOffset`, restent à vérifier.
+- Préparer un signalement reproductible du défaut 2, avant tout contournement dans MoltenVK : une reproduction en Metal seul, sans instrumentation, avec les mêmes états MSAA et une comparaison au modèle CPU. Astra déconseille une écriture factice dans MoltenVK : l'oracle instrumenté lit aussi `gl_SampleID` et `gl_SamplePosition`, donc il n'isole pas l'effet de l'écriture.
+- Réserve : le verdict de l'oracle échantillon par échantillon pouvait accepter une couverture partielle.
+
+## 20. Candidat SPIRV-Cross `+ 0.5` (clone isolé, non intégré)
+
+**Emplacement.** Le clone est `build/astra/spirv-cross-offset-half/clone`, cloné depuis le fork à `6af5a67f`, sur la branche `experimental/interpolate-at-offset-half`. Sa poussée est désactivée (`DISABLED-no-push`). Le fork SPIRV-Cross n'est pas modifié.
+
+**Le commit `6e51dee7`**, « MSL: Offset interpolateAtOffset by 1/2 instead of 1/2 - 1/16 (experimental) », change :
+- `spirv_msl.cpp` : `+ 0.5`, avec un commentaire qui garde la raison Intel et la marque comme non vérifiée ;
+- les trois références MSL qui contenaient `+ 0.4375` :
+  - `shaders-msl/asm/frag/pull-model-interpolation.asm.msl23.frag`, avec et sans optimisation ;
+  - `shaders-msl-no-opt/frag/pull-interpolant-access-chain.msl23.frag`.
+
+Le patch est exporté dans `patch/0001-MSL-Offset-interpolateAtOffset-by-1-2-instead-of-1-2.patch`.
+
+**Vérification** par le `test_shaders.py` de SPIRV-Cross, sur ces trois tests (compilation Metal comprise) :
+
+| CLI | Références | Résultat |
+| --- | --- | --- |
+| Base (`6af5a67f`) | d'origine | 3 sur 3 conformes |
+| Candidat (`6e51dee7`) | mises à jour | 3 sur 3 conformes |
+| Base | mises à jour | 3 sur 3 non conformes : les tests voient le changement |
+
+Le MSL émis est identique à celui de la bibliothèque A/B de la section 15 : même chaîne `+ 0.5`. Les résultats CTS de la section 15 valent donc pour ce candidat.
+
+**Non fait.**
+- La suite complète de `test_shaders.py` n'a pas été lancée : les versions Homebrew de glslang et SPIRV-Tools diffèrent de celles que SPIRV-Cross fixe.
+- Pas de validation Intel.
+- Pas de CTS hors des deux listes de la section 15.
+
+**Preuves** : `build/astra/spirv-cross-offset-half/` (`EVIDENCE.sha256`, hors clone et builds).
+
+## 21. Défaut 2 : reproduction en Metal seul
+
+**Le programme** (`MoltenVK/Tests/MetalRepro/SampleShadingStrip.mm`, runner `run-sample-shading-strip.sh`, sans MoltenVK) :
+- **Shaders.** Le MSL exact que MoltenVK génère pour la référence : VS, et FS avec entrée `sample_perspective` et paramètre `[[sample_id]]` inutilisé.
+- **Options de compilation.** Celles que MoltenVK emploie pour ces shaders : `MathMode Fast`, `MathFloatingPointFunctions Fast`, `PreserveInvariance` désactivé. Elles ont été relevées par `MVK_CONFIG_DEBUG=1` à `c11f73c6`, avec le binaire de `msaa-weights-22bf878a` (`metal-repro-92d41760/moltenvk-compile-options/`).
+- **États.** 128 × 128, `RGBA8Unorm`, `rasterSampleCount = 4`, résolution MSAA à la fin de la passe, géométrie CTS avec w = 16.
+- **Comparaison.** Le programme compare l'image résolue à deux modèles calculés sur le CPU en double, aux emplacements standard 4× : interpolation à chaque échantillon, et interpolation au centre du pixel.
+
+**Variantes du fragment**, pour répondre à la réserve d'Astra :
+- le MSL tel que généré ;
+- sans `[[sample_id]]` ;
+- lecture non repliable de `sample_id` par un buffer constant qui vaut 0 ;
+- incrément atomique d'un buffer, **sans** lire ni `sample_id` ni la position ;
+- écritures de l'oracle (couleur et position par échantillon).
+
+**Dessins.**
+- bande ;
+- liste CTS non indexée ;
+- liste indexée dans l'ordre de la bande (0 1 2 1 2 3) ;
+- éventail tel que MoltenVK le dessine : sommets CTS de l'éventail, triangles indexés 1 2 0 2 3 0.
+
+**Résultats** (`metal-repro-f50a79bb`, 40 exécutions) :
+
+| Fragment | Bande ou éventail indexé, sans validation | Liste ou liste indexée, sans validation | Tout dessin, validation Metal |
+| --- | --- | --- | --- |
+| MSL tel que généré | 25 pixels à écart jusqu'à 5, sur l'arête commune ; modèle du centre du pixel 16 384/16 384 | par échantillon | par échantillon |
+| Sans `[[sample_id]]` | mêmes 25 pixels | par échantillon | par échantillon |
+| Lecture non repliable de `sample_id` | mêmes 25 pixels | par échantillon | par échantillon |
+| Incrément atomique seul | par échantillon ; 65 536 invocations comptées | par échantillon | par échantillon |
+| Écritures de l'oracle | par échantillon | par échantillon | par échantillon |
+
+**Ce que cela établit.**
+1. **Le défaut est dans Metal.** Pour la bande, l'image Metal seul est identique au bit près à la référence MoltenVK, en `plain` comme en validé. L'éventail indexé donne la même image que la bande.
+2. **Ce qui rétablit l'exécution par échantillon :** une écriture en mémoire, même sans lecture de `sample_id` ni de la position. Une lecture de `sample_id`, même non repliable, ne suffit pas.
+3. **Le déclencheur** n'est ni la primitive bande seule, ni le partage de sommets. La bande et l'éventail indexé divergent ; la liste et la liste indexée dans l'ordre de la bande restent justes. Je ne l'ai pas isolé davantage.
+4. Hors de l'arête commune, les deux modèles restent indiscernables à ±1.
+
+**Signalement.** `MoltenVK/Tests/MetalRepro/README.md` est un brouillon en anglais pour Apple (Feedback Assistant). Il est **non envoyé** : l'envoi demande ton accord. Aucun contournement n'est fait dans MoltenVK.
+
+**Preuves** :
+- `build/astra/metal-repro-92d41760/` : première passe, et options de compilation ;
+- `build/astra/metal-repro-0868a95c/` : avec la liste indexée ;
+- `build/astra/metal-repro-f50a79bb/` : avec l'éventail indexé.
+
+## 22. Réserve sur l'oracle échantillon par échantillon (`c11f73c6`)
+
+Le verdict exige maintenant les 128 × 128 × 4 échantillons, tous écrits et tous à l'intérieur d'un triangle. Une couverture partielle devient une erreur (sortie 2). Nouvelle passe, liste et bande, validé et `plain` : 65 536 échantillons sur 65 536, aucun hors triangle, verdict inchangé (`build/astra/msaa-samples-92d41760/`).
+
+## 23. État et décisions demandées
+
+**État.**
+- `162a23a4` reste expérimental et l'extension publique reste fermée.
+- **Défaut 1** : un candidat SPIRV-Cross est prêt dans le clone isolé. Il n'est pas intégré ; la validation Intel est prévue à la fin.
+- **Défaut 2** : reproduit en Metal seul. Le signalement est prêt, non envoyé. Aucun contournement dans MoltenVK.
+- **Sommet provoquant « dernier »** : explicitement non qualifié.
+
+**Décisions demandées.**
+1. **Envoyer le signalement à Apple ?** Le brouillon est prêt ; l'envoi reste à ta main.
+2. **Défaut 1 : faut-il élargir la mesure avant Intel ?** Par exemple, les groupes CTS `glsl` qui utilisent `interpolateAtOffset`.
