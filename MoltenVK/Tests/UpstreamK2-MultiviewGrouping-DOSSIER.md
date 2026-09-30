@@ -115,7 +115,7 @@ source et sur la relance du test.
 > `mvkGetNextViewMaskGroup` shifted a signed `1` by the running end position. With view 31 enabled the loop reached a
 > shift by 32, which is undefined behavior. The shifts are now unsigned and the loop stops once the mask is empty.
 >
-> Testing: a host test compiles these functions as extracted from the source, with stubs for the device and render
+> Testing: a host test (link to add at publication) compiles these functions as extracted from the source, with stubs for the device and render
 > pass, under AddressSanitizer and UndefinedBehaviorSanitizer. It checks the pass count, first view, view count and
 > group mask of every pass against a reference, with and without layered rendering, for every 16-bit mask, sparse and
 > high-bit 32-bit masks, and 4096 pseudo-random masks (901,970 checks). Before this change, mask `0x5` gives the wrong

@@ -53,7 +53,7 @@ VS doit être égal.
 Le reproducteur est l'oracle de `0ddd63d3` : programme identique aux noms de fichiers de shaders près, et SPIR-V
 identique bit à bit (vert `5517c26e…`, frag `e3eb5a94…`, `final/spirv-identity.txt`).
 
-## 4. Résultats (M4 Pro, macOS 27.2, Xcode 27.1, CMake Debug arm64)
+## 4. Résultats (M4 Pro, macOS 27.2, Xcode 27.1, CMake Debug arm64, API privée désactivée)
 
 | Classe × 4 formes | `a63d4863` (`c842f473…`) | final `aa9133c5` (`c236ef8e…`) |
 |---|---|---|
@@ -63,7 +63,9 @@ identique bit à bit (vert `5517c26e…`, frag `e3eb5a94…`, `final/spirv-ident
 
 Compilation : `aa9133c5` compile avec `MVK_USE_METAL_PRIVATE_API` désactivé (`c236ef8e…`) et activé (`fad271f1…`), avec
 le seul avertissement déjà présent sur la base (`MVKConfigMembers.def:56`). Chaque bibliothèque porte comme
-`mvkRevString` le commit de son checkout (section 7).
+`mvkRevString` le commit de son checkout (section 7). **Les deux builds réussissent, mais les essais GPU (reproducteur
+rouge et vert) n'ont tourné qu'avec `MVK_USE_METAL_PRIVATE_API` désactivé**, la valeur par défaut ; la configuration
+activée n'est que compilée.
 
 ## 5. Exigences de contribution (README upstream, section *Contributing*)
 
@@ -84,6 +86,9 @@ le seul avertissement déjà présent sur la base (`MVKConfigMembers.def:56`). C
 2. Avec les six sommets de l'oracle, bande et liste produisent la même image : dans la classe `triangles`, le contrôle
    « diffère de la première topologie gardée » ne distingue que l'étape fan. `lines` est le témoin liste/bande.
 3. Aucun cas CTS n'a été exécuté sur la base upstream pour ce correctif.
+4. Essais GPU avec `MVK_USE_METAL_PRIVATE_API` désactivé seulement ; avec l'API privée, le correctif est compilé, pas
+   exécuté. Le site des ajustements de l'indexé indirect voisine un bloc `#if MVK_USE_METAL_PRIVATE_API` qu'il ne
+   modifie pas.
 
 ## 7. Preuves (`build/astra/upstream-k1-a63d4863/`)
 
@@ -119,6 +124,7 @@ le seul avertissement déjà présent sur la base (`MVKConfigMembers.def:56`). C
 > the image and the vertex shader invocation count with one static pipeline per topology, in direct, indexed,
 > indirect and indexed indirect forms, under Metal API and GPU validation. Before this change, the 8 triangle cases
 > fail and the 4 line cases pass; after it, all 12 pass. Tested on Apple M4 Pro, macOS 27.2, with MoltenVK built with
-> CMake (Debug, arm64), with `MVK_USE_METAL_PRIVATE_API` off and on. Not tested on Intel Macs.
+> CMake (Debug, arm64) and `MVK_USE_METAL_PRIVATE_API` off. The change also builds with `MVK_USE_METAL_PRIVATE_API` on,
+> but that configuration was not run on the GPU. Not tested on Intel Macs.
 >
 > 🤖 Generated with [Claude Code](https://claude.com/claude-code)
