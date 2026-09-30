@@ -125,6 +125,8 @@ Tout tourne sous validation Metal, sauf la CTS en mode `plain` (et, comme avant,
 
 **Sommet provoquant « dernier ».** Sur les 108 cas `provoking_last.pipeline_topology_dynamic`, 45 passent maintenant sur le GPU en mode validé (41 en `plain`). La formule de la CTS, `Σ in_color[i]·bc[i]`, ne dépend pas de l'ordre des sommets. Ces cas ne prouvent donc pas l'ordre du sommet provoquant « dernier ». Ils rendent toutefois sur le GPU des pipelines créés avec `VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT`. La phrase « Aucun essai GPU ne l'utilise » de `PerVertexNonTES-STATE.md` (section 3) est à nuancer en ce sens.
 
+*(Correction du 30 septembre 2026 : la CTS construit les cas `weights.provoking_last` avec `provokingVertexLast = false` (`vktFragmentShadingBarycentricTests.cpp`, paramètres du groupe `weights`), et les bibliothèques de test sont compilées sans API privée Metal (`MVK_USE_METAL_PRIVATE_API` à `OFF`), donc sans `provokingVertexLast`. Ces cas n'utilisent pas le mode « dernier » ; aucun essai GPU ne l'exerce.)*
+
 ## 6. Écart au contrat
 
 - **Admis :** `VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY` sur les pipelines PerVertexKHR portables sans tessellation. Les valeurs admises sont les points, les lignes (listes, bandes) et les triangles (listes, bandes, éventails), avec des dessins directs, indexés et indirects.
