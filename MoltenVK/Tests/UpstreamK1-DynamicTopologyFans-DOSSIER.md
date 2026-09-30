@@ -37,8 +37,10 @@ qu'un avertissement sur le redémarrage de primitive et couvre déjà la topolog
 ## 3. Reproducteur autonome
 
 `MoltenVK/Tests/DynamicTopologyFanRepro/` (commit du fork `5ea50d10`) : `DynamicTopologyFan.mm`, deux shaders
-(`dynamic-topology-fan.vert`, `dynamic-topology-fan.frag`), `run.sh`, `README.md` en anglais, joignable tel quel à la
-proposition. Aucune extension barycentrique, aucune dépendance au fork :
+(`dynamic-topology-fan.vert`, `dynamic-topology-fan.frag`), `run.sh`, `README.md` en anglais. Publié tel quel, à la
+demande de l'utilisateur, en gist public : https://gist.github.com/carbonimax/6737e3169ba9cc2254e5343a5111934d
+(révision `f6c2d258`, cinq fichiers identiques au dépôt, vérifié par clonage). Aucune extension barycentrique, aucune
+dépendance au fork :
 
 ```
 bash run.sh <libMoltenVK.dylib> <Vulkan-Headers/include> <dossier de sortie>
@@ -120,7 +122,7 @@ activée n'est que compilée.
 > list, and the four draw paths read the effective topology from the encoder state. The pipeline accessor they used
 > has no caller left and is removed.
 >
-> Testing: a standalone reproducer (link to add at publication) draws each topology of a class through one dynamic pipeline and compares
+> Testing: a standalone reproducer (https://gist.github.com/carbonimax/6737e3169ba9cc2254e5343a5111934d) draws each topology of a class through one dynamic pipeline and compares
 > the image and the vertex shader invocation count with one static pipeline per topology, in direct, indexed,
 > indirect and indexed indirect forms, under Metal API and GPU validation. Before this change, the 8 triangle cases
 > fail and the 4 line cases pass; after it, all 12 pass. Tested on Apple M4 Pro, macOS 27.2, with MoltenVK built with
