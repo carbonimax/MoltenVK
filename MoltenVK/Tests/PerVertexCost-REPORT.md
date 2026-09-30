@@ -72,7 +72,7 @@ Le surcoût CPU croît avec le nombre de primitives : environ 9 ns par primitive
 
 - L'écart mesuré égale **exactement** le scratch calculé par les formules de `MVKPerVertexScratch.h`, avec 32 octets par enregistrement capturé (position et couleur).
 - En forme indexée, la capture compte un enregistrement par indice, d'où la même taille.
-- **Le scratch est libéré après le dessin, sauf dans une exécution.** Après les deux bras, le niveau restant au-dessus du niveau initial est de 720 KiB dans 11 exécutions sur 16 (grille 64), et de 912 à 1 104 KiB dans 4 autres. Une seule exécution (`cost-bench-7cf15dcb/calibration-direct-64`) garde le pic PerVertexKHR, 1 872 KiB. En grille 256, il reste de 720 KiB à 6,7 MiB, loin des 19 152 KiB du pic (8 exécutions sur 8).
+- *(Retiré à la demande d'Astra, section 10 : l'usage global des tas ne prouve pas la libération des buffers de scratch. Les résidus relevés après les deux bras, de 720 KiB à 6,7 MiB, ne sont pas attribués.)*
 
 **Occupation GPU par encodeur**, mesurée par une trace Metal System Trace (`xctrace`) sur 10 paires, grille 256. Le temps d'occupation vertex est stable, avec un écart interquartile de 1 à 30 µs selon l'encodeur ; par exemple 136,7 à 137,7 µs pour la capture directe, et 197,6 à 198,5 µs pour son rejeu :
 
@@ -158,3 +158,102 @@ Chaque dossier de `build/astra/` a son `EVIDENCE.sha256`, et tous les essais tou
 
    Il faut d'abord fermer les applications actives et les simulateurs, et suspendre Time Machine. Cela revient à l'utilisateur.
 2. **TES et indirect.** Faut-il les mesurer à HEAD ? Cela demande de reporter les deux bancs antérieurs sur la branche courante, ou d'étendre ce banc.
+
+## 10. Corrections demandées par Astra (`c2aeaab9`)
+
+- **Différences appariées.** Pour chaque mesure, le banc donne aussi la différence PerVertexKHR moins ordinaire à l'intérieur d'une même paire (médiane, quartiles, p95). La charge partagée par la paire s'annule.
+- **`heapUsage()` hors des échantillons chronométrés.** Au premier passage, un appel se trouvait entre `vkQueueSubmit` et l'attente de la fence, donc dans `completion`. La mémoire n'est plus mesurée que dans la phase mémoire.
+- **Libération du scratch.** L'affirmation « scratch libéré dans 23 exécutions sur 24 » est retirée (section 3).
+- **Intel est annulé.** M1 et M3 restent pour la fin. Le candidat SPIRV-Cross `+ 0.5` reste isolé.
+
+## 11. Séries dans la fenêtre calme choisie par l'utilisateur (`build/astra/cost-bench-c2aeaab9/`)
+
+**Charge.** L'utilisateur avait quitté les simulateurs, CBDash, Discord et Keypad, et suspendu Time Machine. La contention restait sensible :
+- `mediaanalysisd`, service système d'analyse des photos, à 93–102 % d'un cœur ;
+- un processus `/usr/bin/log`, que je n'ai pas lancé, à 99 % ;
+- WindowServer à 41–45 %.
+
+**Différences appariées**, médiane et quartiles des trois séries :
+
+| Grille, forme | `encode` | `execution` | `timestamp` |
+| --- | --- | --- | --- |
+| 64, directe | +104 / +97 / +101 µs (IQR ≈ 80..118) | +46 / +45 / +43 µs (IQR ≈ 25..72) | +31 / +24 / +25 µs (IQR ≈ −5..58) |
+| 64, indexée | +108 / +105 / +103 µs | +56 / +65 / +55 µs | +46 / +58 / +63 µs |
+| 256, directe | +1 050 / +1 040 / +1 038 µs (IQR ≈ 987..1 101) | +498 / +482 / +249 µs | +454 / +437 / +205 µs |
+| 256, indexée | +1 039 / +1 053 / +1 051 µs | +290 / +259 / +517 µs | +241 / +231 / +465 µs |
+
+- **Encodage CPU : reproductible.** Environ +100 µs sur la grille 64 et environ +1 045 µs sur la grille 256, avec des quartiles serrés dans toutes les séries.
+- **L'estimation d'environ 9 ns par primitive** reste une estimation sur deux tailles.
+- **GPU, grille 64 : cohérent** d'une série à l'autre.
+- **GPU, grille 256 : bimodal**, environ +250 µs ou environ +480 µs selon la série. Il n'est pas qualifié.
+
+## 12. Indirect et indirect indexé (`build/astra/cost-bench-indirect-73b71fd8/`)
+
+**Montage.**
+- Formes `indirect` et `indexed-indirect` du même banc (`73b71fd8`), avec une commande indirecte écrite une fois.
+- Validation Metal réussie pour chaque forme et chaque grille.
+- Deux séries par grille, en ordre alterné.
+- Charge : `mediaanalysisd` à 50–80 %, WindowServer à 35–44 % ; `/usr/bin/log` avait disparu.
+
+**Différences appariées**, deux séries :
+
+| Grille, forme | `encode` | `execution` | `timestamp` | Mémoire, pic au-dessus de l'ordinaire |
+| --- | --- | --- | --- | --- |
+| 64, indirecte | +363 / +368 µs | +49 / +76 µs | +412 / +441 µs | +384 KiB |
+| 64, indexée indirecte | +373 / +373 µs | +98 / +93 µs | +486 / +494 µs | +480 KiB |
+| 256, indirecte | +793 / +962 µs | +558 / +557 µs | +1 362 / +1 545 µs | +6 144 KiB |
+| 256, indexée indirecte | +927 / +768 µs | +734 / +244 µs | +1 655 / +1 030 µs | +7 680 KiB |
+
+**Lecture.**
+- **Deux command buffers.** Une soumission PerVertexKHR indirecte en compte deux : le plan GPU, puis le rejeu. L'ordinaire n'en a qu'un.
+- **Ce que couvrent les mesures.**
+  - `encode` inclut l'attente CPU du plan GPU, puisque les soumissions sont synchrones.
+  - L'intervalle `timestamp` couvre les deux command buffers, aller-retour CPU compris.
+  - `execution` ne mesure que le dernier command buffer.
+  - Ces trois mesures ne sont donc pas comparables à celles des formes directes.
+- **Mémoire.** Le pic PerVertexKHR indirect est plus bas que celui du direct. Il n'est pas attribué : le scratch indirect est dimensionné sur le plan, et le moment de l'échantillonnage peut manquer une partie de sa vie.
+
+**Trace par encodeur** (grille 256, 10 paires, `build/astra/cost-trace-indirect-73b71fd8/`, quartiles serrés) :
+
+| Encodeur | Indirect ordinaire | Indirect PerVertexKHR | Indexé indirect ordinaire | Indexé indirect PerVertexKHR |
+| --- | --- | --- | --- | --- |
+| Premier command buffer : plan (compute) | — | 16,5 µs | — | 16,9 µs |
+| Second command buffer : compute avant le rejeu | — | 97,5 µs | — | 385 µs |
+| Rendu ou rejeu, vertex | 326 µs | 783 µs | 161 µs | 462 µs |
+| Rendu ou rejeu, fragment | 166 µs | 184 µs | 147 µs | 179 µs |
+
+Les étiquettes sont génériques (« convert indirect buffers », « vertex and tess control stages ») ; l'attribution repose sur la séquence des command buffers. Ces durées ne se comparent qu'à l'intérieur de cette trace : la trace directe de la section 3 a été prise sous une autre charge.
+
+## 13. Témoin TES (`build/astra/tes-trace-73b71fd8/`)
+
+**Montage.**
+- Le harnais courant `PerVertexTES/topology.cpp`, compilé contre la bibliothèque Release, avec les shaders de `final-r7-fb3970cc` (les sources TES n'ont pas changé depuis `fb3970cc`).
+- Scénario `f3` : deux patchs de niveau 3, rendus par le pipeline ordinaire et par le pipeline PerVertexKHR.
+- `TES_TOPOLOGY PASS` sous validation Metal, puis une trace sans validation.
+
+**Encodeurs** (écarts entre soumissions de quelques µs) :
+
+| | TES ordinaire (3 soumissions) | TES PerVertexKHR (6 soumissions) |
+| --- | --- | --- |
+| Command buffers Metal par soumission | 1 | 2 |
+| Compute « vertex and tess control stages » | 18,5 à 19,1 µs | 66,0 à 70,8 µs, en fin de premier command buffer |
+| Second compute | — | 9,0 à 10,8 µs, en début de second command buffer |
+| Rendu ou rejeu | vertex environ 11 µs, fragment environ 11 µs | vertex environ 12 µs, fragment environ 13 µs |
+
+**Le dispatch supplémentaire du chemin TES :** environ +50 µs sur l'encodeur compute, plus un second compute d'environ 10 µs, et une coupure en deux command buffers. La trace ne sépare pas les dispatchs à l'intérieur d'un même encodeur. La charge est minuscule, deux patchs : ce n'est qu'un témoin.
+
+## 14. Conclusion de ce lot
+
+- **Coût CPU d'encodage : observé et reproductible** dans les séries appariées (section 11).
+- **Mémoire.** Le pic mesuré en direct égale le scratch calculé. Les résidus ne sont pas attribués.
+- **Coût GPU : non qualifié.** La contention a persisté dans la fenêtre choisie (`mediaanalysisd`, `/usr/bin/log`), et la grille 256 reste bimodale. Selon la consigne d'Astra, **les répétitions s'arrêtent ici**.
+- **Encodeurs.** Les traces isolent la capture et les dispatchs supplémentaires des chemins direct, indexé, indirect et TES. Ce sont des mesures exploratoires, sur une seule exécution chacune.
+
+**Preuves supplémentaires** (chaque dossier de `build/astra/` a son `EVIDENCE.sha256`) :
+
+| Dossier | Entrées |
+| --- | --- |
+| `cost-bench-c2aeaab9/` | 70 |
+| `cost-bench-indirect-73b71fd8/` | 46 |
+| `cost-trace-indirect-73b71fd8/` | 1 200 |
+| `tes-trace-73b71fd8/` | 632 |
