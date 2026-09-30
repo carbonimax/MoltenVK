@@ -79,7 +79,8 @@ while (@pending) {
 
 	# The chunk log: dyld's list of loaded images, and Metal's validation announcements and errors.
 	my $log = slurp("$name.log");
-	my @images = ($log =~ /^dyld\[\d+\]: (\S*libMoltenVK\S*)$/mg);
+	# Recent dyld versions put the image UUID, as <UUID>, before the path.
+	my @images = ($log =~ /^dyld\[\d+\]: (?:<[^>]+> )?(\S*libMoltenVK\S*)$/mg);
 	my $foreign = grep { $_ ne $moltenvk } @images;
 	my $announced = ($log =~ /Metal API Validation Enabled/ && $log =~ /Metal GPU Validation Enabled/) ? 1 : 0;
 	my $errors = () = ($log =~ /Shader Validation|GPU Address Sanitizer|validation error|Execution of the command buffer was aborted|execution failed/gi);

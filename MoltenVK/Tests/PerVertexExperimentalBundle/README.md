@@ -37,9 +37,9 @@ distribution.
 Dans le répertoire de l'archive et de son `.sha256` :
 
 ```bash
-shasum -a 256 -c pervertex-experimental-c1.tar.gz.sha256
-tar -xzf pervertex-experimental-c1.tar.gz
-cd pervertex-experimental-c1
+shasum -a 256 -c pervertex-experimental-c2.tar.gz.sha256
+tar -xzf pervertex-experimental-c2.tar.gz
+cd pervertex-experimental-c2
 ./run.sh --verify-only
 ./run.sh --qualify
 ```
