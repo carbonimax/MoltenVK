@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Portable PerVertexKHR with a dynamic primitive topology, under Metal API and GPU validation, one case at a time.
 # Each case is class:form[:fragment] (triangles or lines; direct, indexed, indirect, indexed-indirect or adjacency; pervertex,
-# the default, ordinary or weights); the list stops at the first unexpected result.
+# the default, ordinary, weights, weights-w or weights-w-noperspective); the list stops at the first unexpected result.
 # Usage: run-pervertex-dynamic-topology-tests.sh <libMoltenVK> <output directory> <expected exit> <class:form[:fragment]>...
 set -euo pipefail
 test_dir=$(cd "$(dirname "$0")" && pwd)
@@ -17,7 +17,7 @@ mkdir -p "$shaders" "$output/runs"
 exec > >(tee -a "$output/run.log") 2>&1
 if [[ ! -x $program ]]; then
 	sw_vers
-	echo "test_tree=$(git -C "$root" rev-parse HEAD) dirty_tests=$(git -C "$root" status --porcelain -- "$test_dir/PerVertexDynamicTopologyTests.mm" "$test_dir/pervertex-dynamic-topology.frag" "$test_dir/pervertex-dynamic-reference.vert" "$0" | wc -l | tr -d ' ')"
+	echo "test_tree=$(git -C "$root" rev-parse HEAD) dirty_tests=$(git -C "$root" status --porcelain -- "$test_dir/PerVertexDynamicTopologyTests.mm" "$test_dir/pervertex-dynamic-topology.frag" "$test_dir/pervertex-dynamic-reference.vert" "$test_dir/pervertex-indirect.vert" "$test_dir/pervertex-indirect.frag" "$0" | wc -l | tr -d ' ')"
 	[[ -f $(dirname "$library")/PROVENANCE.txt ]] && cat "$(dirname "$library")/PROVENANCE.txt"
 	compile() { glslangValidator -V --target-env vulkan1.1 "${@:3}" "$test_dir/$1" -o "$shaders/$2" > /dev/null; spirv-val --target-env vulkan1.1 "$shaders/$2"; }
 	compile pervertex-indirect.vert indirect.vert.spv
@@ -26,6 +26,10 @@ if [[ ! -x $program ]]; then
 	compile pervertex-dynamic-topology.frag weights.frag.spv -DWEIGHTS
 	compile pervertex-dynamic-topology.frag reference.frag.spv -DREFERENCE
 	compile pervertex-dynamic-reference.vert reference.vert.spv
+	compile pervertex-indirect.vert indirect-w.vert.spv -DVARIED_W
+	compile pervertex-dynamic-reference.vert reference-w.vert.spv -DVARIED_W
+	compile pervertex-dynamic-topology.frag weights-noperspective.frag.spv -DWEIGHTS -DNOPERSPECTIVE
+	compile pervertex-dynamic-topology.frag reference-noperspective.frag.spv -DREFERENCE -DNOPERSPECTIVE
 	xcrun clang++ -arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -I"$root/External/Vulkan-Headers/include" \
 		"$test_dir/PerVertexDynamicTopologyTests.mm" "$library" -Wl,-rpath,"$(dirname "$library")" -framework Metal -framework Foundation -o "$program"
 	shasum -a 256 "$library" "$shaders"/*.spv "$program" "$test_dir/PerVertexDynamicTopologyTests.mm" "$test_dir/pervertex-dynamic-topology.frag" "$test_dir/pervertex-dynamic-reference.vert" > "$output/INPUTS.sha256"

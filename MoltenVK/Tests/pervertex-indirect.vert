@@ -24,5 +24,9 @@ void main() {
 	if (instance >= 3u) { color = color.gbr; }
 	float x = instance == 2u ? -0.5 : instance >= 3u ? 0.5 : 4.0;
 	gl_Position = vec4(p * vec2(0.45, 0.6) + vec2(x, -0.2 + 0.25 * float(drawId)), 0.0, 1.0);
+#ifdef VARIED_W
+	// Same window position, a different w for each corner of a triangle: perspective and linear interpolation differ.
+	gl_Position *= 1.0 + 0.75 * float(v % 3u);
+#endif
 	gl_PointSize = 1.0;
 }
