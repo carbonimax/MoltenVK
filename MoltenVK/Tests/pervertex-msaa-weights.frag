@@ -5,6 +5,8 @@
 // msaa_interpolate_at_sample), perspective. OFFSET or SAMPLE: the PerVertexKHR values weighted by BaryCoordKHR at the
 // sample position or at the sample. ORDINARY_OFFSET: interpolateAtOffset on an ordinary input, without PerVertexKHR, to
 // separate the offset lowering from PerVertexKHR. Otherwise the reference, the colour interpolated at the sample.
+// SAMPLES: the reference, which also stores every sample's unquantized colour and gl_SamplePosition, so that the
+// ordinary interpolation can be checked sample by sample against positions and values computed on the CPU.
 #if defined(OFFSET) || defined(SAMPLE)
 #extension GL_EXT_fragment_shader_barycentric : require
 layout(location = 0) pervertexEXT in vec3 color[3];
@@ -14,6 +16,9 @@ layout(location = 0) in vec3 color;
 layout(location = 0) sample in vec3 color;
 #endif
 layout(location = 0) out vec4 outputColor;
+#ifdef SAMPLES
+layout(std430, set = 0, binding = 0) buffer Samples { vec4 values[]; } samples;
+#endif
 void main() {
 #if defined(OFFSET)
 	vec3 weights = interpolateAtOffset(gl_BaryCoordEXT, vec2(gl_SamplePosition - vec2(0.5)));
@@ -25,6 +30,12 @@ void main() {
 #elif defined(OFFSET) || defined(SAMPLE)
 	outputColor = vec4(color[0] * weights.x + color[1] * weights.y + color[2] * weights.z, 1.0);
 #else
+#ifdef SAMPLES
+	uvec2 pixel = uvec2(gl_FragCoord.xy);
+	uint slot = ((pixel.y * 128u + pixel.x) * 4u + uint(gl_SampleID)) * 2u;
+	samples.values[slot] = vec4(color, 1.0);
+	samples.values[slot + 1u] = vec4(gl_SamplePosition, gl_FragCoord.xy);
+#endif
 	outputColor = vec4(color, 1.0);
 #endif
 }
