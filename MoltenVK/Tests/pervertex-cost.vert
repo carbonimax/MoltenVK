@@ -1,10 +1,14 @@
 #version 450
 // Copyright 2026 Jean-Philippe Meunier
 // SPDX-License-Identifier: Apache-2.0
-// A 64 x 64 grid of quads covering the target, without vertex buffers. Non-indexed: vertex v is corner v % 6 of quad
-// v / 6. INDEXED: vertex v is grid point v of a 65 x 65 lattice, addressed by the index buffer.
+// A GRID x GRID grid of quads (default 64) covering the target, without vertex buffers. Non-indexed: vertex v is corner
+// v % 6 of quad v / 6. INDEXED: vertex v is grid point v of a (GRID + 1) x (GRID + 1) lattice, addressed by the index
+// buffer.
+#ifndef GRID
+#define GRID 64u
+#endif
 layout(location = 0) out vec3 color;
-const uint kGrid = 64u;
+const uint kGrid = GRID;
 void main() {
 	uint v = uint(gl_VertexIndex);
 #ifdef INDEXED

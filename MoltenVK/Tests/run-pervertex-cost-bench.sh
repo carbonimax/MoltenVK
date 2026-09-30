@@ -1,7 +1,8 @@
 #!/bin/bash
 # Copyright (c) 2026 Jean-Philippe Meunier
 # SPDX-License-Identifier: Apache-2.0
-# Cost of the portable PerVertexKHR path against an ordinary draw (PerVertexCostBench.mm), direct and indexed.
+# Cost of the portable PerVertexKHR path against an ordinary draw (PerVertexCostBench.mm), direct and indexed, on a
+# 64 x 64 and a 256 x 256 grid of quads.
 #   1. Correctness: each form once under Metal API and GPU validation, with a few samples; it must pass.
 #   2. Calibration: each form without the anchor fill, so that timestamp A lands after the first Metal encoder.
 #   3. Timing: three series without Metal validation, alternating the first arm and the order of the forms.
@@ -29,6 +30,8 @@ cat "$output/ENVIRONMENT.txt"
 compile() { glslangValidator -V --target-env vulkan1.1 "${@:3}" "$test_dir/$1" -o "$shaders/$2" > /dev/null; spirv-val --target-env vulkan1.1 "$shaders/$2"; }
 compile pervertex-cost.vert cost.vert.spv
 compile pervertex-cost.vert cost-indexed.vert.spv -DINDEXED
+compile pervertex-cost.vert cost-256.vert.spv -DGRID=256u
+compile pervertex-cost.vert cost-indexed-256.vert.spv -DINDEXED -DGRID=256u
 compile pervertex-cost.frag cost-ordinary.frag.spv
 compile pervertex-cost.frag cost-pervertex.frag.spv -DPERVERTEX
 xcrun clang++ -arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -I"$root/External/Vulkan-Headers/include" -I"$root/MoltenVK/MoltenVK/API" \
@@ -43,7 +46,7 @@ quiet() {
 state() {
 	{ date -u; pmset -g therm 2>/dev/null; ps -Ao pid,pcpu,pmem,comm -r | awk 'NR <= 8'; } > "$1"
 }
-step() { # name expected-exit validated(0|1) form samples order [--no-anchor]
+step() { # name expected-exit validated(0|1) form grid samples order [--no-anchor]
 	local name=$1 expected=$2 validated=$3 run=$output/runs/$1
 	if [[ -e $run ]]; then echo "STOP: $run already exists"; exit 1; fi
 	mkdir -p "$run"
@@ -63,17 +66,21 @@ step() { # name expected-exit validated(0|1) form samples order [--no-anchor]
 	elif grep -q 'Validation Enabled' "$run/run.log"; then verdict=FAIL; fi
 	if grep -qiE 'Shader Validation|GPU Address Sanitizer|validation error|Execution of the command buffer was aborted|execution failed' "$run/run.log"; then verdict=FAIL; fi
 	printf '%-28s exit=%s %s\n' "$name" "$rc" "$verdict"
-	grep -E '^(images|BENCH)' "$run/run.log" | grep -E 'images|median_|completion_us|execution_us|timestamp_us|encode_us|memory' | sed 's/^/    /' | cut -c1-160 || true
+	grep -E '^(images|BENCH)' "$run/run.log" | grep -E 'images|completion_us|execution_us|timestamp_us|encode_us|memory|mtl_buffers' | sed 's/^/    /' | cut -c1-160 || true
 	if [[ $verdict != PASS ]]; then echo "STOP: inspect $run/run.log"; exit 1; fi
 }
-step validated-direct 0 1 direct 2 ordinary-first
-step validated-indexed 0 1 indexed 2 ordinary-first
-step calibration-direct 0 0 direct "$samples" ordinary-first --no-anchor
-step calibration-indexed 0 0 indexed "$samples" ordinary-first --no-anchor
-step series1-direct 0 0 direct "$samples" ordinary-first
-step series1-indexed 0 0 indexed "$samples" ordinary-first
-step series2-indexed 0 0 indexed "$samples" pervertex-first
-step series2-direct 0 0 direct "$samples" pervertex-first
-step series3-direct 0 0 direct "$samples" ordinary-first
-step series3-indexed 0 0 indexed "$samples" ordinary-first
+for grid in 64 256; do
+	step validated-direct-$grid 0 1 direct $grid 2 ordinary-first
+	step validated-indexed-$grid 0 1 indexed $grid 2 ordinary-first
+	step calibration-direct-$grid 0 0 direct $grid "$samples" ordinary-first --no-anchor
+	step calibration-indexed-$grid 0 0 indexed $grid "$samples" ordinary-first --no-anchor
+done
+for grid in 64 256; do
+	step series1-direct-$grid 0 0 direct $grid "$samples" ordinary-first
+	step series1-indexed-$grid 0 0 indexed $grid "$samples" ordinary-first
+	step series2-indexed-$grid 0 0 indexed $grid "$samples" pervertex-first
+	step series2-direct-$grid 0 0 direct $grid "$samples" pervertex-first
+	step series3-direct-$grid 0 0 direct $grid "$samples" ordinary-first
+	step series3-indexed-$grid 0 0 indexed $grid "$samples" ordinary-first
+done
 echo "COST_BENCH DONE"
