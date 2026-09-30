@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Jean-Philippe Meunier
 # SPDX-License-Identifier: Apache-2.0
 # Metal-only reproduction of the plain-mode sample-shading divergence, without MoltenVK. Every variant runs on the strip,
-# the list and the indexed list, without any Metal instrumentation (plain) and under Metal API and shader validation (validated).
+# the list, the indexed list and the fan as MoltenVK draws it, without any Metal instrumentation (plain) and under Metal API and shader validation (validated).
 # The table records each exit: 0 when the resolved image matches the per-sample model, 4 when it does not.
 # Usage: run-sample-shading-strip.sh <output directory>
 set -euo pipefail
@@ -18,7 +18,7 @@ xcrun clang++ -arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -fobjc-arc "$here
 shasum -a 256 "$program" "$here/SampleShadingStrip.mm" "$0" > "$output/INPUTS.sha256"
 for mode in plain validated; do
 	for variant in moltenvk no-sample-id sample-id-read buffer-write oracle; do
-		for topology in strip list indexed; do
+		for topology in strip list indexed fan-indexed; do
 			run=$output/runs/$mode-$variant-$topology
 			mkdir -p "$run"
 			rc=0

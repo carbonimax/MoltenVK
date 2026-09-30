@@ -14,8 +14,10 @@
 //   oracle          what the Vulkan samples oracle does: colour and sample position written at [pixel, sample_id].
 // Exit 0: the image matches the per-sample model within 1 everywhere; 4: it does not; 1 or 2: setup error.
 // Topologies: strip (4 vertices); list (the two triangles as 6 vertices); indexed (the strip's 4 vertices drawn as an
-// indexed triangle list, 0 1 2 1 2 3, so that the triangles share vertices without being a strip).
-// Usage: sample-shading-strip <variant> strip|list|indexed <output directory>
+// indexed triangle list, 0 1 2 1 2 3, so that the triangles share vertices without being a strip); fan-indexed (the CTS
+// fan's 4 vertices, left top, left bottom, right bottom, right top, drawn as the indexed triangles MoltenVK converts a
+// fan to, 1 2 0 2 3 0).
+// Usage: sample-shading-strip <variant> strip|list|indexed|fan-indexed <output directory>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
@@ -118,11 +120,11 @@ struct Vertex { float position[4], color[4]; };
 
 int main(int argc, char** argv) {
 	@autoreleasepool {
-	if (argc != 4) { std::fprintf(stderr, "Usage: sample-shading-strip moltenvk|no-sample-id|sample-id-read|buffer-write|oracle strip|list|indexed output-dir\n"); return 1; }
+	if (argc != 4) { std::fprintf(stderr, "Usage: sample-shading-strip moltenvk|no-sample-id|sample-id-read|buffer-write|oracle strip|list|indexed|fan-indexed output-dir\n"); return 1; }
 	const std::string variant = argv[1], topology = argv[2], output = argv[3];
 	const std::string fragment = fragmentSource(variant);
-	if (fragment.empty() || (topology != "strip" && topology != "list" && topology != "indexed")) { std::fprintf(stderr, "Unknown case\n"); return 1; }
-	const bool strip = topology == "strip" || topology == "indexed", indexed = topology == "indexed";
+	if (fragment.empty() || (topology != "strip" && topology != "list" && topology != "indexed" && topology != "fan-indexed")) { std::fprintf(stderr, "Unknown case\n"); return 1; }
+	const bool strip = topology == "strip" || topology == "indexed", fan = topology == "fan-indexed", indexed = topology == "indexed" || fan;
 	id<MTLDevice> device = MTLCreateSystemDefaultDevice();
 	std::printf("DEVICE=%s variant=%s topology=%s\n", device.name.UTF8String, variant.c_str(), topology.c_str());
 
@@ -169,7 +171,8 @@ int main(int argc, char** argv) {
 	const Vertex leftTop{{-1, -1, 0, 1}, {1, 0, 0, 1}}, leftBottom{{-1, 1, 0, 1}, {0, 0, 0, 1}};
 	const Vertex rightBottom{{s, s, 0, s}, {0, 0, 1, 1}}, rightTop{{s, -s, 0, s}, {0, 1, 0, 1}};
 	const std::vector<Vertex> vertices = strip ? std::vector<Vertex>{leftBottom, leftTop, rightBottom, rightTop}
-	                                           : std::vector<Vertex>{leftTop, leftBottom, rightBottom, rightBottom, rightTop, leftTop};
+	                                   : fan ? std::vector<Vertex>{leftTop, leftBottom, rightBottom, rightTop}
+	                                         : std::vector<Vertex>{leftTop, leftBottom, rightBottom, rightBottom, rightTop, leftTop};
 	id<MTLBuffer> vertexBuffer = [device newBufferWithBytes:vertices.data() length:vertices.size() * sizeof(Vertex) options:MTLResourceStorageModeShared];
 	const uint32_t zero = 0;
 	id<MTLBuffer> zeroBuffer = [device newBufferWithBytes:&zero length:sizeof(zero) options:MTLResourceStorageModeShared];
@@ -193,8 +196,9 @@ int main(int argc, char** argv) {
 	[encoder setVertexBuffer:vertexBuffer offset:0 atIndex:30];
 	[encoder setFragmentBuffer:zeroBuffer offset:0 atIndex:0];
 	[encoder setFragmentBuffer:sideBuffer offset:0 atIndex:1];
-	const uint16_t indices[6] = {0, 1, 2, 1, 2, 3};
-	id<MTLBuffer> indexBuffer = [device newBufferWithBytes:indices length:sizeof(indices) options:MTLResourceStorageModeShared];
+	const uint16_t stripIndices[6] = {0, 1, 2, 1, 2, 3}, fanIndices[6] = {1, 2, 0, 2, 3, 0};
+	const uint16_t* indices = fan ? fanIndices : stripIndices;
+	id<MTLBuffer> indexBuffer = [device newBufferWithBytes:indices length:6 * sizeof(uint16_t) options:MTLResourceStorageModeShared];
 	if (indexed) [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:6 indexType:MTLIndexTypeUInt16 indexBuffer:indexBuffer indexBufferOffset:0];
 	else [encoder drawPrimitives:strip ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:vertices.size()];
 	[encoder endEncoding];
@@ -211,7 +215,7 @@ int main(int argc, char** argv) {
 
 	// CPU models, in Vulkan window coordinates (y down), at the standard 4x locations.
 	const double locations[4][2] = {{0.375, 0.125}, {0.875, 0.375}, {0.125, 0.625}, {0.625, 0.875}};
-	const std::vector<int> triangles = strip ? std::vector<int>{0, 1, 2, 1, 2, 3} : std::vector<int>{0, 1, 2, 3, 4, 5};
+	const std::vector<int> triangles = strip ? std::vector<int>{0, 1, 2, 1, 2, 3} : fan ? std::vector<int>{1, 2, 0, 2, 3, 0} : std::vector<int>{0, 1, 2, 3, 4, 5};
 	auto window = [&](const Vertex& v, int axis) { return (double(v.position[axis]) / double(v.position[3]) + 1.0) * 0.5 * kSide; };
 	auto weights = [&](size_t t, double px, double py, double l[3]) {
 		double x[3], y[3];
