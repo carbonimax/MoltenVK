@@ -16,9 +16,9 @@ Audit sans nouveau runtime ni essai GPU. Code examiné à `ec8d70b2` (runtime de
 - **Mécanismes légaux disponibles :**
   - ne pas exposer une feature ou une extension, globalement ou selon l'appareil ;
   - les features restrictives de `VK_KHR_portability_subset` (voir « Capacités exposées ») ;
-  - des limites plus basses, qui valent pour tout l'appareil ;
+  - des limites plus basses, qui valent pour tout l'appareil, **à condition de respecter les minima de Vulkan** (par exemple 64 composantes pour `maxFragmentInputComponents` et `maxVertexOutputComponents` au cœur de Vulkan ; 112 et 124 pour le profil Roadmap 2026, `limits.adoc`) ;
   - les valeurs que la spécification déclare indéfinies ;
-  - les codes d'épuisement mémoire, pour un vrai manque de mémoire.
+  - les codes d'épuisement mémoire, **pour un vrai manque de mémoire seulement** : une limite interne, par exemple la largeur d'un index, ne justifie pas à elle seule `VK_ERROR_OUT_OF_DEVICE_MEMORY`.
 - **Convention de MoltenVK.** Son README demande de signaler par une erreur un écart à la spécification que Metal ne permet pas de combler. C'est une convention du projet, pas un mécanisme légal au sens de Vulkan.
 
 **Capacités exposées qui croisent PerVertexKHR** (`MVKDevice.mm`). Elles valent pour les deux configurations par défaut : la distribution Xcode, et CMake, dont `MVK_USE_METAL_PRIVATE_API` vaut `OFF`. Les bibliothèques de test (`build-library.sh`) ont cette même configuration, avec l'adaptateur de test en plus.
@@ -49,8 +49,8 @@ Classes :
 | 2 | Appareils sans MSL 2.4 | Refus à la création du pipeline | — | C (à faire) | N'exposer l'extension que sur les appareils capables (`8081becf` en pose le principe) |
 | 3 | Chemin natif Apple10 | Pris sur Apple10, MSL 4 et triangles, sans `BaryCoord` | — | Choix interne, non prouvé | Le désactiver, ou le prouver (aucun matériel) |
 | 4 | Étage géométrie | Refusé (étages VS/FS seulement) | `geometryShader` non exposé | N | — |
-| 5 | Adjacence, topologie statique | Refusée (CTS : 792 cas d'adjacence refusés, dont 96 en topologie dynamique) | VUID-VkPipelineInputAssemblyStateCreateInfo-topology-00429 | N | — ; voir aussi la note CTS (section 3) |
-| 6 | Adjacence en valeur dynamique | Refusée à l'enregistrement | Aucune VUID trouvée | ? | Si l'usage est valide, le chemin ordinaire est lui aussi faux (`mvk_datatypes.mm:497`) |
+| 5 | Adjacence, topologie statique | Refusée (CTS : 696 cas) | VUID-VkPipelineInputAssemblyStateCreateInfo-topology-00429 | N | — ; voir aussi la note CTS (section 3) |
+| 6 | Adjacence en valeur dynamique | Refusée à l'enregistrement (CTS : 96 cas) | Aucune VUID trouvée ; la règle statique de la ligne 5 ne s'applique pas à ces cas | ? | Si l'usage est valide, le chemin ordinaire est lui aussi faux (`mvk_datatypes.mm:497`) |
 | 7 | Topologie dynamique hors de la classe du pipeline | Non gérée | `dynamicPrimitiveTopologyUnrestricted = false` ; VUID-vkCmdDraw-dynamicPrimitiveTopologyUnrestricted-07500 et équivalents des autres dessins | N | — ; admission dans la classe : `162a23a4` (expérimental ; CTS : 120 cas, dont 8 résultats faux en validé, tous d'offset MSAA) |
 | 8 | `polygonMode` POINT | Refusé | VUID-VkPipelineRasterizationStateCreateInfo-pointPolygons-04458 | N (portabilité) | — |
 | 9 | `polygonMode` LINE, statique ou dynamique | Refusé | `primsrast-barycentric` : `PerVertexKHR` et `BaryCoord*` **indéfinis** hors `FILL` | B | Admettre le pipeline. Les valeurs barycentriques sont libres ; les autres entrées du fragment et le mode ligne doivent rester justes |
@@ -60,16 +60,16 @@ Classes :
 | 13 | Tessellation | Contrat TES restreint, figé à `66f9fd97` ; niveaux anormaux : device perdu (CTS : 36 cas refusés) | `tessellationShader` exposé | B, gelé | Isolines et mode point : N (VUID-RuntimeSpirv-tessellationShader-06326 et -06327). Le reste bloque |
 | 14 | Mesh | Adaptateur de test seulement (CTS : 690 cas refusés) | `VK_EXT_mesh_shader` fermé | C | — |
 | 15 | Indirect avec liaisons à diviseur nul | Refusé | `vertexAttributeInstanceRateZeroDivisor` exposé | B | Gérer les copies de diviseur nul dans le plan GPU |
-| 16 | Indirect sous préremplissage Metal immédiat | Refusé | Réglage MoltenVK non standard | L (réglage) | Ne pas exposer l'extension quand ce réglage est actif |
+| 16 | Indirect sous préremplissage Metal immédiat | Refusé | Réglage MoltenVK non standard | B tant que rien n'est fait ; C possible | Ne pas exposer l'extension quand ce réglage est actif. Cette exposition conditionnelle n'existe pas : elle est à mettre en œuvre, puis à vérifier |
 | 17 | Capture indexée et attachements | Refus : attachements paresseux, résolutions logicielles et certaines résolutions profondeur/stencil, suspension avec résolution, attachements inconnus à l'enregistrement | Usages valides ; mémoire paresseuse exposée | B | Capture qui préserve ces attachements |
-| 18 | Emplacements de buffer Metal | Refus « no free … buffer slot » | Limites par étage exposées | B ; L possible | Réserver ces emplacements dans les limites exposées (? : vérifier les limites actuelles) |
-| 19 | Budget de varyings du rejeu | Refus au-delà du budget Metal | Le niveau de tableau extérieur de `PerVertexKHR` ne compte pas (`interfaces-iointerfaces-locations`) | B ; L possible | Baisser `maxFragmentInputComponents` et `maxVertexOutputComponents` du coût privé (clé et base), pour tout l'appareil |
+| 18 | Emplacements de buffer Metal | Refus « no free … buffer slot » | Limites par étage exposées | B ; L possible sous condition | Réserver ces emplacements dans les limites exposées, sans descendre sous les minima Vulkan (? : vérifier les limites actuelles) |
+| 19 | Budget de varyings du rejeu | Refus au-delà du budget Metal | Le niveau de tableau extérieur de `PerVertexKHR` ne compte pas (`interfaces-iointerfaces-locations`) | B ; L possible sous condition | Baisser `maxFragmentInputComponents` et `maxVertexOutputComponents` du coût privé (clé et base), pour tout l'appareil, en restant au-dessus des minima : 64 au cœur de Vulkan, 112 et 124 pour Roadmap 2026. MoltenVK expose 124 sur Apple4+ et Mac1 (60 ailleurs, déjà sous le minimum, sur des GPU sans MSL 2.4) |
 | 20 | Formes SPIR-V que la capture ou le rejeu refuse | Erreur de SPIRV-Cross, disposition non exportée, disposition indexée incompatible | 64 bits flottants : N (`shaderFloat64` fermé) | ? | Inventaire des formes valides refusées (entiers 64 bits, matrices, tableaux de tableaux, emplacements ≥ 32…) |
-| 21 | Tailles extrêmes | Scratch au-delà du maximum Metal : `OUT_OF_DEVICE_MEMORY`. Identifiants de redémarrage ou diviseur étendu au-delà de uint32 : `FEATURE_NOT_PRESENT`. Plus de `UINT32_MAX` enregistrements indirects : device perdu | Codes mémoire admis | L pour le premier ; B pour les autres (le dernier gelé) | Rendre `OUT_OF_DEVICE_MEMORY` pour les deux cas uint32 |
+| 21 | Tailles extrêmes | Scratch au-delà du maximum Metal : `OUT_OF_DEVICE_MEMORY`. Identifiants de redémarrage ou diviseur étendu au-delà de uint32 : `FEATURE_NOT_PRESENT`. Plus de `UINT32_MAX` enregistrements indirects : device perdu | Codes mémoire admis pour un vrai manque de mémoire | L pour le premier, si l'allocation est réellement impossible ; B pour les autres (le dernier gelé) | Les cas uint32 sont des limites internes : `OUT_OF_DEVICE_MEMORY` ne les justifie pas d'office. Il faut élargir les index, ou établir qu'une allocation réelle échoue avant eux |
 | 22 | Encodage impossible à la soumission | Device perdu (`d09c56cb`, `e7350a3a`) | `VK_ERROR_DEVICE_LOST` est un code admis, pas un refus d'usage | B, gelé | Volet soumission et perte |
 | 23 | `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` | Rend toujours `VK_PIPELINE_COMPILE_REQUIRED` | Code de succès admis | L | — |
 | 24 | Propriété `triStripVertexOrderIndependentOfProvokingVertex` | `VK_FALSE`, avec des tables conformes | `limits.adoc` | L | — |
-| 25 | MSAA : offset et divergence Metal | Défauts de SPIRV-Cross (générique) et de Metal (FB25000318), hors PerVertexKHR | — | Hors contrat | Candidat SPIRV-Cross isolé ; signalement Apple |
+| 25 | MSAA : offset et divergence Metal | Défauts de SPIRV-Cross (générique) et de Metal (FB25000318), qui ne sont pas propres à PerVertexKHR | Résultats faux sur des usages valides | B pour une exposition conforme | Ces défauts restent bloquants pour la conformité d'une fonctionnalité exposée. Pistes : candidat SPIRV-Cross isolé, signalement Apple |
 
 ## 3. Inconnues explicites
 
@@ -92,7 +92,7 @@ Classes :
 | **K2** : groupement multiview | `3e14cb82` : première vue de chaque passe, décalage `1 << 32` indéfini | Test hôte `MultiviewGroupingTests.cpp`. S'applique proprement sur `upstream/main` | Retirer les fichiers de test PerVertex du commit | Aucune |
 | **K3** : correctifs ordinaires mêlés au code PerVertex | Stride des diviseurs nuls (`2911d0a1`), débordements de tessellation (`8d650476`, `8f33520d`) | Tests PerVertex seulement | Conflits sur `upstream/main` : à réécrire | Aucune |
 | **K4** : SPIRV-Cross | 25 commits d'options MSL opt-in (capture, rejeu, PerVertexKHR portable et natif, TES en compute, mesh) | Tests de référence du fork. Candidat `+ 0.5` à part, gelé | CLA Khronos et déclaration sur l'usage d'IA (CONTRIBUTING de SPIRV-Cross). Suite complète `test_shaders.py` avec les versions fixées, non faite | Options opt-in : aucun effet sans MoltenVK |
-| **K5** : cœur PerVertexKHR portable dans MoltenVK | Capture et rejeu directs et indexés, scratch, redémarrage, vue unique | CTS barycentrique validée ; matrices et suites M4 | K4 épinglé ; lignes B de la section 2 | Extension fermée, ou exposée par un réglage explicite |
+| **K5** : cœur PerVertexKHR portable dans MoltenVK | Capture et rejeu directs et indexés, scratch, redémarrage, vue unique | CTS barycentrique validée ; matrices et suites M4 | K4 épinglé ; lignes B de la section 2 | Extension fermée ; un éventuel réglage expérimental permettrait d'expérimenter, sans rendre conforme un sous-ensemble |
 | **K6** : indirect | Plan GPU, continuation | Matrice 127/127, continuation | Protocole de soumission (gelé) | Fermée |
 | **K7** : TES | Contrat restreint | 142/142 | Gelé | Fermée |
 | **K8** : mesh | Adaptateur | 41/41 | `VK_EXT_mesh_shader` lui-même fermé | Fermée |
@@ -114,5 +114,19 @@ Classes :
 Les deux premiers sont du runtime et du GPU : hors de cet audit, à faire après accord.
 
 **Suite possible, pour le choix à venir :**
-- **Livraison progressive, gardes fermées.** Tranche 2 : K4 (SPIRV-Cross, opt-in). Tranche 3 : K5 derrière une extension fermée, ou un réglage explicite. Aucune annonce de support.
-- **Exposition complète.** Il faut lever toutes les lignes B : 9, 10, 12, 15, 17, 18, 19, 21 et la ligne 20 une fois inventoriée. Il faut aussi rouvrir TES et le volet soumission et perte (lignes 13 et 22), et régler l'adjacence (lignes 5 et 6, note CTS).
+- **Livraison progressive, gardes fermées.** Tranche 2 : K4 (SPIRV-Cross, opt-in). Tranche 3 : K5 derrière une extension fermée. Un réglage expérimental permettrait d'expérimenter ; il ne rendrait pas conforme un sous-ensemble arbitraire d'usages. Aucune annonce de support.
+- **Exposition complète.** Il faut lever toutes les lignes B : 9, 10, 12, 15, 16, 17, 18, 19, 21 et 25, et la ligne 20 une fois inventoriée. Il faut aussi rouvrir TES et le volet soumission et perte (lignes 13 et 22), et régler l'adjacence (lignes 5 et 6, note CTS).
+
+## 6. Avis d'Astra (30 septembre 2026)
+
+- **Voie retenue : livraison progressive, gardes publiques fermées.** L'audit ne démontre ni une exposition Vulkan conforme, ni une préparation suffisante pour une PR.
+- **Cinq corrections reportées ci-dessus** :
+  - adjacence statique et dynamique séparées (lignes 5 et 6) ;
+  - minima Vulkan et `VK_ERROR_OUT_OF_DEVICE_MEMORY` (section 1, lignes 18, 19 et 21) ;
+  - exposition conditionnelle du préremplissage à mettre en œuvre (ligne 16) ;
+  - MSAA bloquant pour une fonctionnalité exposée (ligne 25) ;
+  - portée d'un réglage expérimental (section 5).
+- **Deux changements séparés proposés** : K1 (éventails dynamiques ordinaires et état générique de topologie Vulkan), puis K2 (groupement multiview).
+- **Leur préparation reste à autoriser** : extraction sur une base upstream identifiée, compilation, preuves autonomes avant et après.
+- **Aucun élargissement** à K3–K9.
+- **Qualification finale** prévue sur M1 et M2 ; Intel est annulé, et aucun M3 n'est disponible.
