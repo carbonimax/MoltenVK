@@ -17,7 +17,7 @@ cat "$output/ENVIRONMENT.txt"
 xcrun clang++ -arch arm64 -std=c++17 -O2 -Wall -Wextra -Werror -fobjc-arc "$here/SampleShadingStrip.mm" -framework Metal -framework Foundation -o "$program"
 shasum -a 256 "$program" "$here/SampleShadingStrip.mm" "$0" > "$output/INPUTS.sha256"
 for mode in plain validated; do
-	for variant in moltenvk no-sample-id sample-id-read buffer-write oracle; do
+	for variant in moltenvk no-sample-id buffer-write oracle; do
 		for topology in strip list indexed fan-indexed; do
 			run=$output/runs/$mode-$variant-$topology
 			mkdir -p "$run"

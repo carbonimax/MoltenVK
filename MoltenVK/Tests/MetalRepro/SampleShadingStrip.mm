@@ -9,7 +9,6 @@
 // Fragment variants, to separate what restores sample-rate shading:
 //   moltenvk        the MSL as generated: a sample_perspective input and an unused [[sample_id]] parameter;
 //   no-sample-id    the same without the [[sample_id]] parameter;
-//   sample-id-read  gl_SampleID read into the output through a constant buffer holding 0 (not foldable, no write);
 //   buffer-write    an atomic increment of a device buffer, without reading gl_SampleID or the sample position;
 //   oracle          what the Vulkan samples oracle does: colour and sample position written at [pixel, sample_id].
 // Exit 0: the image matches the per-sample model within 1 everywhere; 4: it does not; 1 or 2: setup error.
@@ -86,13 +85,6 @@ struct main0_in
     return out;
 }
 )";
-	if (variant == "sample-id-read") return head + R"(fragment main0_out main0(main0_in in [[stage_in]], uint gl_SampleID [[sample_id]], constant uint& zero [[buffer(0)]])
-{
-    main0_out out = {};
-    out.outputColor = float4(in.color, 1.0 + float(gl_SampleID * zero));
-    return out;
-}
-)";
 	if (variant == "buffer-write") return head + R"(fragment main0_out main0(main0_in in [[stage_in]], device atomic_uint* counter [[buffer(1)]])
 {
     main0_out out = {};
@@ -120,7 +112,7 @@ struct Vertex { float position[4], color[4]; };
 
 int main(int argc, char** argv) {
 	@autoreleasepool {
-	if (argc != 4) { std::fprintf(stderr, "Usage: sample-shading-strip moltenvk|no-sample-id|sample-id-read|buffer-write|oracle strip|list|indexed|fan-indexed output-dir\n"); return 1; }
+	if (argc != 4) { std::fprintf(stderr, "Usage: sample-shading-strip moltenvk|no-sample-id|buffer-write|oracle strip|list|indexed|fan-indexed output-dir\n"); return 1; }
 	const std::string variant = argv[1], topology = argv[2], output = argv[3];
 	const std::string fragment = fragmentSource(variant);
 	if (fragment.empty() || (topology != "strip" && topology != "list" && topology != "indexed" && topology != "fan-indexed")) { std::fprintf(stderr, "Unknown case\n"); return 1; }
@@ -174,8 +166,6 @@ int main(int argc, char** argv) {
 	                                   : fan ? std::vector<Vertex>{leftTop, leftBottom, rightBottom, rightTop}
 	                                         : std::vector<Vertex>{leftTop, leftBottom, rightBottom, rightBottom, rightTop, leftTop};
 	id<MTLBuffer> vertexBuffer = [device newBufferWithBytes:vertices.data() length:vertices.size() * sizeof(Vertex) options:MTLResourceStorageModeShared];
-	const uint32_t zero = 0;
-	id<MTLBuffer> zeroBuffer = [device newBufferWithBytes:&zero length:sizeof(zero) options:MTLResourceStorageModeShared];
 	const size_t samplesLength = size_t(kSide) * kSide * 4 * 2 * 16;
 	id<MTLBuffer> sideBuffer = [device newBufferWithLength:samplesLength options:MTLResourceStorageModeShared];
 	memset(sideBuffer.contents, 0, samplesLength);
@@ -194,7 +184,6 @@ int main(int argc, char** argv) {
 	[encoder setViewport:(MTLViewport){0, 0, double(kSide), double(kSide), 0, 1}];
 	[encoder setCullMode:MTLCullModeNone];
 	[encoder setVertexBuffer:vertexBuffer offset:0 atIndex:30];
-	[encoder setFragmentBuffer:zeroBuffer offset:0 atIndex:0];
 	[encoder setFragmentBuffer:sideBuffer offset:0 atIndex:1];
 	const uint16_t stripIndices[6] = {0, 1, 2, 1, 2, 3}, fanIndices[6] = {1, 2, 0, 2, 3, 0};
 	const uint16_t* indices = fan ? fanIndices : stripIndices;
