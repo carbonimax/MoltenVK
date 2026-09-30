@@ -3,7 +3,9 @@
 // Cost of the portable PerVertexKHR path against an ordinary draw of the same geometry, on one GPU, without Metal
 // validation (the correctness of both arms is checked separately under validation by the runner).
 // Workload: a 64 x 64 grid of quads (8192 triangles; 24576 vertices direct, 4225 indexed) or a 256 x 256 one (131072
-// triangles; 393216 vertices direct, 66049 indexed) over a 256 x 256 RGBA8 target, one draw per command buffer. Arm "ordinary" interpolates a colour; arm
+// triangles; 393216 vertices direct, 66049 indexed) over a 256 x 256 RGBA8 target, one draw per command buffer. The
+// indirect and indexed-indirect forms draw the same grid through vkCmdDrawIndirect and vkCmdDrawIndexedIndirect, with
+// one command written once in a host-visible buffer. Arm "ordinary" interpolates a colour; arm
 // "pervertex" weights the three PerVertexKHR values by BaryCoordKHR, which takes MoltenVK's capture and replay.
 // Each command buffer: an anchor fill, timestamp A, the render pass, a copy to a host buffer, timestamp B. On Apple GPUs
 // MoltenVK takes a Vulkan timestamp after the Metal encoder that is open when it is written (MVKCommandBuffer.mm,
@@ -23,7 +25,8 @@
 // after the PerVertexKHR submissions (memory MoltenVK keeps).
 // The report also gives, per measure, the paired difference (PerVertexKHR minus ordinary within the same pair).
 // Every sample checks that its arm's image equals that arm's first image; the two arms must agree within 2/255.
-// Usage: pervertex-cost-bench <shader directory> direct|indexed 64|256 <samples 1..500> ordinary-first|pervertex-first
+// Usage: pervertex-cost-bench <shader directory> direct|indexed|indirect|indexed-indirect 64|256 <samples 1..500>
+//        ordinary-first|pervertex-first
 //        [--no-anchor]
 #import <Metal/Metal.h>
 #include <vulkan/vulkan.h>
@@ -73,13 +76,13 @@ static void summarize(const char* arm, const char* what, std::vector<double> val
 
 int main(int argc, char** argv) {
 	@autoreleasepool {
-	if (argc != 6 && argc != 7) { std::fprintf(stderr, "Usage: pervertex-cost-bench shader-dir direct|indexed 64|256 samples ordinary-first|pervertex-first [--no-anchor]\n"); return 1; }
+	if (argc != 6 && argc != 7) { std::fprintf(stderr, "Usage: pervertex-cost-bench shader-dir direct|indexed|indirect|indexed-indirect 64|256 samples ordinary-first|pervertex-first [--no-anchor]\n"); return 1; }
 	const std::string shaders = argv[1], form = argv[2], gridName = argv[3], order = argv[5];
 	const unsigned long samples = std::strtoul(argv[4], nullptr, 10);
 	const bool anchor = argc == 6 || std::string(argv[6]) != "--no-anchor";
-	if ((form != "direct" && form != "indexed") || (gridName != "64" && gridName != "256") || samples < 1 || samples > 500 || (order != "ordinary-first" && order != "pervertex-first") || (argc == 7 && anchor)) { std::fprintf(stderr, "Unknown case\n"); return 1; }
+	if ((form != "direct" && form != "indexed" && form != "indirect" && form != "indexed-indirect") || (gridName != "64" && gridName != "256") || samples < 1 || samples > 500 || (order != "ordinary-first" && order != "pervertex-first") || (argc == 7 && anchor)) { std::fprintf(stderr, "Unknown case\n"); return 1; }
 	const uint32_t kGrid = gridName == "256" ? 256 : 64;
-	const bool indexed = form == "indexed";
+	const bool indexed = form == "indexed" || form == "indexed-indirect", indirect = form == "indirect" || form == "indexed-indirect";
 
 	uint32_t count = 0;
 	check(vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr), "Enumerate instance extensions");
@@ -189,6 +192,9 @@ int main(int argc, char** argv) {
 		for (uint32_t index : {a, a + 1, a + kGrid + 2, a + kGrid + 2, a + kGrid + 1, a}) reinterpret_cast<uint32_t*>(indices.data)[i++] = index;
 	}
 	Buffer anchorBuffer = makeBuffer(256, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+	Buffer command = makeBuffer(sizeof(VkDrawIndexedIndirectCommand), VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+	if (indexed) *reinterpret_cast<VkDrawIndexedIndirectCommand*>(command.data) = {vertexCount, 1, 0, 0, 0};
+	else *reinterpret_cast<VkDrawIndirectCommand*>(command.data) = {vertexCount, 1, 0, 0};
 	Buffer readbacks[2] = {makeBuffer(kSide * kSide * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT), makeBuffer(kSide * kSide * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT)};
 
 	VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -340,10 +346,11 @@ int main(int argc, char** argv) {
 		pass.pClearValues = &clear;
 		vkCmdBeginRenderPass(cb, &pass, VK_SUBPASS_CONTENTS_INLINE);
 		vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines[arm]);
-		if (indexed) {
-			vkCmdBindIndexBuffer(cb, indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-			vkCmdDrawIndexed(cb, vertexCount, 1, 0, 0, 0);
-		} else vkCmdDraw(cb, vertexCount, 1, 0, 0);
+		if (indexed) vkCmdBindIndexBuffer(cb, indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+		if (indirect && indexed) vkCmdDrawIndexedIndirect(cb, command.buffer, 0, 1, sizeof(VkDrawIndexedIndirectCommand));
+		else if (indirect) vkCmdDrawIndirect(cb, command.buffer, 0, 1, sizeof(VkDrawIndirectCommand));
+		else if (indexed) vkCmdDrawIndexed(cb, vertexCount, 1, 0, 0, 0);
+		else vkCmdDraw(cb, vertexCount, 1, 0, 0);
 		vkCmdEndRenderPass(cb);
 		VkBufferImageCopy copy{};
 		copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
