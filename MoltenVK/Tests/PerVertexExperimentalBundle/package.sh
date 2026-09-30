@@ -22,7 +22,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 tests=$(cd "$here/.." && pwd)
 root=$(cd "$tests/../.." && pwd)
 out=$(mkdir -p "${1:?output directory}" && cd "$1" && pwd)
-revision=pervertex-experimental-c2
+revision=pervertex-experimental-c3
 bundle=$out/$revision
 [[ ! -e $bundle ]] || { echo "STOP: $bundle already exists"; exit 1; }
 cts_source=${PERVERTEX_BUNDLE_CTS_SOURCE:-$(cd "$root/../VK-GL-CTS-1.4.6.2" && pwd)}
