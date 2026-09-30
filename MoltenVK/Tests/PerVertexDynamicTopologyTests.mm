@@ -11,8 +11,11 @@
 // dynamic images must also equal an independent reference: the draws triangulated explicitly in the order of the Vulkan
 // barycentric order table and drawn without PerVertexKHR (pervertex-dynamic-reference.vert). The same reference with
 // every triangle's corners turned by one must differ, so that the check sees vertex order, not only coverage.
+// weights-w and weights-w-noperspective give each corner of a triangle a different w (same window position), so that
+// perspective and linear interpolation differ: BaryCoordKHR against the reference weight interpolated with perspective,
+// BaryCoordNoPerspKHR against the one interpolated without.
 // Usage: pervertex-dynamic-topology <shader directory> triangles|lines direct|indexed|indirect|indexed-indirect|adjacency
-//        [pervertex|ordinary|weights]
+//        [pervertex|ordinary|weights|weights-w|weights-w-noperspective]
 #import <Metal/Metal.h>
 #include <vulkan/vulkan.h>
 
@@ -49,10 +52,12 @@ struct Buffer { VkBuffer buffer = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NUL
 
 int main(int argc, char** argv) {
 	@autoreleasepool {
-	if (argc != 4 && argc != 5) { std::fprintf(stderr, "Usage: pervertex-dynamic-topology shader-dir triangles|lines direct|indexed|indirect|indexed-indirect|adjacency [pervertex|ordinary|weights]\n"); return 2; }
+	if (argc != 4 && argc != 5) { std::fprintf(stderr, "Usage: pervertex-dynamic-topology shader-dir triangles|lines direct|indexed|indirect|indexed-indirect|adjacency [pervertex|ordinary|weights|weights-w|weights-w-noperspective]\n"); return 2; }
 	const std::string shaders = argv[1], klass = argv[2], form = argv[3], fragmentKind = argc == 5 ? argv[4] : "pervertex";
 	const bool indexed = form == "indexed" || form == "indexed-indirect", indirect = form == "indirect" || form == "indexed-indirect";
-	const bool adjacency = form == "adjacency", ordinary = fragmentKind == "ordinary", weights = fragmentKind == "weights";
+	const bool adjacency = form == "adjacency", ordinary = fragmentKind == "ordinary";
+	const bool variedW = fragmentKind == "weights-w" || fragmentKind == "weights-w-noperspective", noPerspective = fragmentKind == "weights-w-noperspective";
+	const bool weights = fragmentKind == "weights" || variedW;
 	if ((klass != "triangles" && klass != "lines") || (form != "direct" && !indexed && !indirect && !adjacency) || (adjacency && (klass != "triangles" || fragmentKind != "pervertex")) || (weights && klass != "triangles") || (!ordinary && !weights && fragmentKind != "pervertex")) { std::fprintf(stderr, "Unknown case\n"); return 2; }
 	const std::vector<VkPrimitiveTopology> topologies = klass == "triangles"
 		? std::vector<VkPrimitiveTopology>{VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN}
@@ -270,7 +275,8 @@ int main(int argc, char** argv) {
 		return result;
 	};
 	// The PORTABLE fragment also reads BaryCoordKHR, so every pipeline takes the portable capture and replay.
-	VkShaderModule vertex = module("indirect.vert.spv"), fragment = module(ordinary ? "ordinary.frag.spv" : weights ? "weights.frag.spv" : "pervertex-portable.frag.spv");
+	VkShaderModule vertex = module(variedW ? "indirect-w.vert.spv" : "indirect.vert.spv");
+	VkShaderModule fragment = module(ordinary ? "ordinary.frag.spv" : noPerspective ? "weights-noperspective.frag.spv" : weights ? "weights.frag.spv" : "pervertex-portable.frag.spv");
 	auto graphicsPipeline = [&](VkPrimitiveTopology topology, bool dynamicTopology, VkPipeline& result, VkShaderModule vertexModule, VkShaderModule fragmentModule, VkPipelineLayout pipelineLayout) {
 		VkPipelineShaderStageCreateInfo stages[2]{{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
 		stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -326,7 +332,7 @@ int main(int argc, char** argv) {
 	std::vector<VkPipeline> statics(topologies.size());
 	for (size_t i = 0; i < topologies.size(); ++i) check(graphicsPipeline(topologies[i], false, statics[i], vertex, fragment, layout), "Create static pipeline");
 	VkPipeline referencePipeline = VK_NULL_HANDLE;
-	if (weights) check(graphicsPipeline(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, referencePipeline, module("reference.vert.spv"), module("reference.frag.spv"), referenceLayout), "Create reference pipeline");
+	if (weights) check(graphicsPipeline(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, referencePipeline, module(variedW ? "reference-w.vert.spv" : "reference.vert.spv"), module(noPerspective ? "reference-noperspective.frag.spv" : "reference.frag.spv"), referenceLayout), "Create reference pipeline");
 	VkPipeline dynamicPipeline = VK_NULL_HANDLE;
 	VkResult dynamicCreated = graphicsPipeline(topologies[0], true, dynamicPipeline, vertex, fragment, layout);
 	std::printf("dynamic topology pipeline: vkCreateGraphicsPipelines=%d\n", int(dynamicCreated));

@@ -5,6 +5,7 @@
 // MoltenVK's ordinary draw path.
 // WEIGHTS: PerVertexKHR values and BaryCoordKHR, through the portable capture and replay.
 // REFERENCE: the same output without PerVertexKHR, from the explicit triangulation of pervertex-dynamic-reference.vert.
+// NOPERSPECTIVE, with WEIGHTS or REFERENCE: BaryCoordNoPerspKHR, against the weight interpolated without perspective.
 // Alpha 0.5 exposes draw order when blending.
 #ifdef WEIGHTS
 #extension GL_EXT_fragment_shader_barycentric : require
@@ -17,12 +18,20 @@ vec4 weigh(vec3 weights, vec3 value0, vec3 value1, vec3 value2) {
 }
 #if defined(WEIGHTS)
 layout(location = 0) pervertexEXT in vec3 color[3];
+#ifdef NOPERSPECTIVE
+void main() { outputColor = weigh(gl_BaryCoordNoPerspEXT, color[0], color[1], color[2]); }
+#else
 void main() { outputColor = weigh(gl_BaryCoordEXT, color[0], color[1], color[2]); }
+#endif
 #elif defined(REFERENCE)
 layout(location = 0) flat in vec3 corner0;
 layout(location = 1) flat in vec3 corner1;
 layout(location = 2) flat in vec3 corner2;
+#ifdef NOPERSPECTIVE
+layout(location = 4) noperspective in vec3 barycentric;
+#else
 layout(location = 3) in vec3 barycentric;
+#endif
 void main() { outputColor = weigh(barycentric, corner0, corner1, corner2); }
 #else
 layout(location = 0) in vec3 color;
