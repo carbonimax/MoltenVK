@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Cost of the portable PerVertexKHR path against an ordinary draw of the same geometry, on one GPU, without Metal
 // validation (the correctness of both arms is checked separately under validation by the runner).
-// Workload: a 64 x 64 grid of quads (8192 triangles) over a 256 x 256 RGBA8 target, one draw per command buffer, direct
-// (24576 vertices) or indexed (4225 vertices, 24576 uint32 indices). Arm "ordinary" interpolates a colour; arm
+// Workload: a 64 x 64 grid of quads (8192 triangles; 24576 vertices direct, 4225 indexed) or a 256 x 256 one (131072
+// triangles; 393216 vertices direct, 66049 indexed) over a 256 x 256 RGBA8 target, one draw per command buffer. Arm "ordinary" interpolates a colour; arm
 // "pervertex" weights the three PerVertexKHR values by BaryCoordKHR, which takes MoltenVK's capture and replay.
 // Each command buffer: an anchor fill, timestamp A, the render pass, a copy to a host buffer, timestamp B. On Apple GPUs
 // MoltenVK takes a Vulkan timestamp after the Metal encoder that is open when it is written (MVKCommandBuffer.mm,
@@ -22,7 +22,8 @@
 // and after completion; each arm reports its peak above the level measured before the phase, and the level left
 // after the PerVertexKHR submissions (memory MoltenVK keeps).
 // Every sample checks that its arm's image equals that arm's first image; the two arms must agree within 2/255.
-// Usage: pervertex-cost-bench <shader directory> direct|indexed <samples 1..500> ordinary-first|pervertex-first [--no-anchor]
+// Usage: pervertex-cost-bench <shader directory> direct|indexed 64|256 <samples 1..500> ordinary-first|pervertex-first
+//        [--no-anchor]
 #import <Metal/Metal.h>
 #include <vulkan/vulkan.h>
 #include "mvk_private_api.h"
@@ -58,7 +59,7 @@ static bool hasExtension(const std::vector<VkExtensionProperties>& extensions, c
 	return false;
 }
 
-constexpr uint32_t kSide = 256, kGrid = 64;
+constexpr uint32_t kSide = 256;
 struct Buffer { VkBuffer buffer = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NULL_HANDLE; uint8_t* data = nullptr; };
 
 // Median, first and third quartiles, 95th percentile.
@@ -71,11 +72,12 @@ static void summarize(const char* arm, const char* what, std::vector<double> val
 
 int main(int argc, char** argv) {
 	@autoreleasepool {
-	if (argc != 5 && argc != 6) { std::fprintf(stderr, "Usage: pervertex-cost-bench shader-dir direct|indexed samples ordinary-first|pervertex-first [--no-anchor]\n"); return 1; }
-	const std::string shaders = argv[1], form = argv[2], order = argv[4];
-	const unsigned long samples = std::strtoul(argv[3], nullptr, 10);
-	const bool anchor = argc == 5 || std::string(argv[5]) != "--no-anchor";
-	if ((form != "direct" && form != "indexed") || samples < 1 || samples > 500 || (order != "ordinary-first" && order != "pervertex-first") || (argc == 6 && anchor)) { std::fprintf(stderr, "Unknown case\n"); return 1; }
+	if (argc != 6 && argc != 7) { std::fprintf(stderr, "Usage: pervertex-cost-bench shader-dir direct|indexed 64|256 samples ordinary-first|pervertex-first [--no-anchor]\n"); return 1; }
+	const std::string shaders = argv[1], form = argv[2], gridName = argv[3], order = argv[5];
+	const unsigned long samples = std::strtoul(argv[4], nullptr, 10);
+	const bool anchor = argc == 6 || std::string(argv[6]) != "--no-anchor";
+	if ((form != "direct" && form != "indexed") || (gridName != "64" && gridName != "256") || samples < 1 || samples > 500 || (order != "ordinary-first" && order != "pervertex-first") || (argc == 7 && anchor)) { std::fprintf(stderr, "Unknown case\n"); return 1; }
+	const uint32_t kGrid = gridName == "256" ? 256 : 64;
 	const bool indexed = form == "indexed";
 
 	uint32_t count = 0;
@@ -139,7 +141,7 @@ int main(int argc, char** argv) {
 	if (!properties.limits.timestampComputeAndGraphics || !timestampBits) { std::fprintf(stderr, "No timestamps\n"); return 3; }
 	auto stats = reinterpret_cast<PFN_vkGetPerformanceStatisticsMVK>(dlsym(RTLD_DEFAULT, "vkGetPerformanceStatisticsMVK"));
 	if (!stats) { std::fprintf(stderr, "No vkGetPerformanceStatisticsMVK\n"); return 3; }
-	std::printf("DEVICE=%s form=%s samples=%lu order=%s anchor=%d timestamp_bits=%u period_ns=%.3f\n", properties.deviceName, form.c_str(), samples, order.c_str(), int(anchor), timestampBits, properties.limits.timestampPeriod);
+	std::printf("DEVICE=%s form=%s grid=%u samples=%lu order=%s anchor=%d timestamp_bits=%u period_ns=%.3f\n", properties.deviceName, form.c_str(), kGrid, samples, order.c_str(), int(anchor), timestampBits, properties.limits.timestampPeriod);
 
 	auto memoryType = [&](uint32_t bits, VkMemoryPropertyFlags flags) {
 		VkPhysicalDeviceMemoryProperties memory{};
@@ -258,7 +260,7 @@ int main(int argc, char** argv) {
 		check(vkCreateShaderModule(device, &info, nullptr, &result), "Create shader module");
 		return result;
 	};
-	VkShaderModule vertex = module(indexed ? "cost-indexed.vert.spv" : "cost.vert.spv");
+	VkShaderModule vertex = module(std::string(indexed ? "cost-indexed" : "cost") + (kGrid == 256 ? "-256" : "") + ".vert.spv");
 	auto graphicsPipeline = [&](VkShaderModule fragment) {
 		VkPipelineShaderStageCreateInfo stages[2]{{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
 		stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -426,7 +428,7 @@ int main(int argc, char** argv) {
 	}
 	std::printf("BENCH memory baseline_kib=%.1f retained_after_both_arms_kib=%.1f\n", double(baseline) / 1024, double(retained > baseline ? retained - baseline : 0) / 1024);
 	const bool pass = covered == kSide * kSide && differing == 0;
-	std::printf("PERVERTEX_COST %s form=%s order=%s anchor=%d\n", pass ? "PASS" : "FAIL", form.c_str(), order.c_str(), int(anchor));
+	std::printf("PERVERTEX_COST %s form=%s grid=%u order=%s anchor=%d\n", pass ? "PASS" : "FAIL", form.c_str(), kGrid, order.c_str(), int(anchor));
 	vkDeviceWaitIdle(device);
 	vkDestroyDevice(device, nullptr);
 	vkDestroyInstance(instance, nullptr);
