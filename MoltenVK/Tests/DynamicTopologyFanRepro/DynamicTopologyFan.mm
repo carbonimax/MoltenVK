@@ -7,7 +7,7 @@
 // that each change is applied. Classes: triangles (list, strip, fan: a pipeline created as a list draws a fan),
 // triangles-fan-first (fan, strip, list: a pipeline created as a fan draws a strip and a list), and lines (list, strip:
 // no fan, a control). Direct, indexed, indirect or indexed indirect draws.
-// Shaders: pervertex-indirect.vert and pervertex-dynamic-topology.frag, both compiled without definitions.
+// Shaders: dynamic-topology-fan.vert and dynamic-topology-fan.frag, compiled to vert.spv and frag.spv (see run.sh).
 // Usage: dynamic-topology-fan <shader directory> triangles|triangles-fan-first|lines direct|indexed|indirect|indexed-indirect
 #import <Metal/Metal.h>
 #include <vulkan/vulkan.h>
@@ -252,7 +252,7 @@ int main(int argc, char** argv) {
 		check(vkCreateShaderModule(device, &info, nullptr, &result), "Create shader module");
 		return result;
 	};
-	VkShaderModule vertex = module("indirect.vert.spv"), fragment = module("ordinary.frag.spv");
+	VkShaderModule vertex = module("vert.spv"), fragment = module("frag.spv");
 	auto graphicsPipeline = [&](VkPrimitiveTopology topology, bool dynamicTopology, VkPipeline& result) {
 		VkPipelineShaderStageCreateInfo stages[2]{{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
 		stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
