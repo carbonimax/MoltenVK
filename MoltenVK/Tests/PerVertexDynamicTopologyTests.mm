@@ -7,8 +7,12 @@
 // form sets VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY, valid within the triangle class but outside capture and
 // replay: recording must fail with VK_ERROR_FEATURE_NOT_PRESENT and nothing is submitted. The ordinary fragment has no
 // PerVertexKHR input, so the same draws test MoltenVK's ordinary path, which converts triangle fans to triangles.
+// The weights fragment (triangles only) outputs barycentric weights and index-weighted vertex values. Its static and
+// dynamic images must also equal an independent reference: the draws triangulated explicitly in the order of the Vulkan
+// barycentric order table and drawn without PerVertexKHR (pervertex-dynamic-reference.vert). The same reference with
+// every triangle's corners turned by one must differ, so that the check sees vertex order, not only coverage.
 // Usage: pervertex-dynamic-topology <shader directory> triangles|lines direct|indexed|indirect|indexed-indirect|adjacency
-//        [pervertex|ordinary]
+//        [pervertex|ordinary|weights]
 #import <Metal/Metal.h>
 #include <vulkan/vulkan.h>
 
@@ -45,11 +49,11 @@ struct Buffer { VkBuffer buffer = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NUL
 
 int main(int argc, char** argv) {
 	@autoreleasepool {
-	if (argc != 4 && argc != 5) { std::fprintf(stderr, "Usage: pervertex-dynamic-topology shader-dir triangles|lines direct|indexed|indirect|indexed-indirect|adjacency [pervertex|ordinary]\n"); return 2; }
+	if (argc != 4 && argc != 5) { std::fprintf(stderr, "Usage: pervertex-dynamic-topology shader-dir triangles|lines direct|indexed|indirect|indexed-indirect|adjacency [pervertex|ordinary|weights]\n"); return 2; }
 	const std::string shaders = argv[1], klass = argv[2], form = argv[3], fragmentKind = argc == 5 ? argv[4] : "pervertex";
 	const bool indexed = form == "indexed" || form == "indexed-indirect", indirect = form == "indirect" || form == "indexed-indirect";
-	const bool adjacency = form == "adjacency", ordinary = fragmentKind == "ordinary";
-	if ((klass != "triangles" && klass != "lines") || (form != "direct" && !indexed && !indirect && !adjacency) || (adjacency && (klass != "triangles" || ordinary)) || (!ordinary && fragmentKind != "pervertex")) { std::fprintf(stderr, "Unknown case\n"); return 2; }
+	const bool adjacency = form == "adjacency", ordinary = fragmentKind == "ordinary", weights = fragmentKind == "weights";
+	if ((klass != "triangles" && klass != "lines") || (form != "direct" && !indexed && !indirect && !adjacency) || (adjacency && (klass != "triangles" || fragmentKind != "pervertex")) || (weights && klass != "triangles") || (!ordinary && !weights && fragmentKind != "pervertex")) { std::fprintf(stderr, "Unknown case\n"); return 2; }
 	const std::vector<VkPrimitiveTopology> topologies = klass == "triangles"
 		? std::vector<VkPrimitiveTopology>{VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN}
 		: std::vector<VkPrimitiveTopology>{VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_STRIP};
@@ -248,6 +252,13 @@ int main(int argc, char** argv) {
 	layoutInfo.pSetLayouts = &setLayout;
 	VkPipelineLayout layout = VK_NULL_HANDLE;
 	check(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &layout), "Create pipeline layout");
+	struct ReferenceDraw { uint32_t topology, rotate; };
+	VkPushConstantRange referenceRange{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(ReferenceDraw)};
+	VkPipelineLayoutCreateInfo referenceLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+	referenceLayoutInfo.pushConstantRangeCount = 1;
+	referenceLayoutInfo.pPushConstantRanges = &referenceRange;
+	VkPipelineLayout referenceLayout = VK_NULL_HANDLE;
+	check(vkCreatePipelineLayout(device, &referenceLayoutInfo, nullptr, &referenceLayout), "Create reference pipeline layout");
 
 	auto module = [&](const std::string& name) {
 		auto code = readSpirv(shaders + "/" + name);
@@ -259,14 +270,14 @@ int main(int argc, char** argv) {
 		return result;
 	};
 	// The PORTABLE fragment also reads BaryCoordKHR, so every pipeline takes the portable capture and replay.
-	VkShaderModule vertex = module("indirect.vert.spv"), fragment = module(ordinary ? "ordinary.frag.spv" : "pervertex-portable.frag.spv");
-	auto graphicsPipeline = [&](VkPrimitiveTopology topology, bool dynamicTopology, VkPipeline& result) {
+	VkShaderModule vertex = module("indirect.vert.spv"), fragment = module(ordinary ? "ordinary.frag.spv" : weights ? "weights.frag.spv" : "pervertex-portable.frag.spv");
+	auto graphicsPipeline = [&](VkPrimitiveTopology topology, bool dynamicTopology, VkPipeline& result, VkShaderModule vertexModule, VkShaderModule fragmentModule, VkPipelineLayout pipelineLayout) {
 		VkPipelineShaderStageCreateInfo stages[2]{{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
 		stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-		stages[0].module = vertex;
+		stages[0].module = vertexModule;
 		stages[0].pName = "main";
 		stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-		stages[1].module = fragment;
+		stages[1].module = fragmentModule;
 		stages[1].pName = "main";
 		VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
 		VkPipelineInputAssemblyStateCreateInfo assembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
@@ -308,14 +319,16 @@ int main(int argc, char** argv) {
 		info.pMultisampleState = &multisample;
 		info.pColorBlendState = &blend;
 		info.pDynamicState = dynamicTopology ? &dynamic : nullptr;
-		info.layout = layout;
+		info.layout = pipelineLayout;
 		info.renderPass = renderPass;
 		return vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &result);
 	};
 	std::vector<VkPipeline> statics(topologies.size());
-	for (size_t i = 0; i < topologies.size(); ++i) check(graphicsPipeline(topologies[i], false, statics[i]), "Create static pipeline");
+	for (size_t i = 0; i < topologies.size(); ++i) check(graphicsPipeline(topologies[i], false, statics[i], vertex, fragment, layout), "Create static pipeline");
+	VkPipeline referencePipeline = VK_NULL_HANDLE;
+	if (weights) check(graphicsPipeline(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, referencePipeline, module("reference.vert.spv"), module("reference.frag.spv"), referenceLayout), "Create reference pipeline");
 	VkPipeline dynamicPipeline = VK_NULL_HANDLE;
-	VkResult dynamicCreated = graphicsPipeline(topologies[0], true, dynamicPipeline);
+	VkResult dynamicCreated = graphicsPipeline(topologies[0], true, dynamicPipeline, vertex, fragment, layout);
 	std::printf("dynamic topology pipeline: vkCreateGraphicsPipelines=%d\n", int(dynamicCreated));
 	if (dynamicCreated != VK_SUCCESS) { std::printf("PERVERTEX_DYNAMIC_TOPOLOGY FAIL %s %s %s: the dynamic topology pipeline is refused\n", klass.c_str(), form.c_str(), fragmentKind.c_str()); return 1; }
 
@@ -336,7 +349,7 @@ int main(int argc, char** argv) {
 
 	// Draw i: corners 4..9 of the VS, one instance at firstInstance 2 or 3 (left or right), so that the draws overlap
 	// in pairs. mode 0: one static pipeline per topology; 1: the dynamic pipeline, changing topology between draws;
-	// 2: the dynamic pipeline kept at the first topology.
+	// 2: the dynamic pipeline kept at the first topology; 3: the triangulated reference; 4: the reference turned by one.
 	struct Result { std::vector<uint8_t> rgba; uint32_t invocations = 0; };
 	auto render = [&](int mode) {
 		check(vkResetCommandBuffer(cb, 0), "Reset command buffer");
@@ -350,8 +363,16 @@ int main(int argc, char** argv) {
 		pass.clearValueCount = 1;
 		pass.pClearValues = &clear;
 		vkCmdBeginRenderPass(cb, &pass, VK_SUBPASS_CONTENTS_INLINE);
-		if (mode) vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, dynamicPipeline);
-		for (size_t i = 0; i < topologies.size(); ++i) {
+		if (mode >= 3) {
+			vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, referencePipeline);
+			for (uint32_t i = 0; i < uint32_t(topologies.size()); ++i) {
+				const ReferenceDraw draw{uint32_t(topologies[i]), uint32_t(mode == 4)};
+				vkCmdPushConstants(cb, referenceLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(draw), &draw);
+				// Six vertices: a list has two triangles, a strip or a fan four.
+				vkCmdDraw(cb, topologies[i] == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST ? 6 : 12, 1, 0, 2 + i % 2);
+			}
+		} else if (mode) vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, dynamicPipeline);
+		for (size_t i = 0; mode < 3 && i < topologies.size(); ++i) {
 			if (mode == 0) vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, statics[i]);
 			else vkCmdSetPrimitiveTopology(cb, adjacency && i == 1 ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY : mode == 1 ? topologies[i] : topologies[0]);
 			vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, nullptr);
@@ -393,10 +414,31 @@ int main(int argc, char** argv) {
 		return result;
 	};
 	Result staticResult = render(0), dynamicResult = render(1), unchanged = render(2);
-	uint32_t mismatches = 0, covered = 0;
-	for (size_t i = 0; i < staticResult.rgba.size(); i += 4) {
-		mismatches += memcmp(&staticResult.rgba[i], &dynamicResult.rgba[i], 4) != 0;
-		covered += staticResult.rgba[i + 3] != 0;
+	// Pixels that differ, and the largest channel difference with its position.
+	auto compare = [&](const Result& a, const Result& b, const char* what) {
+		uint32_t differing = 0, worst = 0, at = 0;
+		for (size_t i = 0; i < a.rgba.size(); i += 4) {
+			differing += memcmp(&a.rgba[i], &b.rgba[i], 4) != 0;
+			for (size_t c = 0; c < 4; ++c) {
+				uint32_t d = uint32_t(std::abs(int(a.rgba[i + c]) - int(b.rgba[i + c])));
+				if (d > worst) { worst = d; at = uint32_t(i / 4); }
+			}
+		}
+		if (what) std::printf("%s: pixel_mismatches=%u max_channel_difference=%u at (%u, %u)\n", what, differing, worst, at % kSide, at / kSide);
+		return differing;
+	};
+	uint32_t mismatches = compare(staticResult, dynamicResult, nullptr), covered = 0;
+	for (size_t i = 0; i < staticResult.rgba.size(); i += 4) covered += staticResult.rgba[i + 3] != 0;
+	bool referenceMatches = true;
+	if (weights) {
+		Result reference = render(3), turned = render(4);
+		uint32_t referenceCovered = 0;
+		for (size_t i = 0; i < reference.rgba.size(); i += 4) referenceCovered += reference.rgba[i + 3] != 0;
+		std::printf("reference: covered=%u\n", referenceCovered);
+		const uint32_t staticDiffers = compare(staticResult, reference, "static vs reference");
+		const uint32_t dynamicDiffers = compare(dynamicResult, reference, "dynamic vs reference");
+		const uint32_t turnedDiffers = compare(dynamicResult, turned, "dynamic vs reference turned by one (must differ)");
+		referenceMatches = referenceCovered == covered && staticDiffers == 0 && dynamicDiffers == 0 && turnedDiffers > 0;
 	}
 	const bool changed = dynamicResult.rgba != unchanged.rgba;
 	const uint32_t expected = uint32_t(topologies.size()) * 6;
@@ -405,7 +447,7 @@ int main(int argc, char** argv) {
 	// The ordinary path may shade a vertex more than once (a converted fan is indexed): it must only match static.
 	const bool invocationsMatch = ordinary ? staticResult.invocations >= expected && dynamicResult.invocations == staticResult.invocations
 	                                       : staticResult.invocations == expected && dynamicResult.invocations == expected;
-	const bool pass = covered > 0 && mismatches == 0 && changed && invocationsMatch;
+	const bool pass = covered > 0 && mismatches == 0 && changed && invocationsMatch && referenceMatches;
 	std::printf("PERVERTEX_DYNAMIC_TOPOLOGY %s %s %s %s\n", pass ? "PASS" : "FAIL", klass.c_str(), form.c_str(), fragmentKind.c_str());
 	vkDeviceWaitIdle(device);
 	vkDestroyDevice(device, nullptr);
