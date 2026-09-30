@@ -42,17 +42,22 @@ Base : upstream `a63d4863`. Branche finale locale `claude/k2-multiview-grouping`
 `getViewCountInMetalPass` et `MVKRenderSubpass::getViewMaskGroupForMetalPass`, avec des stubs pour le device et la
 passe, sous AddressSanitizer et UndefinedBehaviorSanitizer. Il compare nombre de passes, première vue, nombre de vues
 et masque de groupe à une référence, avec et sans rendu en couches : tous les masques sur 16 bits, des masques
-clairsemés et à bit haut sur 32 bits, 4 096 masques pseudo-aléatoires. Commande, depuis la racine du fork, sur un
-checkout MoltenVK quelconque :
+clairsemés et à bit haut sur 32 bits, 4 096 masques pseudo-aléatoires.
+
+Lanceur autonome `MoltenVK/Tests/MultiviewGroupingRepro/run.sh` et `README.md` en anglais (commit du fork `b1626370`),
+sur un checkout MoltenVK quelconque ; il lance le test complet puis les masques `0x5`, `0x80000000` et `0xffffffff`
+seuls :
 
 ```
-MVK_MULTIVIEW_DEVICE_SOURCE=<checkout>/MoltenVK/MoltenVK/GPUObjects/MVKDevice.mm \
-MVK_MULTIVIEW_RENDERPASS_SOURCE=<checkout>/MoltenVK/MoltenVK/GPUObjects/MVKRenderPass.mm \
-MoltenVK/Tests/run-pervertex-multiview-tests.sh <dossier de sortie>
+bash run.sh <checkout MoltenVK> <dossier de sortie>
 ```
 
-Avec un seul argument, ce runner ne fait que le test hôte, sans SPIR-V ni PerVertexKHR. Le binaire produit accepte un
-masque en argument (`multiview-grouping-tests 0x5`).
+Publié avec `MultiviewGroupingTests.cpp`, à la demande de l'utilisateur, en gist public :
+https://gist.github.com/carbonimax/20e5ff2c1083153ca0d63f6ac2f1083a (révision `6ad8a659`, trois fichiers identiques
+au dépôt, vérifié par clonage). Lancé depuis le dossier plat du gist, il est rouge sur `a63d4863` et vert sur
+`73b461c5`, avec un code extrait identique aux séries `final/` (`build/astra/upstream-k2-a63d4863/repro/`,
+`EVIDENCE-K2-REPRO.sha256`, 20 fichiers). Le premier lanceur, `run-pervertex-multiview-tests.sh`, reste dans le fork
+pour les preuves déjà enregistrées.
 
 ## 4. Résultats
 
@@ -115,7 +120,7 @@ source et sur la relance du test.
 > `mvkGetNextViewMaskGroup` shifted a signed `1` by the running end position. With view 31 enabled the loop reached a
 > shift by 32, which is undefined behavior. The shifts are now unsigned and the loop stops once the mask is empty.
 >
-> Testing: a host test (link to add at publication) compiles these functions as extracted from the source, with stubs for the device and render
+> Testing: a host test (https://gist.github.com/carbonimax/20e5ff2c1083153ca0d63f6ac2f1083a) compiles these functions as extracted from the source, with stubs for the device and render
 > pass, under AddressSanitizer and UndefinedBehaviorSanitizer. It checks the pass count, first view, view count and
 > group mask of every pass against a reference, with and without layered rendering, for every 16-bit mask, sparse and
 > high-bit 32-bit masks, and 4096 pseudo-random masks (901,970 checks). Before this change, mask `0x5` gives the wrong
