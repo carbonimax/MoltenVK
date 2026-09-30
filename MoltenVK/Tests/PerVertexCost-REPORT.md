@@ -11,9 +11,10 @@ Premier passage du chantier de mesure demandé par Astra. Aucune optimisation, a
 - SPIRV-Cross : `6af5a67f`.
 - **Bibliothèque de test en Release**, admission et adaptateur actifs : `build/astra/lib-53a5a54c-release/` (`b58c19ad…`). Construite avec `MVK_TEST_BUILD_TYPE=Release`, option de test ajoutée par `53a5a54c`. Les bibliothèques de test précédentes étaient en Debug.
 
-**Harnais.**
-- `PerVertexCostBench.mm` et `run-pervertex-cost-bench.sh` (`c9744291`, `b587007f`, `7cf15dcb`), test seul.
-- Le harnais antérieur de `codex/pervertex-performance` n'est pas repris (section 7).
+**Harnais : un nouveau banc, par décision.** Astra demandait le harnais déjà disponible. J'ai écrit un nouveau banc à HEAD, `PerVertexCostBench.mm` et `run-pervertex-cost-bench.sh` (`c9744291`, `b587007f`, `7cf15dcb`, test seul), pour trois raisons :
+- le harnais de `codex/pervertex-performance` est à 239 commits de la branche, et son report entre en conflit (section 7) ;
+- `MVK_PERVERTEX_INDIRECT_RECORD_CAPACITY`, qu'il utilisait, a disparu ;
+- il ne mesurait pas le coût brut face à un dessin ordinaire : il comparait le TES ordinaire au TES PerVertexKHR, et le PerVertexKHR direct au PerVertexKHR indirect.
 
 **Charge.**
 - Une grille de quads sans vertex buffer sur une cible `RGBA8` de 256 × 256, un dessin par command buffer.
@@ -60,7 +61,7 @@ Sur un GPU Apple, MoltenVK ne peut pas échantillonner un compteur à la fronti�
 | 256 | directe | 42,7 / 37,4 / 31,2 µs | 1 206 / 1 253 / 1 099 µs | +1 068 à +1 216 µs |
 | 256 | indexée | 31,8 / 51,5 / 35,2 µs | 1 120 / 1 294 / 1 171 µs | +1 088 à +1 242 µs |
 
-Le surcoût CPU croît avec le nombre de primitives : environ 9 ns par primitive. Pour les dessins directs, cela correspond aux tables de rejeu remplies sur le CPU par `mvkPopulatePerVertexReplay`. Cette attribution est déduite du code ; elle n'a pas été profilée.
+Le surcoût CPU croît avec le nombre de primitives : environ 9 ns par primitive, en forme directe comme indexée. Pour ces dessins non indirects, MoltenVK remplit les tables de rejeu sur le CPU. `mvkPopulatePerVertexReplay` a un seul site d'appel, `MVKCmdDraw.mm:342`, placé après les deux branches de capture. Cette attribution est déduite du code ; elle n'a pas été profilée.
 
 **Mémoire**, pic au-dessus du niveau d'avant la phase :
 
@@ -71,9 +72,9 @@ Le surcoût CPU croît avec le nombre de primitives : environ 9 ns par primitive
 
 - L'écart mesuré égale **exactement** le scratch calculé par les formules de `MVKPerVertexScratch.h`, avec 32 octets par enregistrement capturé (position et couleur).
 - En forme indexée, la capture compte un enregistrement par indice, d'où la même taille.
-- Après les deux bras, le niveau revient à celui de l'ordinaire (720 KiB) : **le scratch n'est pas conservé** après la fin du dessin.
+- **Le scratch est libéré après le dessin, sauf dans une exécution.** Après les deux bras, le niveau restant au-dessus du niveau initial est de 720 KiB dans 11 exécutions sur 16 (grille 64), et de 912 à 1 104 KiB dans 4 autres. Une seule exécution (`cost-bench-7cf15dcb/calibration-direct-64`) garde le pic PerVertexKHR, 1 872 KiB. En grille 256, il reste de 720 KiB à 6,7 MiB, loin des 19 152 KiB du pic (8 exécutions sur 8).
 
-**Occupation GPU par encodeur**, mesurée par une trace Metal System Trace (`xctrace`) sur 10 paires, grille 256. Le temps d'occupation vertex est stable (écart interquartile de 1 à 2 µs) :
+**Occupation GPU par encodeur**, mesurée par une trace Metal System Trace (`xctrace`) sur 10 paires, grille 256. Le temps d'occupation vertex est stable, avec un écart interquartile de 1 à 30 µs selon l'encodeur ; par exemple 136,7 à 137,7 µs pour la capture directe, et 197,6 à 198,5 µs pour son rejeu :
 
 | Forme | Encodeur | Ordinaire | PerVertexKHR |
 | --- | --- | --- | --- |
