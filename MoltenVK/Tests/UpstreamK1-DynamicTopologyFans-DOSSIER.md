@@ -88,6 +88,10 @@ le seul avertissement déjà présent sur la base (`MVKConfigMembers.def:56`). C
 ## 7. Preuves (`build/astra/upstream-k1-a63d4863/`)
 
 - `EVIDENCE-K1.sha256` (39 fichiers) : oracle rouge et vert du 30 septembre, sur `430d544f`.
+  Les `INPUTS.sha256` de `oracle-before/` et `oracle-after/` nomment l'arbre du fork à `0ddd63d3` :
+  `DynamicTopologyFanTests.mm` y est devenu `DynamicTopologyFanRepro/DynamicTopologyFan.mm` (identique aux deux lignes de
+  noms de shaders près) et `run-dynamic-topology-fan-tests.sh` a été retiré par `5ea50d10`. Un `shasum -c` lancé dans
+  ces dossiers signale donc ces deux chemins comme absents ; les fichiers restent dans l'historique à `0ddd63d3`.
 - `final/EVIDENCE-K1-FINAL.sha256` (40 fichiers, sha256 `d9c78b56…`) : `build-upstream.sh` (lancé depuis le
   checkout, argument CMake supplémentaire), `mvk-rev-string.txt`, `k1-final-patches/`, `k1-evidence-to-final.diff`,
   `spirv-identity.txt`, provenance et journal de `lib-base`, `lib-final` et `lib-final-private-api`, reproducteur rouge
@@ -111,7 +115,7 @@ le seul avertissement déjà présent sur la base (`MVKConfigMembers.def:56`). C
 > list, and the four draw paths read the effective topology from the encoder state. The pipeline accessor they used
 > has no caller left and is removed.
 >
-> Testing: a standalone reproducer (attached) draws each topology of a class through one dynamic pipeline and compares
+> Testing: a standalone reproducer (link to add at publication) draws each topology of a class through one dynamic pipeline and compares
 > the image and the vertex shader invocation count with one static pipeline per topology, in direct, indexed,
 > indirect and indexed indirect forms, under Metal API and GPU validation. Before this change, the 8 triangle cases
 > fail and the 4 line cases pass; after it, all 12 pass. Tested on Apple M4 Pro, macOS 27.2, with MoltenVK built with
