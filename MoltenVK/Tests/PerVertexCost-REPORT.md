@@ -168,7 +168,7 @@ Chaque dossier de `build/astra/` a son `EVIDENCE.sha256`, et tous les essais tou
 
 ## 11. Séries dans la fenêtre calme choisie par l'utilisateur (`build/astra/cost-bench-c2aeaab9/`)
 
-**Charge.** L'utilisateur avait quitté les simulateurs, CBDash, Discord et Keypad, et suspendu Time Machine. La contention restait sensible :
+**Charge.** L'utilisateur avait quitté les simulateurs, CBDash, Discord et Keypad, et suspendu Time Machine. D'autres processus restaient actifs :
 - `mediaanalysisd`, service système d'analyse des photos, à 93–102 % d'un cœur ;
 - un processus `/usr/bin/log`, que je n'ai pas lancé, à 99 % ;
 - WindowServer à 41–45 %.
@@ -185,7 +185,7 @@ Chaque dossier de `build/astra/` a son `EVIDENCE.sha256`, et tous les essais tou
 - **Encodage CPU : reproductible.** Environ +100 µs sur la grille 64 et environ +1 045 µs sur la grille 256, avec des quartiles serrés dans toutes les séries.
 - **L'estimation d'environ 9 ns par primitive** reste une estimation sur deux tailles.
 - **GPU, grille 64 : cohérent** d'une série à l'autre.
-- **GPU, grille 256 : bimodal**, environ +250 µs ou environ +480 µs selon la série. Il n'est pas qualifié.
+- **GPU, grille 256 : deux régimes entre séries**, environ +250 µs ou environ +480 µs selon la série. La distribution n'a pas été analysée. Il n'est pas qualifié.
 
 ## 12. Indirect et indirect indexé (`build/astra/cost-bench-indirect-73b71fd8/`)
 
@@ -250,7 +250,7 @@ Astra a validé la clôture le 30 septembre 2026, sans nouvelle campagne. Les co
 - **Coût CPU d'encodage, formes directe et indexée : reproductible** dans les séries appariées (section 11). Environ +100 µs sur la grille 64, environ +1 045 µs sur la grille 256.
 - **Encodeurs.** Les traces distinguent, dans les chemins direct, indexé, indirect et TES, les encodeurs de capture, de plan et de rejeu. Ce sont des mesures exploratoires, sur une exécution chacune.
 
-**Coût GPU : non qualifié.** La contention a persisté dans la fenêtre choisie (`mediaanalysisd`, `/usr/bin/log`), et la grille 256 reste bimodale. Les répétitions s'arrêtent ici.
+**Coût GPU : non qualifié.** Des processus actifs sont restés présents dans la fenêtre choisie (`mediaanalysisd`, `/usr/bin/log`), et la grille 256 montre deux régimes entre séries. Les relevés de charge CPU ne prouvent pas la cause de cette variabilité. Les répétitions s'arrêtent ici.
 
 **Réserves à conserver.**
 1. **CPU indirect.** Le coût CPU n'est reproductible qu'en direct et en indexé. En indirect, `encode` inclut l'attente CPU du plan GPU : ce n'est pas un coût d'encodage.
