@@ -13,7 +13,9 @@
 //   buffer-write    an atomic increment of a device buffer, without reading gl_SampleID or the sample position;
 //   oracle          what the Vulkan samples oracle does: colour and sample position written at [pixel, sample_id].
 // Exit 0: the image matches the per-sample model within 1 everywhere; 4: it does not; 1 or 2: setup error.
-// Usage: sample-shading-strip <variant> strip|list <output directory>
+// Topologies: strip (4 vertices); list (the two triangles as 6 vertices); indexed (the strip's 4 vertices drawn as an
+// indexed triangle list, 0 1 2 1 2 3, so that the triangles share vertices without being a strip).
+// Usage: sample-shading-strip <variant> strip|list|indexed <output directory>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
@@ -116,11 +118,11 @@ struct Vertex { float position[4], color[4]; };
 
 int main(int argc, char** argv) {
 	@autoreleasepool {
-	if (argc != 4) { std::fprintf(stderr, "Usage: sample-shading-strip moltenvk|no-sample-id|sample-id-read|buffer-write|oracle strip|list output-dir\n"); return 1; }
+	if (argc != 4) { std::fprintf(stderr, "Usage: sample-shading-strip moltenvk|no-sample-id|sample-id-read|buffer-write|oracle strip|list|indexed output-dir\n"); return 1; }
 	const std::string variant = argv[1], topology = argv[2], output = argv[3];
 	const std::string fragment = fragmentSource(variant);
-	if (fragment.empty() || (topology != "strip" && topology != "list")) { std::fprintf(stderr, "Unknown case\n"); return 1; }
-	const bool strip = topology == "strip";
+	if (fragment.empty() || (topology != "strip" && topology != "list" && topology != "indexed")) { std::fprintf(stderr, "Unknown case\n"); return 1; }
+	const bool strip = topology == "strip" || topology == "indexed", indexed = topology == "indexed";
 	id<MTLDevice> device = MTLCreateSystemDefaultDevice();
 	std::printf("DEVICE=%s variant=%s topology=%s\n", device.name.UTF8String, variant.c_str(), topology.c_str());
 
@@ -191,7 +193,10 @@ int main(int argc, char** argv) {
 	[encoder setVertexBuffer:vertexBuffer offset:0 atIndex:30];
 	[encoder setFragmentBuffer:zeroBuffer offset:0 atIndex:0];
 	[encoder setFragmentBuffer:sideBuffer offset:0 atIndex:1];
-	[encoder drawPrimitives:strip ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:vertices.size()];
+	const uint16_t indices[6] = {0, 1, 2, 1, 2, 3};
+	id<MTLBuffer> indexBuffer = [device newBufferWithBytes:indices length:sizeof(indices) options:MTLResourceStorageModeShared];
+	if (indexed) [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:6 indexType:MTLIndexTypeUInt16 indexBuffer:indexBuffer indexBufferOffset:0];
+	else [encoder drawPrimitives:strip ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:vertices.size()];
 	[encoder endEncoding];
 	id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
 	[blit copyFromTexture:resolve sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(kSide, kSide, 1)
