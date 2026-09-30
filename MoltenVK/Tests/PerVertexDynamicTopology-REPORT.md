@@ -452,7 +452,7 @@ Le patch est exporté dans `patch/0001-MSL-Offset-interpolateAtOffset-by-1-2-ins
 | Candidat (`6e51dee7`) | mises à jour | 3 sur 3 conformes |
 | Base | mises à jour | 3 sur 3 non conformes : les tests voient le changement |
 
-Le MSL émis est identique à celui de la bibliothèque A/B de la section 15 : même chaîne `+ 0.5`. Les résultats CTS de la section 15 valent donc pour ce candidat.
+La bibliothèque A/B de la section 15 venait du commit `5114c453` du même clone : même changement de code, sans le commentaire ni les références. J'ai reconstruit une bibliothèque à partir du candidat `6e51dee7` (`build/astra/lib-d99c34fb-candidate-6e51dee7/`, `5d7dda4c…`). Les 8 exécutions `msaa-weights` y donnent les mêmes verdicts et des images identiques au bit près (32 images sur 32) à celles de l'A/B (`build/astra/msaa-weights-candidate-d99c34fb/`). Les résultats CTS de la section 15 n'ont pas été relancés avec ce binaire ; le MSL émis est la même chaîne `+ 0.5`.
 
 **Non fait.**
 - La suite complète de `test_shaders.py` n'a pas été lancée : les versions Homebrew de glslang et SPIRV-Tools diffèrent de celles que SPIRV-Cross fixe.
@@ -464,7 +464,7 @@ Le MSL émis est identique à celui de la bibliothèque A/B de la section 15 : m
 ## 21. Défaut 2 : reproduction en Metal seul
 
 **Le programme** (`MoltenVK/Tests/MetalRepro/SampleShadingStrip.mm`, runner `run-sample-shading-strip.sh`, sans MoltenVK) :
-- **Shaders.** Le MSL exact que MoltenVK génère pour la référence : VS, et FS avec entrée `sample_perspective` et paramètre `[[sample_id]]` inutilisé.
+- **Shaders.** Le MSL exact que MoltenVK génère pour le fragment de référence du cas `sample-strip` de `PerVertexMSAAWeightsTests.mm`, qui reprend `dEQP-VK.fragment_shading_barycentric.weights.*.msaa_sample_qualifier.triangle_strip` : VS, et FS avec entrée `sample_perspective` et paramètre `[[sample_id]]` inutilisé.
 - **Options de compilation.** Celles que MoltenVK emploie pour ces shaders : `MathMode Fast`, `MathFloatingPointFunctions Fast`, `PreserveInvariance` désactivé. Elles ont été relevées par `MVK_CONFIG_DEBUG=1` à `c11f73c6`, avec le binaire de `msaa-weights-22bf878a` (`metal-repro-92d41760/moltenvk-compile-options/`).
 - **États.** 128 × 128, `RGBA8Unorm`, `rasterSampleCount = 4`, résolution MSAA à la fin de la passe, géométrie CTS avec w = 16.
 - **Comparaison.** Le programme compare l'image résolue à deux modèles calculés sur le CPU en double, aux emplacements standard 4× : interpolation à chaque échantillon, et interpolation au centre du pixel.
@@ -493,7 +493,7 @@ Le MSL émis est identique à celui de la bibliothèque A/B de la section 15 : m
 | Écritures de l'oracle | par échantillon | par échantillon | par échantillon |
 
 **Ce que cela établit.**
-1. **Le défaut est dans Metal.** Pour la bande, l'image Metal seul est identique au bit près à la référence MoltenVK, en `plain` comme en validé. L'éventail indexé donne la même image que la bande.
+1. **Le défaut est dans Metal.** Pour la bande, l'image Metal seul est identique au bit près à la référence MoltenVK, en `plain` comme en validé. L'éventail indexé donne une image identique à celle de la bande, donc le même accord avec les modèles (le modèle du centre du pixel l'explique sur 16 384 pixels sur 16 384).
 2. **Ce qui rétablit l'exécution par échantillon :** une écriture en mémoire, même sans lecture de `sample_id` ni de la position. Une lecture de `sample_id`, même non repliable, ne suffit pas.
 3. **Le déclencheur** n'est ni la primitive bande seule, ni le partage de sommets. La bande et l'éventail indexé divergent ; la liste et la liste indexée dans l'ordre de la bande restent justes. Je ne l'ai pas isolé davantage.
 4. Hors de l'arête commune, les deux modèles restent indiscernables à ±1.
