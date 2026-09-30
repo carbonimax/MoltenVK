@@ -577,3 +577,10 @@ Le brouillon `MoltenVK/Tests/MetalRepro/README.md` est prêt. **Il reste à envo
 - **Sommet provoquant « dernier ».** Explicitement non qualifié.
 - **Gelés.** TES et soumission restent gelés.
 - **Matériel.** M1, M3 et Intel restent pour la fin.
+
+## 27. Clôture (30 septembre 2026)
+
+Astra valide la clôture de l'investigation MSAA ; les deux défauts restent ouverts.
+- **Défaut 1** : le candidat SPIRV-Cross reste gelé jusqu'aux essais Intel.
+- **Défaut 2** : le signalement a été envoyé à Apple par l'utilisateur, sous la référence **FB25000318**.
+- **Couverture ordinaire d'offset** réellement exécutée : 61 cas sur 493.

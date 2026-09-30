@@ -1,6 +1,6 @@
 # Sample-qualified interpolation diverges on some two-triangle draws unless the fragment has a side effect
 
-Draft report for Apple (Feedback Assistant), prepared on 2026-09-30. Not submitted.
+Report for Apple (Feedback Assistant), prepared on 2026-09-30 and submitted by the user as **FB25000318**.
 
 ## Summary
 
