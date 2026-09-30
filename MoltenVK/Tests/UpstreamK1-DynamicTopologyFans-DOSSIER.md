@@ -1,8 +1,11 @@
 # K1 : conversion des fans avec topologie dynamique, dossier de proposition upstream (30 septembre 2026)
 
-Dossier finalisé après la validation d'Astra (K1/K2 preuves autonomes suffisantes pour la tranche 1). Aucune
-publication : push et PR restent une décision de l'utilisateur. K2 a son propre dossier
-(`UpstreamK2-MultiviewGrouping-DOSSIER.md`).
+Dossier finalisé après la validation d'Astra (K1/K2 preuves autonomes suffisantes pour la tranche 1). K2 a son propre
+dossier (`UpstreamK2-MultiviewGrouping-DOSSIER.md`).
+
+**PR : [KhronosGroup/MoltenVK#2851](https://github.com/KhronosGroup/MoltenVK/pull/2851)**, ouverte le 30 septembre
+2026 avec l'autorisation de l'utilisateur, depuis `carbonimax:fix-dynamic-topology-fans` (commit `aa9133c5`, sans
+rebase ; la branche fusionnait sans conflit sur `main` à `52aa21f5`). K2 est la PR #2852.
 
 ## 1. Défaut
 
@@ -73,13 +76,13 @@ activée n'est que compilée.
 
 | Exigence | État |
 |---|---|
-| CLA (cla-assistant) à la première PR | Action de l'utilisateur, non faite. |
+| CLA (cla-assistant) | Réussi sur #2851 (contrôle `license/cla`). |
 | En-tête de licence des nouveaux fichiers | Sans objet : la branche ne crée aucun fichier. Le reproducteur reste dans le fork, sous l'en-tête du fork. |
 | Pas de validation Vulkan superflue | Respecté : aucune validation ni erreur ajoutée. |
 | Gestion mémoire Objective-C | Sans objet : aucun objet Objective-C créé. |
 | Style de code | Tabulations et style des fichiers touchés ; `git diff --check` propre. |
 | `Docs/Whats_New.md` | Ligne ajoutée sous MoltenVK 1.4.3, comme le font les contributeurs récents. Elle entrera en conflit trivial avec celle de K2 si les deux deviennent des PR. |
-| CI (`.github/workflows/CI.yml`) | Non exécutée localement : matrice Xcode macOS/iOS (`make` après `fetchDependencies`) et CMake. Seul l'équivalent CMake macOS arm64 Debug, privé désactivé et activé, a tourné ici. Les dépendances Xcode du fork sont construites à un autre pin de SPIRV-Cross et ne peuvent pas servir de preuve. |
+| CI (`.github/workflows/CI.yml`) | CI de la PR : 7 builds réussis (Xcode all, macos, ios, macos-privateapi, Xcode 15.0.1 macos, CMake Debug et Release), `Release` (publication des artefacts) ignoré. Elle construit le commit de fusion avec `main` (`52aa21f5`, nouveau pin SPIRV-Cross) : preuve de compilation, sans nouvelle preuve GPU. Avant la PR, non exécutée localement : matrice Xcode macOS/iOS (`make` après `fetchDependencies`) et CMake. Seul l'équivalent CMake macOS arm64 Debug, privé désactivé et activé, a tourné ici. Les dépendances Xcode du fork sont construites à un autre pin de SPIRV-Cross et ne peuvent pas servir de preuve. |
 
 ## 6. Limites
 

@@ -1,8 +1,12 @@
 # K2 : regroupement des passes multiview, dossier de proposition upstream (30 septembre 2026)
 
-Dossier finalisé après la validation d'Astra (K1/K2 preuves autonomes suffisantes pour la tranche 1). Aucune
-publication : push et PR restent une décision de l'utilisateur. K1 a son propre dossier
-(`UpstreamK1-DynamicTopologyFans-DOSSIER.md`).
+Dossier finalisé après la validation d'Astra (K1/K2 preuves autonomes suffisantes pour la tranche 1). K1 a son propre
+dossier (`UpstreamK1-DynamicTopologyFans-DOSSIER.md`).
+
+**PR : [KhronosGroup/MoltenVK#2852](https://github.com/KhronosGroup/MoltenVK/pull/2852)**, ouverte le 30 septembre
+2026 avec l'autorisation de l'utilisateur, après K1 (#2851), depuis `carbonimax:fix-multiview-pass-grouping` (commit
+`73b461c5`, sans rebase ; la branche fusionnait sans conflit sur `main` à `52aa21f5`). Si #2851 est fusionnée d'abord,
+la ligne `Docs/Whats_New.md` de K2 entrera en conflit trivial : garder les deux lignes.
 
 **Aucune preuve GPU multiview n'accompagne ce correctif.** La preuve est un test hôte sur le code extrait ; Astra l'a
 jugée suffisante pour proposer ces corrections algorithmiques.
@@ -80,13 +84,13 @@ source et sur la relance du test.
 
 | Exigence | État |
 |---|---|
-| CLA (cla-assistant) à la première PR | Action de l'utilisateur, non faite. |
+| CLA (cla-assistant) | Réussi sur #2852 (contrôle `license/cla`). |
 | En-tête de licence des nouveaux fichiers | Sans objet : la branche ne crée aucun fichier. Le test hôte reste dans le fork. |
 | Pas de validation Vulkan superflue | Respecté : aucune validation ajoutée. |
 | Gestion mémoire Objective-C | Sans objet. |
 | Style de code | Tabulations et style des fichiers touchés ; `git diff --check` propre. |
 | `Docs/Whats_New.md` | Ligne ajoutée sous MoltenVK 1.4.3 ; conflit trivial avec celle de K1 si les deux deviennent des PR. |
-| CI | Non exécutée localement (matrice Xcode macOS/iOS et CMake) ; seul l'équivalent CMake macOS arm64 Debug, privé désactivé et activé, a tourné. |
+| CI | CI de la PR : 7 builds réussis (Xcode all, macos, ios, macos-privateapi, Xcode 15.0.1 macos, CMake Debug et Release), `Release` (publication des artefacts) ignoré. Elle construit le commit de fusion avec `main` (`52aa21f5`, nouveau pin SPIRV-Cross) : preuve de compilation, sans nouvelle preuve GPU. Avant la PR, non exécutée localement (matrice Xcode macOS/iOS et CMake) ; seul l'équivalent CMake macOS arm64 Debug, privé désactivé et activé, a tourné. |
 
 ## 6. Limites
 
