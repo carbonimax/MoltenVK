@@ -1342,24 +1342,16 @@ MVKGraphicsPipeline::MVKGraphicsPipeline(MVKDevice* device,
 	_isMeshPipeline = pMeshSS != nullptr;
 	_isMeshShaderEmulated = false;
 	// The historical compute/replay backend is an ordinary NGG prerequisite, outside the c3 mesh scope.
-	// PerVertexKHR and barycentric mesh inputs retain c3's guarded backend.
+	// PerVertexKHR mesh inputs retain c3's guarded backend. Barycentric fragments take the restored backend: its Metal
+	// mesh pipeline gives them [[barycentric_coord]] natively.
 	if (_isMeshPipeline && !pTaskSS && pFragmentSS && _fragmentModule && _meshModule) {
 		bool perVertex = false;
 		if (!getFragmentShaderUsesPerVertexInput(_fragmentModule->getSPIRV(), pFragmentSS->pName, perVertex, reflectErrorLog)) {
 			setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to reflect mesh fragment inputs: %s", reflectErrorLog.c_str()));
 			return;
 		}
-		try {
-			SPIRV_CROSS_NAMESPACE::Compiler fragment(_fragmentModule->getSPIRV());
-			fragment.set_entry_point(pFragmentSS->pName, spv::ExecutionModelFragment);
-			fragment.update_active_builtins();
-			bool barycentric = fragment.has_active_builtin(spv::BuiltInBaryCoordKHR, spv::StorageClassInput) || fragment.has_active_builtin(spv::BuiltInBaryCoordNoPerspKHR, spv::StorageClassInput);
-			_usesRestoredMeshPipeline = !perVertex && !barycentric && getEnabledMeshShaderFeatures().meshShader && getMetalFeatures().meshShader;
-			_isMeshShaderEmulated = _usesRestoredMeshPipeline;
-		} catch (const CompilerError& error) {
-			setConfigurationResult(reportError(VK_ERROR_INITIALIZATION_FAILED, "Failed to reflect mesh fragment builtins: %s", error.what()));
-			return;
-		}
+		_usesRestoredMeshPipeline = !perVertex && getEnabledMeshShaderFeatures().meshShader && getMetalFeatures().meshShader;
+		_isMeshShaderEmulated = _usesRestoredMeshPipeline;
 	}
 
 
