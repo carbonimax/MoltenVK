@@ -2557,6 +2557,22 @@ void MVKPhysicalDevice::initMetalFeatures() {
 	_metalFeatures.dynamicVertexStride = mvkOSVersionIsAtLeast(14.0, 17.0, 1.0) && (supportsMTLGPUFamily(Apple4) || supportsMTLGPUFamily(Mac2));
 	_metalFeatures.nativeTextureAtomics = mvkOSVersionIsAtLeast(14.0, 17.0, 1.0) && (supportsMTLGPUFamily(Metal3) || supportsMTLGPUFamily(Apple6) || supportsMTLGPUFamily(Mac2));
 
+	_metalFeatures.meshShader = mvkOSVersionIsAtLeast(13.0, 16.0, 1.0) &&
+							   (supportsMTLGPUFamily(Metal4) || supportsMTLGPUFamily(Metal3) ||
+								supportsMTLGPUFamily(Apple7) || supportsMTLGPUFamily(Mac2)) &&
+							   !shouldEmulateReversedDepthViewport();
+	if (_metalFeatures.meshShader) {
+		_metalFeatures.maxObjectThreadgroups = _gpuCapabilities.isAppleGPU ? std::numeric_limits<uint32_t>::max() : 1024;
+		_metalFeatures.maxObjectThreadsPerGroup = 1024;
+		_metalFeatures.maxObjectPayloadSize = 16384;
+		_metalFeatures.maxObjectSharedMemorySize = 32768;
+		_metalFeatures.maxMeshThreadgroups = supportsMTLGPUFamily(Apple10) ? 4194303 :
+											supportsMTLGPUFamily(Apple9) ? 1048575 : 1024;
+		_metalFeatures.maxMeshThreadsPerGroup = 1024;
+		_metalFeatures.maxMeshOutputSize = 32768;
+		_metalFeatures.maxMeshSharedMemorySize = 32768;
+	}
+
 	_metalFeatures.renderLinearTextures = _gpuCapabilities.supportsRenderLinearTextures;
 	_metalFeatures.nativeTextureSwizzle = false;
 

@@ -37,6 +37,8 @@ struct MVKShaderImplicitRezBinding;
 enum class MVKMetalGraphicsStage {
 	Vertex,
 	Fragment,
+	Object,
+	Mesh,
 	Count
 };
 
@@ -72,6 +74,8 @@ struct MVKResourceBinder {
 	enum class Stage {
 		Vertex   = static_cast<uint32_t>(MVKMetalGraphicsStage::Vertex),
 		Fragment = static_cast<uint32_t>(MVKMetalGraphicsStage::Fragment),
+		Object   = static_cast<uint32_t>(MVKMetalGraphicsStage::Object),
+		Mesh     = static_cast<uint32_t>(MVKMetalGraphicsStage::Mesh),
 		Compute  = static_cast<uint32_t>(MVKMetalGraphicsStage::Count),
 		Count
 	};
@@ -137,12 +141,13 @@ struct MVKImplicitBufferData {
 };
 
 enum class MVKResourceUsageStages : uint8_t {
-	Vertex   = static_cast<uint32_t>(MVKMetalGraphicsStage::Vertex),
-	Fragment = static_cast<uint32_t>(MVKMetalGraphicsStage::Fragment),
-	All      = static_cast<uint32_t>(MVKMetalGraphicsStage::Count),
-	Count,
-	Compute  = 0, // Aliases with Render stages
-	None     = Count, // Should not be passed to MVKUseResourceHelper
+	Compute  = 0,
+	Vertex   = 1 << static_cast<uint32_t>(MVKMetalGraphicsStage::Vertex),
+	Fragment = 1 << static_cast<uint32_t>(MVKMetalGraphicsStage::Fragment),
+	Object   = 1 << static_cast<uint32_t>(MVKMetalGraphicsStage::Object),
+	Mesh     = 1 << static_cast<uint32_t>(MVKMetalGraphicsStage::Mesh),
+	Count    = 1 << static_cast<uint32_t>(MVKMetalGraphicsStage::Count),
+	None     = Count,
 };
 
 struct MVKUseResourceHelper {
@@ -194,7 +199,7 @@ struct MVKVulkanGraphicsCommandEncoderState: public MVKVulkanCommonEncoderState 
 	VkViewport _viewports[kMVKMaxViewportScissorCount];
 	VkRect2D _scissors[kMVKMaxViewportScissorCount];
 	MTLSamplePosition _sampleLocations[kMVKMaxSampleCount];
-	MVKImplicitBufferData _implicitBufferData[kMVKShaderStageFragment + 1];
+	MVKImplicitBufferData _implicitBufferData[kMVKShaderStageInternalCount];
 
 	/** Choose between the dynamic and pipeline render states based on whether the given state flag is marked dynamic on the pipeline. */
 	const MVKRenderStateData& pickRenderState(MVKRenderStateFlag state) const {
@@ -380,6 +385,7 @@ struct MVKMetalGraphicsCommandEncoderState : public MVKMetalGraphicsCommandEncod
 	void bindVertexBytes(id<MTLRenderCommandEncoder> encoder, const void* data, size_t size, NSUInteger index);
 	void bindVertexTexture(id<MTLRenderCommandEncoder> encoder, id<MTLTexture> texture, NSUInteger index);
 	void bindVertexSampler(id<MTLRenderCommandEncoder> encoder, id<MTLSamplerState> sampler, NSUInteger index);
+	void bindTemporaryPipeline(id<MTLRenderCommandEncoder> encoder, id<MTLRenderPipelineState> pipeline);
 	template <typename T> void bindFragmentStructBytes(id<MTLComputeCommandEncoder> encoder, const T& t, NSUInteger index) { bindFragmentBytes(encoder, &t, sizeof(T), index); }
 	template <typename T> void bindVertexStructBytes(id<MTLComputeCommandEncoder> encoder, const T& t, NSUInteger index) { bindVertexBytes(encoder, &t, sizeof(T), index); }
 	void bindStateData(id<MTLRenderCommandEncoder> encoder, MVKCommandEncoder& mvkEncoder, const MVKRenderStateData& data, MVKRenderStateFlags flags, const VkRect2D* scissors);
@@ -487,6 +493,9 @@ public:
 		_mtlCompute.prepareRenderDispatch(encoder, mvkEncoder, _vkGraphics, _vkShared, kMVKShaderStageTessEval);
 	}
 
+	void prepareMeshCapture(id<MTLComputeCommandEncoder> encoder, MVKCommandEncoder& mvkEncoder) {
+		_mtlCompute.prepareRenderDispatch(encoder, mvkEncoder, _vkGraphics, _vkShared, kMVKShaderStageMesh);
+	}
 	/** Binds everything needed to dispatch a Vulkan compute shader on the current Metal compute state. */
 	void prepareComputeDispatch(id<MTLComputeCommandEncoder> encoder, MVKCommandEncoder& mvkEncoder) {
 		_mtlCompute.prepareComputeDispatch(encoder, mvkEncoder, _vkCompute, _vkShared);
@@ -590,5 +599,3 @@ private:
 	/// If true, accumulation will be run at the end of the next render pass.
 	bool _shouldAccumulate = false;
 };
-
-
