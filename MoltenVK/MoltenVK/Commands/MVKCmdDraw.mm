@@ -2191,14 +2191,23 @@ void MVKCmdDrawIndexedIndirect::encode(MVKCommandEncoder* cmdEncoder, const MVKI
 #pragma mark -
 #pragma mark MVKCmdDrawMeshTasks
 
+static constexpr uint64_t kMVKMeshOutputScratchSize = 32 * MEBI;
+static constexpr uint32_t kMVKMeshMaxFlatBatchWorkgroupCount = 65535;
+struct MVKMeshDispatch { uint32_t grid[4]; };
+
 VkResult MVKCmdDrawMeshTasks::setContent(MVKCommandBuffer* cmdBuff, uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) {
 	// Metal executes nothing, and reports no error, for a mesh grid beyond its limit: refuse such a draw here rather than
 	// omit it. The Metal Feature Set Tables list 1024 threadgroups on Apple7 and Apple8, 1,048,575 on Apple9 and
 	// 4,194,303 on Apple10, all below Vulkan's minimum maxMeshWorkGroupTotalCount of 2^22. On Apple9 the pipeline
 	// reports 1,048,576, and a grid of exactly that many threadgroups draws nothing: the reported value is exclusive.
 	uint64_t groups = uint64_t(groupCountX) * groupCountY * groupCountZ;
-	if (auto* mesh = cmdBuff->getRecordedMeshPipeline(); mesh && groups >= mesh->getMaxMeshThreadgroupsPerGrid()) {
+	if (auto* mesh = cmdBuff->getRecordedMeshPipeline(); mesh && !mesh->usesRestoredMeshPipeline() && groups >= mesh->getMaxMeshThreadgroupsPerGrid()) {
 		return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCmdDrawMeshTasksEXT(): %llu workgroups reach the %lu this Metal mesh pipeline reports, beyond which it draws nothing.", (unsigned long long)groups, (unsigned long)mesh->getMaxMeshThreadgroupsPerGrid());
+	}
+	if (auto* mesh = cmdBuff->getRecordedMeshPipeline(); mesh && mesh->isMeshShaderEmulated() && groups) {
+		if (groups > kMVKMeshEmulationMaxWorkgroupCount) { return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Mesh capture workgroup count exceeds emulation range."); }
+		VkResult result = cmdBuff->validateIndexedPerVertexAttachments();
+		if (result != VK_SUCCESS) { return result; }
 	}
 	_groupCountX = groupCountX;
 	_groupCountY = groupCountY;
@@ -2212,6 +2221,83 @@ void MVKCmdDrawMeshTasks::encode(MVKCommandEncoder* cmdEncoder) {
 	cmdEncoder->restartMetalRenderPassIfNeeded();
 	auto* pipeline = cmdEncoder->getGraphicsPipeline();
 	if (!pipeline->isMeshPipeline()) { return; }
+	if (pipeline->isMeshShaderEmulated()) {
+		if (const char* error = cmdEncoder->getIndexedPerVertexAttachmentError()) {
+			cmdEncoder->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Mesh compute capture: %s", error);
+			cmdEncoder->stopEncoding();
+			return;
+		}
+	}
+	if (pipeline->isMeshShaderEmulated()) {
+		uint64_t workgroupCount = uint64_t(_groupCountX) * _groupCountY * _groupCountZ;
+		MVKAssert(workgroupCount <= UINT32_MAX, "Mesh workgroup count exceeds the emulation dispatch range.");
+
+		uint32_t outputSize = pipeline->getMeshOutputBufferSize();
+		uint32_t outputAlignment = pipeline->getMeshOutputBufferAlignment();
+		if (!outputSize || !outputAlignment) {
+			cmdEncoder->reportError(VK_ERROR_INITIALIZATION_FAILED, "Mesh capture pipeline has no valid output layout.");
+			cmdEncoder->stopEncoding();
+			return;
+		}
+		uint64_t maxScratchSize = std::min<uint64_t>(kMVKMeshOutputScratchSize, cmdEncoder->getMetalFeatures().maxMTLBufferSize);
+		uint64_t batchCapacity = std::min<uint64_t>({workgroupCount,
+												 kMVKMeshMaxFlatBatchWorkgroupCount,
+												 cmdEncoder->getMetalFeatures().maxMeshThreadgroups,
+												 maxScratchSize / outputSize});
+		if (!batchCapacity) {
+			cmdEncoder->reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Mesh capture scratch cannot hold one workgroup.");
+			cmdEncoder->stopEncoding();
+			return;
+		}
+
+		auto* outputBuffer = cmdEncoder->getTempMTLBuffer(NSUInteger(batchCapacity * outputSize), true);
+		MVKAssert(outputBuffer->_offset % outputAlignment == 0,
+				  "Mesh output capture buffer is not sufficiently aligned.");
+
+		const auto& meshImplicit = pipeline->getImplicitBuffers(kMVKShaderStageMesh);
+		const auto& fragmentImplicit = pipeline->getImplicitBuffers(kMVKShaderStageFragment);
+		uint32_t drawId = 0;
+		uint32_t provokingVertexLast = 0;
+#if MVK_USE_METAL_PRIVATE_API
+		provokingVertexLast = cmdEncoder->getState().vkGraphics().getProvokingVertexMode() == MTLProvokingVertexModeLast;
+#endif
+		for (uint64_t batchBase = 0; batchBase < workgroupCount;) {
+			uint32_t batchCount = uint32_t(std::min<uint64_t>(batchCapacity, workgroupCount - batchBase));
+			MVKMeshDispatch dispatch = {{_groupCountX, _groupCountY, _groupCountZ,
+								  uint32_t(batchBase) | (provokingVertexLast << 31u)}};
+
+			id<MTLComputeCommandEncoder> mtlCaptureEncoder = cmdEncoder->finalizeMeshCaptureState();
+			if ( !pipeline->hasValidMTLPipelineStates() ) { return; }
+			auto& computeState = cmdEncoder->getMtlCompute();
+			computeState.bindBuffer(mtlCaptureEncoder, outputBuffer->_mtlBuffer, outputBuffer->_offset,
+									meshImplicit.ids[MVKImplicitBuffer::Output]);
+			computeState.bindStructBytes(mtlCaptureEncoder, &dispatch,
+									 meshImplicit.ids[MVKImplicitBuffer::IndirectParams]);
+			if (meshImplicit.needed.has(MVKImplicitBuffer::DrawId)) {
+				computeState.bindStructBytes(mtlCaptureEncoder, &drawId,
+										 meshImplicit.ids[MVKImplicitBuffer::DrawId]);
+			}
+			[mtlCaptureEncoder dispatchThreadgroups: MTLSizeMake(batchCount, 1, 1)
+							  threadsPerThreadgroup: pipeline->getMeshCaptureThreadgroupSize()];
+
+			cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass);
+			cmdEncoder->finalizeDrawState(kMVKGraphicsStageRasterization);
+			if ( !pipeline->hasValidMTLPipelineStates() ) { return; }
+			[cmdEncoder->_mtlRenderEncoder setMeshBuffer: outputBuffer->_mtlBuffer
+											 offset: outputBuffer->_offset
+											atIndex: meshImplicit.ids[MVKImplicitBuffer::Output]];
+			if (fragmentImplicit.needed.has(MVKImplicitBuffer::Output)) {
+				[cmdEncoder->_mtlRenderEncoder setFragmentBuffer: outputBuffer->_mtlBuffer
+												 offset: outputBuffer->_offset
+												atIndex: fragmentImplicit.ids[MVKImplicitBuffer::Output]];
+			}
+			[cmdEncoder->_mtlRenderEncoder drawMeshThreadgroups: MTLSizeMake(batchCount, 1, 1)
+								 threadsPerObjectThreadgroup: pipeline->getObjectThreadgroupSize()
+								   threadsPerMeshThreadgroup: pipeline->getMeshThreadgroupSize()];
+			batchBase += batchCount;
+		}
+		return;
+	}
 	cmdEncoder->finalizeDrawState(kMVKGraphicsStageRasterization);
 	if (!pipeline->hasValidMTLPipelineStates()) { return; }
 	[cmdEncoder->_mtlRenderEncoder drawMeshThreadgroups: MTLSizeMake(_groupCountX, _groupCountY, _groupCountZ)

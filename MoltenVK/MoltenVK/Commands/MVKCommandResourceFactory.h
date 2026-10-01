@@ -359,7 +359,7 @@ public:
 
 	/** Returns a new MTLComputePipelineState for converting the contents of an indirect buffer. */
 	id<MTLComputePipelineState> newCmdDrawIndirectConvertBuffersMTLComputePipelineState(bool indexed,
-																																	   MVKVulkanAPIDeviceObject* owner);
+																						MVKVulkanAPIDeviceObject* owner);
 
 	/** Returns a new MTLComputePipelineState for emulating indirect draw count. */
 	id<MTLComputePipelineState> newCmdDrawIndirectCountConvertBuffersMTLComputePipelineState(bool indexed,
@@ -394,6 +394,8 @@ public:
 	id<MTLComputePipelineState> newTessLevelsToHalfFactorsMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
 
 	id<MTLComputePipelineState> newConvertUint8IndicesMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner, bool preserveValues = false);
+
+	id<MTLFunction> newNoopFragmentFunction();
 
 
 #pragma mark Construction

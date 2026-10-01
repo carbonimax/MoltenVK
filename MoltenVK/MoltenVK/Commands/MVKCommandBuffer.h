@@ -159,6 +159,7 @@ public:
 	/** Called when a MVKCmdExecuteCommands is added to this command buffer. */
 	VkResult recordExecuteCommands(MVKArrayRef<MVKCommandBuffer*const> secondaryCommandBuffers);
 
+	VkResult validateIndexedPerVertexAttachments();
 	void recordRenderPass(MVKArrayRef<MVKImageView*> attachments, bool attachmentsKnown = true);
 	void recordRendering(const VkRenderingInfo* renderingInfo);
 	void recordIndexType(VkIndexType indexType) { _recordedIndexType = indexType; }
@@ -229,7 +230,6 @@ protected:
 	void flushImmediateCmdEncoder();
 	void checkDeferredEncoding();
 	void beginSecondaryEncoding(MVKCommandEncoder* cmdEncoder);
-	VkResult validateIndexedPerVertexAttachments();
 	VkResult reservePrefilledPerVertexScratch(size_t firstRequest);
 	VkResult reservePerVertexScratch(const std::vector<MVKPerVertexScratchRequest>& requests, MVKPerVertexScratchReservations& scratch);
 	std::vector<MVKPerVertexScratchRequest> _perVertexScratchRequests;
@@ -402,6 +402,8 @@ public:
 
 	/** Called by each graphics draw command to establish any outstanding state just prior to performing the draw. */
 	void finalizeDrawState(MVKGraphicsStage stage);
+
+	id<MTLComputeCommandEncoder> finalizeMeshCaptureState();
 
     /** Called by each compute dispatch command to establish any outstanding state just prior to performing the dispatch. */
     void finalizeDispatchState();

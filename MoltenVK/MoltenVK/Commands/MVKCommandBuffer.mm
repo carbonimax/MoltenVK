@@ -1011,6 +1011,7 @@ static MVKBarrierStage commandUseToBarrierStage(MVKCommandUse use) {
 	case kMVKCommandUseClearDepthStencilImage:       return kMVKBarrierStageCopy; /**< vkCmdClearDepthStencilImage. */
 	case kMVKCommandUseResetQueryPool:               return kMVKBarrierStageCopy; /**< vkCmdResetQueryPool. */
 	case kMVKCommandUseDispatch:                     return kMVKBarrierStageCompute; /**< vkCmdDispatch. */
+	case kMVKCommandUseMeshShaderCapture:           return kMVKBarrierStageVertex;
 	case kMVKCommandUseTessellationVertexTessCtl:    return kMVKBarrierStageVertex; /**< vkCmdDraw* - vertex and tessellation control stages. */
 	case kMVKCommandUseDrawIndirectConvertBuffers:   return kMVKBarrierStageVertex; /**< vkCmdDrawIndirect* convert indirect buffers. */
 	case kMVKCommandUseCopyQueryPoolResults:         return kMVKBarrierStageCopy; /**< vkCmdCopyQueryPoolResults. */
@@ -1099,7 +1100,9 @@ void MVKCommandEncoder::setBarrier(uint64_t sourceStageMask, uint64_t destStageM
 void MVKCommandEncoder::encodeBarrierWaits(MVKCommandUse use) {
 	if (_mtlRenderEncoder) {
 		[_mtlRenderEncoder insertDebugSignpost:@"Encoding waits"];
-		barrierWait(kMVKBarrierStageVertex, _mtlRenderEncoder, MTLRenderStageVertex);
+		MTLRenderStages preRasterStages = MTLRenderStageVertex;
+		if (getMetalFeatures().meshShader) { preRasterStages |= MTLRenderStageObject | MTLRenderStageMesh; }
+		barrierWait(kMVKBarrierStageVertex, _mtlRenderEncoder, preRasterStages);
 		barrierWait(kMVKBarrierStageFragment, _mtlRenderEncoder, MTLRenderStageFragment);
 	}
 	if (_mtlComputeEncoder) {
@@ -1118,7 +1121,9 @@ void MVKCommandEncoder::encodeBarrierWaits(MVKCommandUse use) {
 
 void MVKCommandEncoder::encodeBarrierUpdates() {
 	if (_mtlRenderEncoder) {
-		barrierUpdate(kMVKBarrierStageVertex, _mtlRenderEncoder, MTLRenderStageVertex);
+		MTLRenderStages preRasterStages = MTLRenderStageVertex;
+		if (getMetalFeatures().meshShader) { preRasterStages |= MTLRenderStageObject | MTLRenderStageMesh; }
+		barrierUpdate(kMVKBarrierStageVertex, _mtlRenderEncoder, preRasterStages);
 		barrierUpdate(kMVKBarrierStageFragment, _mtlRenderEncoder, MTLRenderStageFragment);
 	}
 
@@ -1390,6 +1395,13 @@ void MVKCommandEncoder::clearRenderArea(MVKCommandUse cmdUse) {
 
 void MVKCommandEncoder::beginMetalComputeEncoding(MVKCommandUse cmdUse) {
 	getState().beginComputeEncoding();
+}
+
+id<MTLComputeCommandEncoder> MVKCommandEncoder::finalizeMeshCaptureState() {
+	encodeStoreActions(true);
+	id<MTLComputeCommandEncoder> mtlEncoder = getMTLComputeEncoder(kMVKCommandUseMeshShaderCapture);
+	getState().prepareMeshCapture(mtlEncoder, *this);
+	return mtlEncoder;
 }
 
 void MVKCommandEncoder::finalizeDispatchState() {
@@ -1800,6 +1812,7 @@ NSString* mvkMTLComputeCommandEncoderLabel(MVKCommandUse cmdUse) {
         case kMVKCommandUseFillBuffer:                      return @"vkCmdFillBuffer ComputeEncoder";
         case kMVKCommandUseClearColorImage:                 return @"vkCmdClearColorImage ComputeEncoder";
         case kMVKCommandUseResolveSubpassAttachment:        return @"Resolve Subpass Attachment ComputeEncoder";
+        case kMVKCommandUseMeshShaderCapture:              return @"vkCmdDrawMeshTasksEXT (mesh capture stage) ComputeEncoder";
         case kMVKCommandUseTessellationVertexTessCtl:       return @"vkCmdDraw (vertex and tess control stages) ComputeEncoder";
         case kMVKCommandUseDrawIndirectConvertBuffers:      return @"vkCmdDraw (convert indirect buffers) ComputeEncoder";
         case kMVKCommandUseCopyQueryPoolResults:            return @"vkCmdCopyQueryPoolResults ComputeEncoder";
