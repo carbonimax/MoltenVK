@@ -659,10 +659,6 @@ namespace mvk {
 				if (model == spv::ExecutionModelMeshEXT && storage == spv::StorageClassOutput && !type->array.empty()) {
 					type = &reflect.get_type(type->parent_type);
 				}
-				if (model == spv::ExecutionModelFragment && storage == spv::StorageClassInput &&
-					reflect.has_decoration(varID, spv::DecorationPerVertexKHR) && !type->array.empty()) {
-					type = &reflect.get_type(type->parent_type);
-				}
 				if (reflect.has_decoration(type->self, spv::DecorationBlock)) {
 					// In this case, the Patch decoration is on the members.
 					// FIXME It is theoretically possible for some members of a block to have
