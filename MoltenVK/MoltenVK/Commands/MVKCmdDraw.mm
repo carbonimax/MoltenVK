@@ -268,7 +268,10 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 			memset(w, 0, 18 * sizeof(uint32_t));
 			w[0] = UINT32_MAX;
 			uint32_t params[] = {vertexCount, instanceCount, mvkPerVertexIndexSize(indexBinding->vkIndexType), uint32_t(topology), uint32_t(provokingLast), uint32_t(scratch->buffers[4] != nil), uint32_t(baseVertex), firstInstance, uint32_t(captureWidth), uint32_t(unique), 0};
-			NSUInteger width = std::min(uniqueState.threadExecutionWidth, uniqueState.maxTotalThreadsPerThreadgroup);
+			// A252: MVK_CONFIG_PERVERTEX_UNIQUE_TG_SIMDS SIMD-groups per threadgroup, bounded by the pipeline maximum.
+			NSUInteger width = mvkPerVertexUniqueThreadgroupWidth(uniqueState.threadExecutionWidth, uniqueState.maxTotalThreadsPerThreadgroup, mvkPerVertexUniqueThreadgroupSimds());
+			static std::atomic<bool> widthLogged{false};
+			if (!widthLogged.exchange(true)) { cmdEncoder->getDevice()->reportMessage(MVK_CONFIG_LOG_LEVEL_INFO, "PERVERTEX unique_tg simds=%u width=%lu simd_width=%lu max_threads=%lu", mvkPerVertexUniqueThreadgroupSimds(), (unsigned long)width, (unsigned long)uniqueState.threadExecutionWidth, (unsigned long)uniqueState.maxTotalThreadsPerThreadgroup); }
 			computeState.bindPipeline(captureEncoder, uniqueState);
 			computeState.bindBuffer(captureEncoder, indexBuffer, indexOffset, 0);
 			computeState.bindBuffer(captureEncoder, uniquePlan->_mtlBuffer, uniquePlan->_offset, 1);

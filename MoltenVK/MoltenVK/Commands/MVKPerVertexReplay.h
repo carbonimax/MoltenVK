@@ -130,6 +130,14 @@ static inline uint32_t mvkPerVertexUniqueSyntheticIndex(const MVKPerVertexUnique
 
 static inline uint32_t mvkPerVertexUniqueRecord(const MVKPerVertexUniquePlan& plan, uint32_t instance, uint32_t pos, const uint32_t* indices) { return instance * plan.stride + (plan.unique ? indices[pos] - plan.base : pos); }
 
+// A252 (MVK_CONFIG_PERVERTEX_UNIQUE_TG_SIMDS): threadgroup width of the four perVertexUnique phases, up to simds whole
+// SIMD-groups and never above the pipeline maximum. simds = 1, or a maximum below one SIMD-group, gives the A231 width
+// min(simdWidth, maxThreads). The kernel publishes one min/max atomic pair per SIMD-group and shares nothing else.
+static inline uint64_t mvkPerVertexUniqueThreadgroupWidth(uint64_t simdWidth, uint64_t maxThreads, uint64_t simds) {
+	if (maxThreads < simdWidth) { return maxThreads; }
+	return simdWidth * std::max<uint64_t>(1, std::min<uint64_t>(simds, maxThreads / simdWidth));
+}
+
 // Without GPU restart assembly, the replay tables of a single-instance draw do not depend on its vertex count: the
 // tables populated for a larger count begin with those of every smaller count. Instanced list draws without dangling
 // vertices are the single-instance draw of vertexCount * instanceCount vertices. One table per topology and provoking

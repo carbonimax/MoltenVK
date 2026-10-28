@@ -296,6 +296,9 @@ bool mvkPerVertexCaptureStats();
 /** MVK_CONFIG_PERVERTEX_CAPTURE_UNIQUE=1 (A231): direct indexed captures run once per vertex of their index range. */
 bool mvkPerVertexCaptureUnique();
 
+/** MVK_CONFIG_PERVERTEX_UNIQUE_TG_SIMDS (A252): SIMD-groups per perVertexUnique threadgroup requested, 1 to 32, default 1. */
+uint32_t mvkPerVertexUniqueThreadgroupSimds();
+
 /** A231: GPU sums of the measured draws (perVertexUnique kernel), resident, process-wide; nil if it cannot be created. */
 id<MTLBuffer> mvkPerVertexCaptureStatsBuffer(MVKDevice* device);
 

@@ -70,6 +70,12 @@ bool mvkPerVertexCaptureUnique() {
 	return isEnabled;
 }
 
+// MVK_CONFIG_PERVERTEX_UNIQUE_TG_SIMDS (A252): see mvkPerVertexUniqueThreadgroupWidth (MVKPerVertexReplay.h). Default 1.
+uint32_t mvkPerVertexUniqueThreadgroupSimds() {
+	static const uint32_t simds = uint32_t(std::max(1.0, std::min(32.0, mvkGetEnvVarNumber("MVK_CONFIG_PERVERTEX_UNIQUE_TG_SIMDS", 1))));
+	return simds;
+}
+
 // ponytail: one buffer for the first device that asks, never released; per-device buffers if a process opens several.
 id<MTLBuffer> mvkPerVertexCaptureStatsBuffer(MVKDevice* device) {
 	static id<MTLBuffer> buffer = [device]() -> id<MTLBuffer> {
