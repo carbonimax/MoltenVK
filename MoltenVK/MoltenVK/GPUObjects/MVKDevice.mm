@@ -3382,6 +3382,7 @@ void MVKPhysicalDevice::initPipelineCacheUUID() {
 	mtlFeatures |= _isUsingMetalArgumentBuffers << 0;
 	mtlFeatures |= 1u << 1; // Shader cache archive includes the portable PerVertex input ABI.
 	mtlFeatures |= 1u << 2; // Portable barycentric opt-in and private varying locations.
+	mtlFeatures |= 1u << 3; // Native PerVertexKHR primitive vertex count for points and lines.
 	*(uint32_t*)&_properties.pipelineCacheUUID[uuidComponentOffset] = NSSwapHostIntToBig(mtlFeatures);
 	uuidComponentOffset += sizeof(mtlFeatures);
 }

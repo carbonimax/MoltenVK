@@ -1961,7 +1961,7 @@ bool MVKGraphicsPipeline::initPerVertexInputPipeline(const VkGraphicsPipelineCre
 		_usesNoPerspectiveBarycentrics |= input.builtin == spv::BuiltInBaryCoordNoPerspKHR;
 	}
 	if (!usesPerVertex && !usesPortableBarycentrics()) { return true; }
-	if (!_isTessellationPipeline && !usesPortableBarycentrics() && getPhysicalDevice()->getMTLDeviceCapabilities().supportsApple10 && getMetalFeatures().mslVersion >= CompilerMSL::Options::make_msl_version(4, 0) && getPrimitiveTopologyClass() == MTLPrimitiveTopologyClassTriangle) { return true; }
+	if (!_isTessellationPipeline && !usesPortableBarycentrics() && getPhysicalDevice()->getMTLDeviceCapabilities().supportsApple10 && getMetalFeatures().mslVersion >= CompilerMSL::Options::make_msl_version(4, 0) && getPerVertexPrimitiveVertexCount()) { return true; }
 	auto unsupported = [&](const char* reason) {
 		setConfigurationResult(reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR %s", reason));
 		return false;
@@ -3034,8 +3034,10 @@ bool MVKGraphicsPipeline::addFragmentShaderToPipeline(T* plDesc,
 	shaderConfig.options.mslOptions.dispatch_base = false;
 	if (pFragmentSS) {
 		shaderConfig.options.entryPointStage = spv::ExecutionModelFragment;
-		// vertex_value requires triangle input and Apple10 hardware, not just a recent OS/MSL version.
-		shaderConfig.options.mslOptions.supports_per_vertex_fragment_input = getPhysicalDevice()->getMTLDeviceCapabilities().supportsApple10 && shaderConfig.options.mslOptions.supports_msl_version(4, 0) && getPrimitiveTopologyClass() == MTLPrimitiveTopologyClassTriangle;
+		// vertex_value requires Apple10 hardware, not just a recent OS/MSL version. Metal returns zero for the
+		// vertices that points and lines lack, so SPIRV-Cross redirects those reads to the last valid vertex.
+		shaderConfig.options.mslOptions.supports_per_vertex_fragment_input = getPhysicalDevice()->getMTLDeviceCapabilities().supportsApple10 && shaderConfig.options.mslOptions.supports_msl_version(4, 0) && getPerVertexPrimitiveVertexCount();
+		shaderConfig.options.mslOptions.per_vertex_primitive_vertex_count = shaderConfig.options.mslOptions.supports_per_vertex_fragment_input ? getPerVertexPrimitiveVertexCount() : 3;
 		if (_usesPerVertexInputBuffer) {
 			shaderConfig.options.mslOptions.supports_per_vertex_fragment_input = false;
 			shaderConfig.options.mslOptions.disable_rasterization = false;
@@ -4291,6 +4293,7 @@ namespace SPIRV_CROSS_NAMESPACE {
 				opt.capture_output_to_buffer,
 				opt.supports_per_vertex_fragment_input,
 				opt.mesh_shader_emulation,
+				opt.per_vertex_primitive_vertex_count,
 				opt.swizzle_texture_samples,
 				opt.tess_domain_origin_lower_left,
 				opt.multiview,
