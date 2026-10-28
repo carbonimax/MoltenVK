@@ -150,6 +150,8 @@ public:
 
 	/** Returns the GPU admission and planning pipeline for portable PerVertexKHR indirect draws. */
 	id<MTLComputePipelineState> getPerVertexIndirectMTLComputePipelineState();
+	/** Returns the conversion pipeline of emulated indirect mesh draws (A209). */
+	id<MTLComputePipelineState> getMeshIndirectMTLComputePipelineState();
 	/** Returns the GPU topology generator for portable PerVertexKHR tessellation. */
 	id<MTLComputePipelineState> getPerVertexTessTopologyMTLComputePipelineState();
 
@@ -201,6 +203,7 @@ protected:
 	id<MTLComputePipelineState> _mtlAccumOcclusionQueryResultsComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlPerVertexRestartComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlPerVertexIndirectComputePipelineState = nil;
+	id<MTLComputePipelineState> _mtlMeshIndirectComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlPerVertexTessTopologyComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlConvertUint8IndicesComputePipelineState[2] = {nil, nil};
 	std::unordered_map<uint32_t, std::pair<uint32_t, MVKPerVertexReplayTables>> _perVertexReplayTables;

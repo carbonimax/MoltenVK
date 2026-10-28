@@ -387,6 +387,8 @@ public:
 
 	/** Returns a new MTLComputePipelineState for planning portable PerVertexKHR indirect draws on the GPU. */
 	id<MTLComputePipelineState> newPerVertexIndirectMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
+	/** Returns a new MTLComputePipelineState converting an emulated indirect mesh draw (A209). */
+	id<MTLComputePipelineState> newMeshIndirectMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
 	/** Returns a new MTLComputePipelineState generating portable PerVertexKHR tessellation topology. */
 	id<MTLComputePipelineState> newPerVertexTessTopologyMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
 

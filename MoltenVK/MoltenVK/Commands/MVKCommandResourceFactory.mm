@@ -633,6 +633,10 @@ id<MTLComputePipelineState> MVKCommandResourceFactory::newPerVertexIndirectMTLCo
 	return newMTLComputePipelineState("perVertexIndirect", owner);
 }
 
+id<MTLComputePipelineState> MVKCommandResourceFactory::newMeshIndirectMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner) {
+	return newMTLComputePipelineState("meshIndirect", owner);
+}
+
 id<MTLComputePipelineState> MVKCommandResourceFactory::newPerVertexTessTopologyMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner) {
 	return newMTLComputePipelineState("perVertexTessTopology", owner);
 }

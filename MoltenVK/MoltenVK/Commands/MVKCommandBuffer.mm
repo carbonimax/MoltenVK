@@ -53,6 +53,12 @@ bool mvkPerVertexIndirectNoWait() {
 	return isEnabled;
 }
 
+// MVK_CONFIG_MESH_INDIRECT_GPU=1 (A209): see mvkMeshIndirectCapacity (MVKPerVertexScratch.h).
+bool mvkMeshIndirectGpu() {
+	static const bool isEnabled = mvkGetEnvVarNumber("MVK_CONFIG_MESH_INDIRECT_GPU", 0) == 1;
+	return isEnabled;
+}
+
 
 #pragma mark -
 #pragma mark MVKCommandEncodingContext
@@ -1234,7 +1240,7 @@ void MVKCommandEncoder::beginMetalRenderPass(MVKCommandUse cmdUse) {
 		if (!start) {
 			statsStart.compare_exchange_strong(start, now);
 		} else if (seconds >= 1.0 && statsStart.compare_exchange_strong(start, now)) {
-			MVKLogInfo("PERVERTEX stats prepass=%d seconds=%.3f render_encoders/s=%.1f restarts/s=%.1f prepass_windows/s=%.1f prepass_captures/s=%.1f batch_residency=%d scratch_pool=%d residency_commits/s=%.1f scratch_allocs/s=%.1f pool_reuses/s=%.1f indirect_gpu=%d indirect_nowait/s=%.1f indirect_waits/s=%.1f indirect_dropped/s=%.1f indirect_hint=%llu", mvkPerVertexPrepassMode(), seconds, mvkPerVertexRenderEncoders.exchange(0) / seconds, mvkPerVertexRestarts.exchange(0) / seconds, mvkPerVertexPrepassWindows.exchange(0) / seconds, mvkPerVertexPrepassCaptures.exchange(0) / seconds, int(mvkPerVertexBatchResidency()), int(getDevice()->getPerVertexScratchPool() != nullptr), mvkResidencyCommits.exchange(0) / seconds, mvkPerVertexScratchAllocations.exchange(0) / seconds, mvkPerVertexScratchPoolReuses.exchange(0) / seconds, int(mvkPerVertexIndirectNoWait()), mvkPerVertexIndirectNoWaitDraws.exchange(0) / seconds, mvkPerVertexIndirectWaits.exchange(0) / seconds, mvkPerVertexIndirectDropped.exchange(0) / seconds, (unsigned long long)mvkPerVertexIndirectRecordHint.load());
+			MVKLogInfo("PERVERTEX stats prepass=%d seconds=%.3f render_encoders/s=%.1f restarts/s=%.1f prepass_windows/s=%.1f prepass_captures/s=%.1f batch_residency=%d scratch_pool=%d residency_commits/s=%.1f scratch_allocs/s=%.1f pool_reuses/s=%.1f indirect_gpu=%d indirect_nowait/s=%.1f indirect_waits/s=%.1f indirect_dropped/s=%.1f indirect_hint=%llu mesh_indirect_gpu=%d mesh_indirect/s=%.1f mesh_indirect_native/s=%.1f mesh_indirect_dropped/s=%.1f", mvkPerVertexPrepassMode(), seconds, mvkPerVertexRenderEncoders.exchange(0) / seconds, mvkPerVertexRestarts.exchange(0) / seconds, mvkPerVertexPrepassWindows.exchange(0) / seconds, mvkPerVertexPrepassCaptures.exchange(0) / seconds, int(mvkPerVertexBatchResidency()), int(getDevice()->getPerVertexScratchPool() != nullptr), mvkResidencyCommits.exchange(0) / seconds, mvkPerVertexScratchAllocations.exchange(0) / seconds, mvkPerVertexScratchPoolReuses.exchange(0) / seconds, int(mvkPerVertexIndirectNoWait()), mvkPerVertexIndirectNoWaitDraws.exchange(0) / seconds, mvkPerVertexIndirectWaits.exchange(0) / seconds, mvkPerVertexIndirectDropped.exchange(0) / seconds, (unsigned long long)mvkPerVertexIndirectRecordHint.load(), int(mvkMeshIndirectGpu()), mvkMeshIndirectDraws.exchange(0) / seconds, mvkMeshIndirectNative.exchange(0) / seconds, mvkMeshIndirectDropped.exchange(0) / seconds);
 		}
 	}
     MTLRenderPassDescriptor* mtlRPDesc = [MTLRenderPassDescriptor renderPassDescriptor];

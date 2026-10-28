@@ -268,3 +268,28 @@ protected:
 	uint32_t _groupCountY;
 	uint32_t _groupCountZ;
 };
+
+
+#pragma mark -
+#pragma mark MVKCmdDrawMeshTasksIndirect
+
+/**
+ * Vulkan command to draw one indirect grid of mesh workgroups (vkCmdDrawMeshTasksIndirectEXT, drawCount 1), with
+ * MVK_CONFIG_MESH_INDIRECT_GPU=1 (A209). Emulated pipelines capture and replay at most mvkMeshIndirectCapacity()
+ * workgroups, sized on the GPU; native pipelines draw the grid directly.
+ */
+class MVKCmdDrawMeshTasksIndirect : public MVKCommand {
+
+public:
+	VkResult setContent(MVKCommandBuffer* cmdBuff, VkBuffer buffer, VkDeviceSize offset);
+
+	void encode(MVKCommandEncoder* cmdEncoder) override;
+	// The subpass encodes the capture: nothing to do in the PerVertex prepass, which continues.
+	bool encodePerVertexPrepass(MVKCommandEncoder*) override { return true; }
+
+protected:
+	MVKCommandTypePool<MVKCommand>* getTypePool(MVKCommandPool* cmdPool) override;
+
+	id<MTLBuffer> _mtlIndirectBuffer;
+	VkDeviceSize _mtlIndirectBufferOffset;
+};

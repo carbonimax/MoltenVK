@@ -98,6 +98,28 @@ inline std::atomic<uint64_t> mvkPerVertexIndirectRecordHint{0};
 // PERVERTEX stats counters (A208): indirect draws encoded without waiting, waited, and not executed (nonzero plan status).
 inline std::atomic<uint64_t> mvkPerVertexIndirectNoWaitDraws{0}, mvkPerVertexIndirectWaits{0}, mvkPerVertexIndirectDropped{0};
 
+// MVK_CONFIG_MESH_INDIRECT_GPU=1 (A209): an emulated indirect mesh draw (vkCmdDrawMeshTasksIndirectEXT, drawCount 1)
+// runs as one batch reserved on the CPU for `capacity` workgroups: the largest single batch of the direct path
+// (MVKCmdDrawMeshTasks::encodeMesh: at most 65535 workgroups, the Metal mesh grid, and 32 MiB of output). 0 when one
+// workgroup does not fit.
+static inline uint32_t mvkMeshIndirectCapacity(uint32_t outputSize, uint64_t maxMeshThreadgroups, uint64_t maxMTLBufferSize) {
+	if (!outputSize) { return 0; }
+	uint64_t maxScratchSize = std::min<uint64_t>(32ull << 20, maxMTLBufferSize);
+	return uint32_t(std::min<uint64_t>({65535, maxMeshThreadgroups, maxScratchSize / outputSize}));
+}
+
+// A209: the workgroups that batch runs for a Vulkan grid x * y * z, as the meshIndirect kernel computes them on the GPU:
+// all of them up to `capacity`, none beyond (`dropped`: nothing is drawn, the draw is counted). No 64-bit overflow while
+// capacity < 2^32.
+static inline uint32_t mvkMeshIndirectWorkgroups(uint32_t x, uint32_t y, uint32_t z, uint32_t capacity, bool& dropped) {
+	uint64_t xy = uint64_t(x) * y;
+	dropped = xy && z && (xy > capacity || z > capacity || xy * z > capacity);
+	return xy && z && !dropped ? uint32_t(xy * z) : 0;
+}
+
+// PERVERTEX stats counters (A209): indirect mesh draws encoded, those on a native Metal mesh pipeline, and those not drawn.
+inline std::atomic<uint64_t> mvkMeshIndirectDraws{0}, mvkMeshIndirectNative{0}, mvkMeshIndirectDropped{0};
+
 static inline void mvkPerVertexIndirectLearn(uint64_t records) {
 	uint64_t hint = mvkPerVertexIndirectRecordHint.load(std::memory_order_relaxed);
 	while (records > hint && !mvkPerVertexIndirectRecordHint.compare_exchange_weak(hint, records, std::memory_order_relaxed)) {}

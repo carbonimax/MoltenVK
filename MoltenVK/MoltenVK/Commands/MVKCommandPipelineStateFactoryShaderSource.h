@@ -837,4 +837,21 @@ kernel void tessLevelsToHalfFactors(const device uint* levels [[buffer(0)]], dev
     bool innerNaN = (f[4] & 0x7fffffffu) > 0x7f800000u;
     factors[i].insideTessellationFactor = discarded ? half(0) : innerNaN ? as_type<half>(ushort(0x7e00)) : half(perVertexTessLevel(f[4], maxLevel));
 }
+
+// A209 (MVK_CONFIG_MESH_INDIRECT_GPU=1): one emulated indirect mesh draw, from its VkDrawMeshTasksIndirectCommandEXT
+// (mvkMeshIndirectWorkgroups). p: batch capacity, provoking-vertex bit. w: the capture's spvMeshDispatch (words 0-3),
+// the capture dispatch and replay grid (4-6, nothing when dropped or empty), dropped flag (7).
+kernel void meshIndirect(const device uint* args [[buffer(0)]], device uint* w [[buffer(1)]], constant uint* p [[buffer(2)]]) {
+    ulong xy = ulong(args[0]) * args[1];
+    uint z = args[2];
+    bool dropped = xy != 0 && z != 0 && (xy > p[0] || z > p[0] || xy * z > p[0]);
+    w[0] = args[0];
+    w[1] = args[1];
+    w[2] = z;
+    w[3] = p[1];
+    w[4] = xy != 0 && z != 0 && !dropped ? uint(xy * z) : 0u;
+    w[5] = 1u;
+    w[6] = 1u;
+    w[7] = dropped ? 1u : 0u;
+}
 )";

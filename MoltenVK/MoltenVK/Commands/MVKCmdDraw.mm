@@ -2387,3 +2387,115 @@ bool MVKCmdDrawMeshTasks::encodeMesh(MVKCommandEncoder* cmdEncoder, bool prepass
 	                          threadsPerMeshThreadgroup: pipeline->getMeshThreadgroupSize()];
 	return true;
 }
+
+
+#pragma mark -
+#pragma mark MVKCmdDrawMeshTasksIndirect
+
+VkResult MVKCmdDrawMeshTasksIndirect::setContent(MVKCommandBuffer* cmdBuff, VkBuffer buffer, VkDeviceSize offset) {
+	if (auto* mesh = cmdBuff->getRecordedMeshPipeline(); mesh && mesh->isMeshShaderEmulated()) {
+		VkResult result = cmdBuff->validateIndexedPerVertexAttachments();
+		if (result != VK_SUCCESS) { return result; }
+	}
+	MVKBuffer* mvkBuffer = (MVKBuffer*)buffer;
+	_mtlIndirectBuffer = mvkBuffer->getMTLBuffer();
+	_mtlIndirectBufferOffset = mvkBuffer->getMTLBufferOffset() + offset;
+	return VK_SUCCESS;
+}
+
+// A209: the emulated path of MVKCmdDrawMeshTasks::encodeMesh, as one batch of mvkMeshIndirectCapacity() workgroups whose
+// grid the meshIndirect kernel writes on the GPU: no CPU wait. A grid beyond that capacity draws nothing and is counted.
+void MVKCmdDrawMeshTasksIndirect::encode(MVKCommandEncoder* cmdEncoder) {
+	cmdEncoder->restartMetalRenderPassIfNeeded();
+	auto* pipeline = cmdEncoder->getGraphicsPipeline();
+	if (!pipeline->isMeshPipeline()) { return; }
+	mvkMeshIndirectDraws++;
+	if (!pipeline->isMeshShaderEmulated()) {
+		// Metal reads the same three words; beyond its grid limit it draws nothing and reports no error.
+		cmdEncoder->finalizeDrawState(kMVKGraphicsStageRasterization);
+		if (!pipeline->hasValidMTLPipelineStates()) { return; }
+		mvkMeshIndirectNative++;
+		[cmdEncoder->_mtlRenderEncoder drawMeshThreadgroupsWithIndirectBuffer: _mtlIndirectBuffer
+		                                                 indirectBufferOffset: _mtlIndirectBufferOffset
+		                                          threadsPerObjectThreadgroup: MTLSizeMake(1, 1, 1)
+		                                            threadsPerMeshThreadgroup: pipeline->getMeshThreadgroupSize()];
+		return;
+	}
+	if (const char* error = cmdEncoder->getIndexedPerVertexAttachmentError()) {
+		cmdEncoder->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Mesh compute capture: %s", error);
+		cmdEncoder->stopEncoding();
+		return;
+	}
+	uint32_t outputSize = pipeline->getMeshOutputBufferSize();
+	uint32_t outputAlignment = pipeline->getMeshOutputBufferAlignment();
+	uint32_t capacity = outputAlignment ? mvkMeshIndirectCapacity(outputSize, cmdEncoder->getMetalFeatures().maxMeshThreadgroups, cmdEncoder->getMetalFeatures().maxMTLBufferSize) : 0;
+	if (!capacity) {
+		cmdEncoder->reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Mesh capture scratch cannot hold one workgroup.");
+		cmdEncoder->stopEncoding();
+		return;
+	}
+	const MVKMTLBufferAllocation* outputBuffer = cmdEncoder->getTempMTLBuffer(NSUInteger(capacity) * outputSize, true);
+	MVKAssert(outputBuffer->_offset % outputAlignment == 0, "Mesh output capture buffer is not sufficiently aligned.");
+	// Shared, outside the temporary pool: the completion handler reads the dropped flag (word 7).
+	// Kept alive until completion by the handler block below, which retains it.
+	id<MTLBuffer> plan = [[cmdEncoder->getMTLDevice() newBufferWithLength: 8 * sizeof(uint32_t) options: MTLResourceStorageModeShared] autorelease];
+	uint32_t provokingVertexLast = 0;
+#if MVK_USE_METAL_PRIVATE_API
+	provokingVertexLast = cmdEncoder->getState().vkGraphics().getProvokingVertexMode() == MTLProvokingVertexModeLast;
+#endif
+	uint32_t params[2] = {capacity, provokingVertexLast << 31u};
+
+	// The conversion, then the capture, on the capture's compute encoder (serial dispatch).
+	cmdEncoder->encodeStoreActions(true);
+	id<MTLComputeCommandEncoder> mtlConvertEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseMeshShaderCapture);
+	auto& computeState = cmdEncoder->getMtlCompute();
+	computeState.bindPipeline(mtlConvertEncoder, cmdEncoder->getCommandEncodingPool()->getMeshIndirectMTLComputePipelineState());
+	computeState.bindBuffer(mtlConvertEncoder, _mtlIndirectBuffer, _mtlIndirectBufferOffset, 0);
+	computeState.bindBuffer(mtlConvertEncoder, plan, 0, 1);
+	computeState.bindBytes(mtlConvertEncoder, params, sizeof(params), 2);
+	[mtlConvertEncoder dispatchThreadgroups: MTLSizeMake(1, 1, 1) threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
+	[mtlConvertEncoder memoryBarrierWithScope: MTLBarrierScopeBuffers];
+	// The capture binds all its state again on this encoder, as each capture of the prepass does.
+	cmdEncoder->getState().beginComputeEncoding();
+	id<MTLComputeCommandEncoder> mtlCaptureEncoder = cmdEncoder->finalizeMeshCaptureState();
+	MVKDevice* device = cmdEncoder->getDevice();
+	// Outside the encoding pool, so resident only while this command buffer runs (as non-pool PerVertex scratch).
+	device->makeResident(plan);
+	device->addMTLCommandBufferHandler(cmdEncoder->_mtlCmdBuffer, ^(id<MTLCommandBuffer>) {
+		static std::atomic<uint32_t> logged{0};
+		device->removeResidency(plan);
+		if (static_cast<const volatile uint32_t*>(plan.contents)[7]) {
+			mvkMeshIndirectDropped++;
+			if (logged++ < 16) { device->reportMessage(MVK_CONFIG_LOG_LEVEL_WARNING, "Indirect mesh draw not executed: its grid exceeds the %u workgroups reserved.", capacity); }
+		}
+	});
+	if ( !pipeline->hasValidMTLPipelineStates() ) { return; }
+
+	const auto& meshImplicit = pipeline->getImplicitBuffers(kMVKShaderStageMesh);
+	const auto& fragmentImplicit = pipeline->getImplicitBuffers(kMVKShaderStageFragment);
+	uint32_t drawId = 0;
+	computeState.bindBuffer(mtlCaptureEncoder, outputBuffer->_mtlBuffer, outputBuffer->_offset, meshImplicit.ids[MVKImplicitBuffer::Output]);
+	computeState.bindBuffer(mtlCaptureEncoder, plan, 0, meshImplicit.ids[MVKImplicitBuffer::IndirectParams]);
+	if (meshImplicit.needed.has(MVKImplicitBuffer::DrawId)) {
+		computeState.bindStructBytes(mtlCaptureEncoder, &drawId, meshImplicit.ids[MVKImplicitBuffer::DrawId]);
+	}
+	[mtlCaptureEncoder dispatchThreadgroupsWithIndirectBuffer: plan
+	                                     indirectBufferOffset: 4 * sizeof(uint32_t)
+	                                    threadsPerThreadgroup: pipeline->getMeshCaptureThreadgroupSize()];
+
+	cmdEncoder->beginMetalRenderPass(kMVKCommandUseRestartSubpass);
+	cmdEncoder->finalizeDrawState(kMVKGraphicsStageRasterization);
+	if ( !pipeline->hasValidMTLPipelineStates() ) { return; }
+	[cmdEncoder->_mtlRenderEncoder setMeshBuffer: outputBuffer->_mtlBuffer
+	                                      offset: outputBuffer->_offset
+	                                     atIndex: meshImplicit.ids[MVKImplicitBuffer::Output]];
+	if (fragmentImplicit.needed.has(MVKImplicitBuffer::Output)) {
+		[cmdEncoder->_mtlRenderEncoder setFragmentBuffer: outputBuffer->_mtlBuffer
+		                                          offset: outputBuffer->_offset
+		                                         atIndex: fragmentImplicit.ids[MVKImplicitBuffer::Output]];
+	}
+	[cmdEncoder->_mtlRenderEncoder drawMeshThreadgroupsWithIndirectBuffer: plan
+	                                                 indirectBufferOffset: 4 * sizeof(uint32_t)
+	                                          threadsPerObjectThreadgroup: pipeline->getObjectThreadgroupSize()
+	                                            threadsPerMeshThreadgroup: pipeline->getMeshThreadgroupSize()];
+}
