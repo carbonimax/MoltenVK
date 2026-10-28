@@ -40,6 +40,13 @@ static int mvkPerVertexPrepassMode() {
 
 static std::atomic<uint64_t> mvkPerVertexRenderEncoders{0}, mvkPerVertexRestarts{0}, mvkPerVertexPrepassWindows{0}, mvkPerVertexPrepassCaptures{0};
 
+// MVK_CONFIG_PERVERTEX_BATCH_RESIDENCY=1 (A199): the PerVertex scratch of a Metal command buffer enters and leaves the
+// residency set with one commit each, when that command buffer is committed and once it completed, not per draw.
+static bool mvkPerVertexBatchResidency() {
+	static const bool isEnabled = mvkGetEnvVarNumber("MVK_CONFIG_PERVERTEX_BATCH_RESIDENCY", 0) == 1;
+	return isEnabled;
+}
+
 
 #pragma mark -
 #pragma mark MVKCommandEncodingContext
@@ -635,7 +642,7 @@ VkResult MVKCommandBuffer::reservePerVertexScratch(MVKPerVertexScratchReservatio
 VkResult MVKCommandBuffer::reservePerVertexScratch(const std::vector<MVKPerVertexScratchRequest>& requests, MVKPerVertexScratchReservations& scratch) {
 	if (_device->getConfigurationResult() != VK_SUCCESS) { return _device->getConfigurationResult(); }
 	MVKPerVertexScratchReservations pending;
-	if (!mvkReservePerVertexScratch(getMTLDevice(), requests, pending)) {
+	if (!mvkReservePerVertexScratch(getMTLDevice(), requests, pending, _device->getPerVertexScratchPool())) {
 		VkResult result = _device->getConfigurationResult();
 		return result != VK_SUCCESS ? result : reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR scratch reservation failed.");
 	}
@@ -891,10 +898,19 @@ void MVKCommandEncoder::encodePerVertexPrepass(MVKCommand* command) {
 void MVKCommandEncoder::keepPerVertexScratchResident() {
 	auto scratch = _lastPerVertexScratch;
 	auto* device = getDevice();
-	for (auto buffer : scratch->buffers) { if (buffer) { device->makeResident(buffer); } }
+	// Pool buffers stay resident from their creation (MVKPerVertexScratchPool): the reference below only delays their return.
+	bool changesResidency = !scratch->pool;
+	bool isBatched = changesResidency && mvkPerVertexBatchResidency();
+	if (isBatched) {
+		for (auto buffer : scratch->buffers) { if (buffer) { device->addMTLCommandBufferResidency(_mtlCmdBuffer, buffer); } }
+	} else if (changesResidency) {
+		for (auto buffer : scratch->buffers) { if (buffer) { device->makeResident(buffer); } }
+	}
 	// This also protects buffers encoded with unretained Metal command buffers and
 	// prefills that outlive their Vulkan command buffer's recorded command list.
+	// Its release, once this command buffer completed, is what returns pool buffers.
 	device->addMTLCommandBufferHandler(_mtlCmdBuffer, ^(id<MTLCommandBuffer>) {
+		if ( !changesResidency || isBatched ) { return; }
 		for (auto buffer : scratch->buffers) { if (buffer) { device->removeResidency(buffer); } }
 	});
 }
@@ -1212,7 +1228,7 @@ void MVKCommandEncoder::beginMetalRenderPass(MVKCommandUse cmdUse) {
 		if (!start) {
 			statsStart.compare_exchange_strong(start, now);
 		} else if (seconds >= 1.0 && statsStart.compare_exchange_strong(start, now)) {
-			MVKLogInfo("PERVERTEX stats prepass=%d seconds=%.3f render_encoders/s=%.1f restarts/s=%.1f prepass_windows/s=%.1f prepass_captures/s=%.1f", mvkPerVertexPrepassMode(), seconds, mvkPerVertexRenderEncoders.exchange(0) / seconds, mvkPerVertexRestarts.exchange(0) / seconds, mvkPerVertexPrepassWindows.exchange(0) / seconds, mvkPerVertexPrepassCaptures.exchange(0) / seconds);
+			MVKLogInfo("PERVERTEX stats prepass=%d seconds=%.3f render_encoders/s=%.1f restarts/s=%.1f prepass_windows/s=%.1f prepass_captures/s=%.1f batch_residency=%d scratch_pool=%d residency_commits/s=%.1f scratch_allocs/s=%.1f pool_reuses/s=%.1f", mvkPerVertexPrepassMode(), seconds, mvkPerVertexRenderEncoders.exchange(0) / seconds, mvkPerVertexRestarts.exchange(0) / seconds, mvkPerVertexPrepassWindows.exchange(0) / seconds, mvkPerVertexPrepassCaptures.exchange(0) / seconds, int(mvkPerVertexBatchResidency()), int(getDevice()->getPerVertexScratchPool() != nullptr), mvkResidencyCommits.exchange(0) / seconds, mvkPerVertexScratchAllocations.exchange(0) / seconds, mvkPerVertexScratchPoolReuses.exchange(0) / seconds);
 		}
 	}
     MTLRenderPassDescriptor* mtlRPDesc = [MTLRenderPassDescriptor renderPassDescriptor];
