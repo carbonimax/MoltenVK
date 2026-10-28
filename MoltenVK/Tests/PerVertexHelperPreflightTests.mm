@@ -59,7 +59,7 @@ struct TestCommandPool;
 struct TestDevice {
 	atomic<VkResult> result{VK_SUCCESS};
 	Failure failure = Failure::None;
-	atomic<unsigned> creations[5]{};
+	atomic<unsigned> creations[6]{};
 	VkResult getConfigurationResult() { return result.load(); }
 	TestDevice* getCommandResourceFactory() { return this; }
 	id<MTLComputePipelineState> create(unsigned slot);
@@ -67,6 +67,9 @@ struct TestDevice {
 	id<MTLComputePipelineState> newConvertUint8IndicesMTLComputePipelineState(TestCommandPool*, bool preserveValues) { return create(preserveValues ? 1 : 0); }
 	id<MTLComputePipelineState> newPerVertexIndirectMTLComputePipelineState(TestCommandPool*) { return create(3); }
 	id<MTLComputePipelineState> newPerVertexTessTopologyMTLComputePipelineState(TestCommandPool*) { return create(4); }
+	id<MTLComputePipelineState> newPerVertexUniqueMTLComputePipelineState(TestCommandPool*) { return create(5); }
+	// No pool: scratch reservations allocate directly, as with MVK_CONFIG_PERVERTEX_SCRATCH_POOL off.
+	const std::shared_ptr<MVKPerVertexScratchPool>& getPerVertexScratchPool() { static const std::shared_ptr<MVKPerVertexScratchPool> none; return none; }
 };
 struct TestCommandPool { TestDevice* device; TestDevice* getDevice() { return device; } };
 id<MTLComputePipelineState> TestDevice::create(unsigned slot) {
@@ -89,9 +92,11 @@ struct MVKCommandEncodingPool {
 	id<MTLComputePipelineState> _mtlConvertUint8IndicesComputePipelineState[2] = {};
 	id<MTLComputePipelineState> _mtlPerVertexIndirectComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlPerVertexTessTopologyComputePipelineState = nil;
+	id<MTLComputePipelineState> _mtlPerVertexUniqueComputePipelineState = nil;
 	id<MTLComputePipelineState> getPerVertexRestartMTLComputePipelineState();
 	id<MTLComputePipelineState> getPerVertexIndirectMTLComputePipelineState();
 	id<MTLComputePipelineState> getPerVertexTessTopologyMTLComputePipelineState();
+	id<MTLComputePipelineState> getPerVertexUniqueMTLComputePipelineState();
 	id<MTLComputePipelineState> getConvertUint8IndicesMTLComputePipelineState(bool preserveValues = false);
 	void clear() {
 		lock_guard<mutex> lock(_lock);
@@ -99,6 +104,7 @@ struct MVKCommandEncodingPool {
 		for (auto& state : _mtlConvertUint8IndicesComputePipelineState) { [state release]; state = nil; }
 		[_mtlPerVertexIndirectComputePipelineState release]; _mtlPerVertexIndirectComputePipelineState = nil;
 		[_mtlPerVertexTessTopologyComputePipelineState release]; _mtlPerVertexTessTopologyComputePipelineState = nil;
+		[_mtlPerVertexUniqueComputePipelineState release]; _mtlPerVertexUniqueComputePipelineState = nil;
 	}
 	~MVKCommandEncodingPool() { clear(); }
 };
