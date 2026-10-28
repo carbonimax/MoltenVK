@@ -363,6 +363,19 @@ public:
 	const VkRect2D* getScissors() const { return _scissors; }
 	const MTLSamplePosition* getSampleLocations() const { return _sampleLocations; }
 	const MTLPrimitiveTopologyClass getPrimitiveTopologyClass() const { return static_cast<MTLPrimitiveTopologyClass>(_primitiveTopologyClass); }
+	/**
+	 * Vertices per rasterized primitive for native PerVertexKHR inputs, or zero if the topology class is unknown.
+	 * Tessellation keeps the triangle-only native path: its point and line outputs have not been tested.
+	 */
+	uint32_t getPerVertexPrimitiveVertexCount() const {
+		if (_isTessellationPipeline) { return getPrimitiveTopologyClass() == MTLPrimitiveTopologyClassTriangle ? 3 : 0; }
+		switch (getPrimitiveTopologyClass()) {
+			case MTLPrimitiveTopologyClassPoint: return 1;
+			case MTLPrimitiveTopologyClassLine: return 2;
+			case MTLPrimitiveTopologyClassTriangle: return 3;
+			default: return 0;
+		}
+	}
 
 	/** Constructs an instance for the device and parent (which may be NULL). */
 	MVKGraphicsPipeline(MVKDevice* device,
