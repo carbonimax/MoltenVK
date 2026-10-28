@@ -67,6 +67,8 @@ struct TestDevice {
 	id<MTLComputePipelineState> newConvertUint8IndicesMTLComputePipelineState(TestCommandPool*, bool preserveValues) { return create(preserveValues ? 1 : 0); }
 	id<MTLComputePipelineState> newPerVertexIndirectMTLComputePipelineState(TestCommandPool*) { return create(3); }
 	id<MTLComputePipelineState> newPerVertexTessTopologyMTLComputePipelineState(TestCommandPool*) { return create(4); }
+	// No pool: scratch reservations allocate directly, as with MVK_CONFIG_PERVERTEX_SCRATCH_POOL off.
+	const std::shared_ptr<MVKPerVertexScratchPool>& getPerVertexScratchPool() { static const std::shared_ptr<MVKPerVertexScratchPool> none; return none; }
 };
 struct TestCommandPool { TestDevice* device; TestDevice* getDevice() { return device; } };
 id<MTLComputePipelineState> TestDevice::create(unsigned slot) {
