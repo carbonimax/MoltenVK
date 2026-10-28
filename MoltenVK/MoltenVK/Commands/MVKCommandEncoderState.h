@@ -470,8 +470,12 @@ public:
 	MVKVulkanStateSnapshot saveVulkanState() const { return {_vkShared, _vkGraphics, _vkCompute}; }
 	void restoreVulkanState(MVKVulkanStateSnapshot&& saved) {
 		_vkShared = std::move(saved.shared);
-		_vkGraphics = std::move(saved.graphics);
-		_vkCompute = std::move(saved.compute);
+		// Rebuilt by move construction: the implicit move assignment copies the buffer binding arrays, whose
+		// unions hold Metal object pointers, with objc_memmove_collectable, which the iOS runtime does not export.
+		_vkGraphics.~MVKVulkanGraphicsCommandEncoderState();
+		new (&_vkGraphics) MVKVulkanGraphicsCommandEncoderState(std::move(saved.graphics));
+		_vkCompute.~MVKVulkanComputeCommandEncoderState();
+		new (&_vkCompute) MVKVulkanComputeCommandEncoderState(std::move(saved.compute));
 	}
 
 	/**
