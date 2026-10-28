@@ -854,4 +854,94 @@ kernel void meshIndirect(const device uint* args [[buffer(0)]], device uint* w [
     w[6] = 1u;
     w[7] = dropped ? 1u : 0u;
 }
+
+// A231 (MVK_CONFIG_PERVERTEX_CAPTURE_STATS=1, MVK_CONFIG_PERVERTEX_CAPTURE_UNIQUE=1): one direct indexed draw without
+// primitive restart. Indices are read raw: without restart, the largest value is a vertex, not a sentinel.
+// p: index count, instances, index bytes, topology, provokingLast, corners, base vertex, first instance, capture width,
+//    unique, phase.
+// w (18 words): 0 min, 1 max (CPU-initialized to ~0 and 0), 4 capture dispatch, 8 stage-in region, 15 records per
+//    instance (stride), 16 base, 17 unique.
+// stats: 64-bit lo/hi sums of index count x instances (0), range x instances (2), capture grid x instances (4), unique
+//    draws (6) and sparse draws captured per index although unique was requested (8).
+// Phases: reduce min/max, plan (mvkPlanPerVertexUnique), synthetic capture indices (mvkPerVertexUniqueSyntheticIndex),
+// replay tables with the records, keys and corner order of mvkPopulatePerVertexReplay() (mvkPerVertexUniqueRecord).
+uint perVertexUniqueIndex(const device uint8_t* source, uint i, uint bytes) {
+    uint index = 0;
+    for (uint b = 0; b < bytes; ++b) { index |= uint(source[ulong(i) * bytes + b]) << (8 * b); }
+    return index;
+}
+void perVertexUniqueAdd(device atomic_uint* s, ulong value) {
+    uint lo = uint(value), previous = atomic_fetch_add_explicit(&s[0], lo, memory_order_relaxed);
+    uint hi = uint(value >> 32) + (previous + lo < previous ? 1u : 0u);
+    if (hi) { atomic_fetch_add_explicit(&s[1], hi, memory_order_relaxed); }
+}
+kernel void perVertexUnique(const device uint8_t* source [[buffer(0)]], device uint* w [[buffer(1)]], device uint* synthetic [[buffer(2)]], device uint* pairs [[buffer(3)]], device uint* triplets [[buffer(4)]], device uint* corners [[buffer(5)]], device atomic_uint* stats [[buffer(6)]], constant uint* p [[buffer(7)]], uint i [[thread_position_in_grid]]) {
+    uint count = p[0], instances = p[1], topology = p[3], rasterVertices = topology == 0 ? 1 : topology <= 2 ? 2 : 3;
+    if (p[10] == 0) {
+        // One atomic per SIMD-group: lanes beyond the count hold the neutral values.
+        uint index = i < count ? perVertexUniqueIndex(source, i, p[2]) : 0;
+        uint lo = simd_min(i < count ? index : 0xffffffffu), hi = simd_max(index);
+        if (simd_is_first()) {
+            atomic_fetch_min_explicit(reinterpret_cast<device atomic_uint*>(w), lo, memory_order_relaxed);
+            atomic_fetch_max_explicit(reinterpret_cast<device atomic_uint*>(w + 1), hi, memory_order_relaxed);
+        }
+        return;
+    }
+    if (p[10] == 1) {
+        if (i) { return; }
+        // count >= 1, so max >= min.
+        ulong range = ulong(w[1]) - w[0] + 1;
+        bool unique = p[9] && range <= count;
+        uint stride = unique ? uint(range) : count;
+        w[4] = uint((ulong(stride) + p[8] - 1) / p[8]); w[5] = instances; w[6] = 1;
+        w[8] = p[6]; w[9] = p[7]; w[10] = 0; w[11] = stride; w[12] = instances; w[13] = 1;
+        w[15] = stride; w[16] = unique ? w[0] : 0; w[17] = unique;
+        perVertexUniqueAdd(stats, ulong(count) * instances);
+        perVertexUniqueAdd(stats + 2, range * instances);
+        perVertexUniqueAdd(stats + 4, ulong(stride) * instances);
+        perVertexUniqueAdd(stats + 6, unique ? 1 : 0);
+        perVertexUniqueAdd(stats + 8, p[9] && !unique ? 1 : 0);
+        return;
+    }
+    uint stride = w[15], base = w[16];
+    bool unique = w[17];
+    if (p[10] == 2) {
+        if (i >= count) { return; }
+        if (unique) {
+            if (i < stride) { synthetic[i] = base + i; }
+        } else {
+            synthetic[i] = perVertexUniqueIndex(source, i, p[2]);
+        }
+        return;
+    }
+    uint primitives = perVertexRestartPrimitiveCount(count, topology);
+    if (!primitives || i >= primitives * instances) { return; }
+    uint instance = i / primitives, primitive = i % primitives;
+    uint v[3] = {primitive * 3, primitive * 3 + 1, primitive * 3 + 2};
+    if (topology == 0) {
+        v[0] = v[1] = v[2] = primitive;
+    } else if (rasterVertices == 2) {
+        v[0] = topology == 1 ? primitive * 2 : primitive;
+        v[1] = v[2] = v[0] + 1;
+    } else if (topology == 4) {
+        v[0] = primitive; v[1] = primitive + 1; v[2] = primitive + 2;
+        if (primitive & 1) {
+            uint x = p[4] ? 0 : 1, tmp = v[x];
+            v[x] = v[x + 1]; v[x + 1] = tmp;
+        }
+    } else if (topology == 5) {
+        v[0] = p[4] ? 0 : primitive + 1;
+        v[1] = p[4] ? primitive + 1 : primitive + 2;
+        v[2] = p[4] ? primitive + 2 : 0;
+    }
+    for (uint corner = 0; corner < 3; ++corner) {
+        uint record = instance * stride + (unique ? perVertexUniqueIndex(source, v[corner], p[2]) - base : v[corner]);
+        triplets[3 * i + corner] = record;
+        if (corner >= rasterVertices) { continue; }
+        uint occurrence = i * rasterVertices + corner;
+        pairs[2 * occurrence] = record;
+        pairs[2 * occurrence + 1] = i;
+        if (p[5]) { corners[occurrence] = corner; }
+    }
+}
 )";

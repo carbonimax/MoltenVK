@@ -200,17 +200,25 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	id<MTLComputePipelineState> restartState = nil;
 	id<MTLBuffer> indexBuffer = indexBinding ? indexBinding->mtlBuffer : nil;
 	VkDeviceSize indexOffset = 0;
+	// A231: the prepass and the subpass take the same decision. Restart indices are neither measured nor captured once per
+	// vertex: their sentinel is not a vertex. UNIQUE captures uint32 synthetic indices, without widening uint8 ones.
+	bool unique = indexBinding && !restart && mvkPerVertexCaptureUnique();
+	bool measure = indexBinding && !restart && (unique || mvkPerVertexCaptureStats());
+	id<MTLComputePipelineState> uniqueState = measure ? scratch->uniquePipeline : nil;
+	id<MTLBuffer> captureStats = measure ? mvkPerVertexCaptureStatsBuffer(cmdEncoder->getDevice()) : nil;
 	if (indexBinding) {
 		uint32_t indexSize = mvkPerVertexIndexSize(indexBinding->vkIndexType);
 		if (!indexSize) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "indexed capture requires uint8, uint16 or uint32 indices."); return; }
 		if (!indexBuffer || !mvkPerVertexIndexRange(vertexCount, firstIndex, indexBinding->vkIndexType, indexBinding->size, indexBinding->offset, indexBuffer.length)) { reject(VK_ERROR_UNKNOWN, "indexed capture exceeds the bound index buffer range."); return; }
 		indexOffset = indexBinding->offset + uint64_t(firstIndex) * indexSize;
-		captureState = pipeline->getPerVertexIndexedCapturePipelineState(restart || indexSize == 4, viewCount);
+		captureState = pipeline->getPerVertexIndexedCapturePipelineState(restart || unique || indexSize == 4, viewCount);
+		if (measure && (!uniqueState || !uniqueState.threadExecutionWidth || !uniqueState.maxTotalThreadsPerThreadgroup || !captureStats)) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "unique capture pipeline or statistics buffer is unavailable."); return; }
+		if (unique && (!scratch->buffers[5] || scratch->buffers[5].length < uint64_t(vertexCount) * sizeof(uint32_t))) { reject(VK_ERROR_OUT_OF_DEVICE_MEMORY, "unique capture index scratch is unavailable."); return; }
 		if (restart) {
 			if (!scratch->buffers[5] || scratch->buffers[5].length < mvkPerVertexRestartIndexScratchSize(vertexCount) || !scratch->buffers[6] || scratch->buffers[6].length < 68 * sizeof(uint32_t)) { reject(VK_ERROR_OUT_OF_DEVICE_MEMORY, "restart assembly scratch is unavailable."); return; }
 			restartState = scratch->indexPipeline;
 			if (!restartState || !restartState.threadExecutionWidth || !restartState.maxTotalThreadsPerThreadgroup) { reject(VK_ERROR_FEATURE_NOT_PRESENT, "restart assembly pipeline is unavailable."); return; }
-		} else if (indexSize == 1) {
+		} else if (indexSize == 1 && !unique) {
 			if (!scratch->buffers[5] || scratch->buffers[5].length < uint64_t(vertexCount) * sizeof(uint16_t)) { reject(VK_ERROR_OUT_OF_DEVICE_MEMORY, "widened index scratch is unavailable."); return; }
 			// Restart is disabled: 255 is a vertex index, not a sentinel. Read on GPU.
 			widenState = scratch->widenUint8Pipeline ?: scratch->indexPipeline;
@@ -235,6 +243,9 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	id<MTLBuffer> captureParams = scratch->buffers[1];
 	id<MTLBuffer> occurrences = scratch->buffers[2];
 	id<MTLBuffer> primitiveIndices = scratch->buffers[3];
+	// A231: UNIQUE builds the replay tables of this draw on the GPU, in its own scratch.
+	uint64_t occurrenceCount = primitiveCount * replayVertices;
+	if (unique && (occurrences.length < occurrenceCount * 2 * sizeof(uint32_t) || primitiveIndices.length < primitiveCount * 3 * sizeof(uint32_t) || (scratch->buffers[4] && scratch->buffers[4].length < occurrenceCount * sizeof(uint32_t)))) { reject(VK_ERROR_OUT_OF_DEVICE_MEMORY, "replay table scratch is too small."); return; }
 	*(uint32_t*)captureParams.contents = vertexCount;
 	cmdEncoder->_isIndexedDraw = indexBinding != nullptr;
 	if (indexBinding && !prepassed) {
@@ -246,6 +257,47 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 		if (!pipeline->hasValidMTLPipelineStates()) { return; }
 		id<MTLComputeCommandEncoder> captureEncoder = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseTessellationVertexTessCtl);
 		auto& computeState = cmdEncoder->getMtlCompute();
+		NSUInteger captureWidth = std::min(captureState.threadExecutionWidth, captureState.maxTotalThreadsPerThreadgroup);
+		const MVKMTLBufferAllocation* uniquePlan = nullptr;
+		if (mvkPerVertexCaptureStats() || mvkPerVertexCaptureUnique()) { (measure ? mvkPerVertexCaptureMeasured : mvkPerVertexCaptureExcluded)++; }
+		if (measure) {
+			// A231: perVertexUnique reduces min/max and plans the capture; UNIQUE also writes the synthetic capture indices
+			// and the replay tables (mvkPlanPerVertexUnique, MVKPerVertexReplay.h).
+			uniquePlan = cmdEncoder->getTempMTLBuffer(18 * sizeof(uint32_t));
+			auto* w = (uint32_t*)uniquePlan->getContents();
+			memset(w, 0, 18 * sizeof(uint32_t));
+			w[0] = UINT32_MAX;
+			uint32_t params[] = {vertexCount, instanceCount, mvkPerVertexIndexSize(indexBinding->vkIndexType), uint32_t(topology), uint32_t(provokingLast), uint32_t(scratch->buffers[4] != nil), uint32_t(baseVertex), firstInstance, uint32_t(captureWidth), uint32_t(unique), 0};
+			NSUInteger width = std::min(uniqueState.threadExecutionWidth, uniqueState.maxTotalThreadsPerThreadgroup);
+			computeState.bindPipeline(captureEncoder, uniqueState);
+			computeState.bindBuffer(captureEncoder, indexBuffer, indexOffset, 0);
+			computeState.bindBuffer(captureEncoder, uniquePlan->_mtlBuffer, uniquePlan->_offset, 1);
+			computeState.bindBuffer(captureEncoder, unique ? scratch->buffers[5] : uniquePlan->_mtlBuffer, unique ? 0 : uniquePlan->_offset, 2);
+			computeState.bindBuffer(captureEncoder, occurrences ?: uniquePlan->_mtlBuffer, 0, 3);
+			computeState.bindBuffer(captureEncoder, primitiveIndices ?: uniquePlan->_mtlBuffer, 0, 4);
+			computeState.bindBuffer(captureEncoder, scratch->buffers[4] ?: uniquePlan->_mtlBuffer, 0, 5);
+			computeState.bindBuffer(captureEncoder, captureStats, 0, 6);
+			auto dispatch = [&](uint32_t phase, uint64_t threads) {
+				params[10] = phase;
+				computeState.bindBytes(captureEncoder, params, sizeof(params), 7);
+				[captureEncoder dispatchThreadgroups: MTLSizeMake((threads + width - 1) / width, 1, 1) threadsPerThreadgroup: MTLSizeMake(width, 1, 1)];
+			};
+			dispatch(0, vertexCount);
+			[captureEncoder memoryBarrierWithScope: MTLBarrierScopeBuffers];
+			dispatch(1, 1);
+			[captureEncoder memoryBarrierWithScope: MTLBarrierScopeBuffers];
+			if (unique) {
+				dispatch(2, vertexCount);
+				if (primitiveCount) { dispatch(3, primitiveCount); }
+				[captureEncoder memoryBarrierWithScope: MTLBarrierScopeBuffers];
+				indexBuffer = scratch->buffers[5];
+				indexOffset = 0;
+			}
+			// Restore application resources after the helper occupied slots 0..7.
+			computeState._exists.descriptorSetData.reset();
+			cmdEncoder->finalizeDrawState(kMVKGraphicsStageVertex);
+			computeState.bindPipeline(captureEncoder, captureState);
+		}
 		if (restartState) {
 			computeState.bindPipeline(captureEncoder, restartState);
 			computeState.bindBuffer(captureEncoder, indexBuffer, indexOffset, 0);
@@ -296,12 +348,16 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 		// Preserve the signed base vertex as the uint32 bit pattern used by SPIR-V.
 		[captureEncoder setStageInRegion: MTLRegionMake2D(uint32_t(baseVertex), firstInstance, vertexCount, instanceCount)];
 		cmdEncoder->getState().offsetZeroDivisorVertexBuffers(*cmdEncoder, kMVKGraphicsStageVertex, pipeline, firstInstance);
-		NSUInteger width = std::min(captureState.threadExecutionWidth, captureState.maxTotalThreadsPerThreadgroup);
 		if (restart) {
 			// Only compact occurrences execute; grid_size (capture stride) remains the original stage-in region.
 			[captureEncoder dispatchThreadgroupsWithIndirectBuffer: scratch->buffers[6] indirectBufferOffset: 0 threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
+		} else if (unique) {
+			// A231: the stage-in region (baseVertex, firstInstance; stride, instances) sets grid_size, the capture stride; the
+			// capture guard stops the threads of the last threadgroup beyond it, as for indirect draws.
+			[captureEncoder setStageInRegionWithIndirectBuffer: uniquePlan->_mtlBuffer indirectBufferOffset: uniquePlan->_offset + 8 * sizeof(uint32_t)];
+			[captureEncoder dispatchThreadgroupsWithIndirectBuffer: uniquePlan->_mtlBuffer indirectBufferOffset: uniquePlan->_offset + 4 * sizeof(uint32_t) threadsPerThreadgroup: MTLSizeMake(captureWidth, 1, 1)];
 		} else if (cmdEncoder->getMetalFeatures().nonUniformThreadgroups) {
-			[captureEncoder dispatchThreads: MTLSizeMake(vertexCount, instanceCount, 1) threadsPerThreadgroup: MTLSizeMake(width, 1, 1)];
+			[captureEncoder dispatchThreads: MTLSizeMake(vertexCount, instanceCount, 1) threadsPerThreadgroup: MTLSizeMake(captureWidth, 1, 1)];
 		} else {
 			[captureEncoder dispatchThreadgroups: MTLSizeMake(vertexCount, instanceCount, 1) threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
 		}
@@ -343,14 +399,13 @@ static void encodePerVertexInput(MVKCommandEncoder* cmdEncoder, MVKGraphicsPipel
 	}
 	id<MTLBuffer> corners = scratch->buffers[4];
 	MVKPerVertexReplayTables shared;
-	if (mvkPerVertexReplayIsSizeIndependent(restart, topology, vertexCount, instanceCount)) { shared = cmdEncoder->getCommandEncodingPool()->getPerVertexReplayTables(topology, provokingLast, vertexCount * instanceCount); }
+	if (!unique && mvkPerVertexReplayIsSizeIndependent(restart, topology, vertexCount, instanceCount)) { shared = cmdEncoder->getCommandEncodingPool()->getPerVertexReplayTables(topology, provokingLast, vertexCount * instanceCount); }
 	if (shared.pairs) {
 		// This draw's tables are a prefix of the shared ones: no per-draw CPU population.
 		occurrences = shared.pairs;
 		primitiveIndices = shared.indices;
 		if (corners) { corners = shared.corners; }
-	} else if (!restart) {
-		uint64_t occurrenceCount = primitiveCount * replayVertices;
+	} else if (!restart && !unique) {
 		if (occurrences.length < occurrenceCount * 2 * sizeof(uint32_t) || primitiveIndices.length < primitiveCount * 3 * sizeof(uint32_t) || (corners && corners.length < occurrenceCount * sizeof(uint32_t))) { reject(VK_ERROR_OUT_OF_DEVICE_MEMORY, "replay table scratch is too small."); return; }
 		mvkPopulatePerVertexReplay(vertexCount, instanceCount, topology, provokingLast, (uint32_t*)occurrences.contents, (uint32_t*)primitiveIndices.contents, (uint32_t*)corners.contents);
 	}

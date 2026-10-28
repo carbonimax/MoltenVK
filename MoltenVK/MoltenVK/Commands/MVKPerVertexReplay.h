@@ -112,6 +112,24 @@ static inline void mvkPopulatePerVertexReplay(uint32_t vertexCount, uint32_t ins
 	}
 }
 
+// A231 (MVK_CONFIG_PERVERTEX_CAPTURE_UNIQUE=1): a direct indexed draw without primitive restart captures its index range
+// [min, max] once per instance instead of each index: stride = max - min + 1 records per instance, synthetic capture index
+// i = min + i, and the record of index position pos = instance * stride + index[pos] - min. Sparse indices (a range above
+// the index count) or the mode off keep the capture per index: stride = count, synthetic index i = index[i], record =
+// instance * stride + pos. The perVertexUnique kernel transcribes these three functions on the GPU, from min and max it
+// reduced there. Either way, the capture thread of a record reads the same index as the corner it replays.
+struct MVKPerVertexUniquePlan { uint32_t stride; uint32_t base; bool unique; };
+
+static inline MVKPerVertexUniquePlan mvkPlanPerVertexUnique(uint32_t count, uint32_t minIndex, uint32_t maxIndex, bool enabled) {
+	uint64_t range = uint64_t(maxIndex) - minIndex + 1;
+	bool unique = enabled && range <= count;
+	return {unique ? uint32_t(range) : count, unique ? minIndex : 0, unique};
+}
+
+static inline uint32_t mvkPerVertexUniqueSyntheticIndex(const MVKPerVertexUniquePlan& plan, uint32_t i, const uint32_t* indices) { return plan.unique ? plan.base + i : indices[i]; }
+
+static inline uint32_t mvkPerVertexUniqueRecord(const MVKPerVertexUniquePlan& plan, uint32_t instance, uint32_t pos, const uint32_t* indices) { return instance * plan.stride + (plan.unique ? indices[pos] - plan.base : pos); }
+
 // Without GPU restart assembly, the replay tables of a single-instance draw do not depend on its vertex count: the
 // tables populated for a larger count begin with those of every smaller count. Instanced list draws without dangling
 // vertices are the single-instance draw of vertexCount * instanceCount vertices. One table per topology and provoking

@@ -290,6 +290,15 @@ bool mvkPerVertexIndirectNoWait();
 /** MVK_CONFIG_MESH_INDIRECT_GPU=1 (A209): vkCmdDrawMeshTasksIndirectEXT with drawCount 1 (MVKCmdDrawMeshTasksIndirect). */
 bool mvkMeshIndirectGpu();
 
+/** MVK_CONFIG_PERVERTEX_CAPTURE_STATS=1 (A231): PERVERTEX stats measures the index range of direct indexed captures. */
+bool mvkPerVertexCaptureStats();
+
+/** MVK_CONFIG_PERVERTEX_CAPTURE_UNIQUE=1 (A231): direct indexed captures run once per vertex of their index range. */
+bool mvkPerVertexCaptureUnique();
+
+/** A231: GPU sums of the measured draws (perVertexUnique kernel), resident, process-wide; nil if it cannot be created. */
+id<MTLBuffer> mvkPerVertexCaptureStatsBuffer(MVKDevice* device);
+
 /**
  * MVKCommandEncoder uses a visitor design pattern iterate the commands in a MVKCommandBuffer,
  * tracking and caching dynamic encoding state, and encoding the commands onto Metal MTLCommandBuffers.

@@ -59,6 +59,37 @@ bool mvkMeshIndirectGpu() {
 	return isEnabled;
 }
 
+// MVK_CONFIG_PERVERTEX_CAPTURE_STATS=1, MVK_CONFIG_PERVERTEX_CAPTURE_UNIQUE=1 (A231): see mvkPlanPerVertexUnique (MVKPerVertexReplay.h).
+bool mvkPerVertexCaptureStats() {
+	static const bool isEnabled = mvkGetEnvVarNumber("MVK_CONFIG_PERVERTEX_CAPTURE_STATS", 0) == 1;
+	return isEnabled;
+}
+
+bool mvkPerVertexCaptureUnique() {
+	static const bool isEnabled = mvkGetEnvVarNumber("MVK_CONFIG_PERVERTEX_CAPTURE_UNIQUE", 0) == 1;
+	return isEnabled;
+}
+
+// ponytail: one buffer for the first device that asks, never released; per-device buffers if a process opens several.
+id<MTLBuffer> mvkPerVertexCaptureStatsBuffer(MVKDevice* device) {
+	static id<MTLBuffer> buffer = [device]() -> id<MTLBuffer> {
+		id<MTLBuffer> b = [device->getPhysicalDevice()->getMTLDevice() newBufferWithLength: 64 options: MTLResourceStorageModeShared];
+		if (!b || !b.contents) { [b release]; return nil; }
+		memset(b.contents, 0, b.length);
+		device->makeResident(b);
+		return b;
+	}();
+	return buffer;
+}
+
+// A 64-bit lo/hi sum the GPU is adding to: a carry not yet added reads as a smaller value, which the caller ignores.
+static uint64_t mvkPerVertexCaptureStat(id<MTLBuffer> buffer, uint32_t word) {
+	const volatile uint32_t* w = static_cast<const volatile uint32_t*>(buffer.contents);
+	uint32_t hi, lo;
+	do { hi = w[word + 1]; lo = w[word]; } while (hi != w[word + 1]);
+	return uint64_t(hi) << 32 | lo;
+}
+
 
 #pragma mark -
 #pragma mark MVKCommandEncodingContext
@@ -530,6 +561,10 @@ VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t in
 	// A dynamic topology may be any of its class, adjacency included, which capture and replay do not support.
 	if (!mvkPerVertexReplayVertexCount(topology)) { return reportError(VK_ERROR_FEATURE_NOT_PRESENT, "Portable PerVertexKHR draws do not support this primitive topology."); }
 	uint64_t indexScratchBytes = restart ? mvkPerVertexRestartIndexScratchSize(vertexCount) : indexed && _recordedIndexType == VK_INDEX_TYPE_UINT8 ? uint64_t(vertexCount) * sizeof(uint16_t) : 0;
+	// A231: restart may still be disabled at execution, so any indexed draw may be measured; UNIQUE captures uint32
+	// synthetic indices (restart already reserves more).
+	bool measure = indexed && (mvkPerVertexCaptureStats() || mvkPerVertexCaptureUnique());
+	if (indexed && mvkPerVertexCaptureUnique()) { indexScratchBytes = std::max<uint64_t>(indexScratchBytes, uint64_t(vertexCount) * sizeof(uint32_t)); }
 	if (indexScratchBytes > getMetalFeatures().maxMTLBufferSize) { return reportError(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Portable PerVertexKHR index scratch buffer exceeds Metal limits."); }
 	uint32_t viewMask = getViewMask();
 	uint32_t passCount = std::max(getDevice()->getMultiviewMetalPassCount(viewMask), 1u);
@@ -544,6 +579,7 @@ VkResult MVKCommandBuffer::recordPerVertexDraw(uint32_t vertexCount, uint32_t in
 		uint64_t primitiveCount = uint64_t(mvkPerVertexPrimitiveCount(vertexCount, topology)) * expandedInstances;
 		uint64_t occurrences = primitiveCount * mvkPerVertexReplayVertexCount(topology);
 		requests[pass] = {NSUInteger(uint64_t(vertexCount) * expandedInstances * _recordedPerVertexPipeline->getPerVertexCapturedLayout().stride), NSUInteger(occurrences * 2 * sizeof(uint32_t)), NSUInteger(primitiveCount * 3 * sizeof(uint32_t)), _recordedPerVertexPipeline->usesPortableBarycentrics() ? NSUInteger(occurrences * sizeof(uint32_t)) : 0, NSUInteger(indexScratchBytes), restart, dynamicRestart && _recordedIndexType == VK_INDEX_TYPE_UINT8};
+		requests[pass].measure = measure;
 	}
 	size_t firstRequest = _perVertexScratchRequests.size();
 	try {
@@ -682,6 +718,13 @@ VkResult MVKCommandBuffer::reservePerVertexScratch(const std::vector<MVKPerVerte
 			if (!state || !state.maxTotalThreadsPerThreadgroup || !state.threadExecutionWidth) { return reportError(VK_ERROR_INITIALIZATION_FAILED, "PerVertex TES topology pipeline is unavailable or has invalid dispatch limits."); }
 			pending[i]->tessTopologyPipeline = [state retain];
 			continue;
+		}
+		if (requests[i].measure) {
+			id<MTLComputePipelineState> state = pool->getPerVertexUniqueMTLComputePipelineState();
+			VkResult result = _device->getConfigurationResult();
+			if (result != VK_SUCCESS) { return result; }
+			if (!state || !state.maxTotalThreadsPerThreadgroup || !state.threadExecutionWidth) { return reportError(VK_ERROR_INITIALIZATION_FAILED, "Portable PerVertexKHR unique capture pipeline is unavailable or has invalid dispatch limits."); }
+			pending[i]->uniquePipeline = [state retain];
 		}
 		if (!requests[i].indexSize) { continue; }
 		// Secondary requests are flattened into the primary. Prepare in its pool
@@ -1240,7 +1283,16 @@ void MVKCommandEncoder::beginMetalRenderPass(MVKCommandUse cmdUse) {
 		if (!start) {
 			statsStart.compare_exchange_strong(start, now);
 		} else if (seconds >= 1.0 && statsStart.compare_exchange_strong(start, now)) {
-			MVKLogInfo("PERVERTEX stats prepass=%d seconds=%.3f render_encoders/s=%.1f restarts/s=%.1f prepass_windows/s=%.1f prepass_captures/s=%.1f batch_residency=%d scratch_pool=%d residency_commits/s=%.1f scratch_allocs/s=%.1f pool_reuses/s=%.1f indirect_gpu=%d indirect_nowait/s=%.1f indirect_waits/s=%.1f indirect_dropped/s=%.1f indirect_hint=%llu mesh_indirect_gpu=%d mesh_indirect/s=%.1f mesh_indirect_native/s=%.1f mesh_indirect_dropped/s=%.1f", mvkPerVertexPrepassMode(), seconds, mvkPerVertexRenderEncoders.exchange(0) / seconds, mvkPerVertexRestarts.exchange(0) / seconds, mvkPerVertexPrepassWindows.exchange(0) / seconds, mvkPerVertexPrepassCaptures.exchange(0) / seconds, int(mvkPerVertexBatchResidency()), int(getDevice()->getPerVertexScratchPool() != nullptr), mvkResidencyCommits.exchange(0) / seconds, mvkPerVertexScratchAllocations.exchange(0) / seconds, mvkPerVertexScratchPoolReuses.exchange(0) / seconds, int(mvkPerVertexIndirectNoWait()), mvkPerVertexIndirectNoWaitDraws.exchange(0) / seconds, mvkPerVertexIndirectWaits.exchange(0) / seconds, mvkPerVertexIndirectDropped.exchange(0) / seconds, (unsigned long long)mvkPerVertexIndirectRecordHint.load(), int(mvkMeshIndirectGpu()), mvkMeshIndirectDraws.exchange(0) / seconds, mvkMeshIndirectNative.exchange(0) / seconds, mvkMeshIndirectDropped.exchange(0) / seconds);
+			// A231: GPU sums of the measured draws, read without waiting, behind the frames in flight; their rates sum to the totals.
+			static uint64_t last[5] = {};
+			double rates[5] = {};
+			if (id<MTLBuffer> sums = mvkPerVertexCaptureStats() || mvkPerVertexCaptureUnique() ? mvkPerVertexCaptureStatsBuffer(getDevice()) : nil) {
+				for (uint32_t i = 0; i < 5; ++i) {
+					uint64_t value = mvkPerVertexCaptureStat(sums, 2 * i);
+					if (value > last[i]) { rates[i] = (value - last[i]) / seconds; last[i] = value; }
+				}
+			}
+			MVKLogInfo("PERVERTEX stats prepass=%d seconds=%.3f render_encoders/s=%.1f restarts/s=%.1f prepass_windows/s=%.1f prepass_captures/s=%.1f batch_residency=%d scratch_pool=%d residency_commits/s=%.1f scratch_allocs/s=%.1f pool_reuses/s=%.1f indirect_gpu=%d indirect_nowait/s=%.1f indirect_waits/s=%.1f indirect_dropped/s=%.1f indirect_hint=%llu mesh_indirect_gpu=%d mesh_indirect/s=%.1f mesh_indirect_native/s=%.1f mesh_indirect_dropped/s=%.1f capture_stats=%d capture_unique=%d capture_measured/s=%.1f capture_excluded/s=%.1f capture_indices/s=%.1f capture_range/s=%.1f capture_grid/s=%.1f capture_unique_draws/s=%.1f capture_sparse_draws/s=%.1f", mvkPerVertexPrepassMode(), seconds, mvkPerVertexRenderEncoders.exchange(0) / seconds, mvkPerVertexRestarts.exchange(0) / seconds, mvkPerVertexPrepassWindows.exchange(0) / seconds, mvkPerVertexPrepassCaptures.exchange(0) / seconds, int(mvkPerVertexBatchResidency()), int(getDevice()->getPerVertexScratchPool() != nullptr), mvkResidencyCommits.exchange(0) / seconds, mvkPerVertexScratchAllocations.exchange(0) / seconds, mvkPerVertexScratchPoolReuses.exchange(0) / seconds, int(mvkPerVertexIndirectNoWait()), mvkPerVertexIndirectNoWaitDraws.exchange(0) / seconds, mvkPerVertexIndirectWaits.exchange(0) / seconds, mvkPerVertexIndirectDropped.exchange(0) / seconds, (unsigned long long)mvkPerVertexIndirectRecordHint.load(), int(mvkMeshIndirectGpu()), mvkMeshIndirectDraws.exchange(0) / seconds, mvkMeshIndirectNative.exchange(0) / seconds, mvkMeshIndirectDropped.exchange(0) / seconds, int(mvkPerVertexCaptureStats()), int(mvkPerVertexCaptureUnique()), mvkPerVertexCaptureMeasured.exchange(0) / seconds, mvkPerVertexCaptureExcluded.exchange(0) / seconds, rates[0], rates[1], rates[2], rates[3], rates[4]);
 		}
 	}
     MTLRenderPassDescriptor* mtlRPDesc = [MTLRenderPassDescriptor renderPassDescriptor];

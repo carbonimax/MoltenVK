@@ -389,6 +389,8 @@ public:
 	id<MTLComputePipelineState> newPerVertexIndirectMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
 	/** Returns a new MTLComputePipelineState converting an emulated indirect mesh draw (A209). */
 	id<MTLComputePipelineState> newMeshIndirectMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
+	/** Returns a new MTLComputePipelineState measuring or capturing once per vertex a PerVertexKHR indexed draw (A231). */
+	id<MTLComputePipelineState> newPerVertexUniqueMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
 	/** Returns a new MTLComputePipelineState generating portable PerVertexKHR tessellation topology. */
 	id<MTLComputePipelineState> newPerVertexTessTopologyMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
 

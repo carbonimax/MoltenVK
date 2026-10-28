@@ -27,6 +27,8 @@ struct MVKPerVertexScratchRequest {
 	NSUInteger snapshotSize = 0;
 	// TES invocation ABI, VS output, TCS vertex and patch output, float32 levels, topology plan.
 	NSUInteger tessSizes[6] = {};
+	// A231: an indexed draw that MVK_CONFIG_PERVERTEX_CAPTURE_STATS=1 or _UNIQUE=1 may measure; reserves perVertexUnique.
+	bool measure = false;
 };
 
 // Read only after successful GPU phase-0 completion. The snapshot holds the Vulkan command each draw froze: four words,
@@ -120,6 +122,10 @@ static inline uint32_t mvkMeshIndirectWorkgroups(uint32_t x, uint32_t y, uint32_
 // PERVERTEX stats counters (A209): indirect mesh draws encoded, those on a native Metal mesh pipeline, and those not drawn.
 inline std::atomic<uint64_t> mvkMeshIndirectDraws{0}, mvkMeshIndirectNative{0}, mvkMeshIndirectDropped{0};
 
+// PERVERTEX stats counters (A231): direct indexed captures measured by perVertexUnique, and those left out (primitive
+// restart). The GPU sums of the measured draws are in mvkPerVertexCaptureStatsBuffer (MVKCommandBuffer.mm).
+inline std::atomic<uint64_t> mvkPerVertexCaptureMeasured{0}, mvkPerVertexCaptureExcluded{0};
+
 static inline void mvkPerVertexIndirectLearn(uint64_t records) {
 	uint64_t hint = mvkPerVertexIndirectRecordHint.load(std::memory_order_relaxed);
 	while (records > hint && !mvkPerVertexIndirectRecordHint.compare_exchange_weak(hint, records, std::memory_order_relaxed)) {}
@@ -210,6 +216,7 @@ struct MVKPerVertexScratch {
 	id<MTLComputePipelineState> indirectPipeline = nil;
 	uint32_t indirectCapacity = 0;
 	id<MTLComputePipelineState> tessTopologyPipeline = nil;
+	id<MTLComputePipelineState> uniquePipeline = nil;
 	// Direct draws with MVK_CONFIG_PERVERTEX_SCRATCH_POOL=1: the pool of the replay buffers, and their size classes.
 	std::shared_ptr<MVKPerVertexScratchPool> pool;
 	uint8_t poolSizeClasses[14] = {};
@@ -220,7 +227,7 @@ struct MVKPerVertexScratch {
 		for (size_t i = 0; i < std::size(buffers); ++i) {
 			if (poolSizeClasses[i]) { pool->give(buffers[i], isSharedReplayBuffer(i), poolSizeClasses[i]); } else { [buffers[i] release]; }
 		}
-		[indexPipeline release]; [widenUint8Pipeline release]; [indirectPipeline release]; [tessTopologyPipeline release];
+		[indexPipeline release]; [widenUint8Pipeline release]; [indirectPipeline release]; [tessTopologyPipeline release]; [uniquePipeline release];
 	}
 
 	static bool isSharedReplayBuffer(size_t i) { return (i > 0 && i < 5) || i == 7; }
