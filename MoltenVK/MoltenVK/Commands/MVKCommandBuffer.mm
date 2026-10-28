@@ -360,8 +360,6 @@ void MVKCommandBuffer::checkDeferredEncoding() {
 	if ( !_prefilledMTLCmdBuffer ) { return; }
 
 	if (getMVKConfig().prefillMetalCommandBuffers == MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS_STYLE_DEFERRED_ENCODING) {
-		// An indirect PerVertexKHR draw waits for its GPU plan while encoding, which needs its queue submission.
-		// Nothing is encoded yet: release the empty prefilled Metal command buffer and encode at submission.
 		// An indirect PerVertexKHR draw or a PerVertex TES draw waits for its GPU plan or topology while encoding,
 		// which needs its queue submission. Nothing is encoded yet: release the empty prefilled Metal command buffer
 		// and encode at submission.
