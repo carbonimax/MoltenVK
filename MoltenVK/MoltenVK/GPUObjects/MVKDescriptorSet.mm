@@ -960,6 +960,7 @@ static constexpr size_t descriptorGPUStride(MVKArgumentBufferMode argBufMode, MV
 		case MVKArgumentBufferMode::Off:        assert(0); return 0;
 		case MVKArgumentBufferMode::ArgEncoder: return descriptorGPUBindingStride(layout);
 		case MVKArgumentBufferMode::Metal3:     return descriptorGPUStrideMetal3(layout);
+		default: assert(0); return 0;
 	}
 }
 

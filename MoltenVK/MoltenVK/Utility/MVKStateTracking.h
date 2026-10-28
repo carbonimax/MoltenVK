@@ -107,7 +107,9 @@ struct alignas(uint64_t) MVKMTLDepthStencilDescriptorData {
 	bool operator!=(const MVKMTLDepthStencilDescriptorData& rhs) const { return !(*this == rhs); }
 
 	std::size_t hash() const {
-		return mvkHash((uint64_t*)this, sizeof(*this) / sizeof(uint64_t));
+		uint64_t words[sizeof(*this) / sizeof(uint64_t)];
+		memcpy(words, this, sizeof(words));
+		return mvkHash(words, std::size(words));
 	}
 
 	constexpr void disableDepth() {

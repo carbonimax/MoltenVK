@@ -290,7 +290,7 @@ public:
 	constexpr bool operator==(const MVKLargeStaticBitSet& other) const {
 		bool eq = true;
 		for (uint32_t i = 0; i < ArrayLen; i++)
-			eq |= bits[i] == other.bits[i];
+			eq &= bits[i] == other.bits[i];
 		return eq;
 	}
 	/** Returns the intersection of this and another set. */

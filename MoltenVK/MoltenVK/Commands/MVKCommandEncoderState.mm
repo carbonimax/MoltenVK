@@ -316,6 +316,7 @@ static uint32_t getCPUMetaOffset(MVKDescriptorCPULayout layout) {
 		case MVKDescriptorCPULayout::OneID:
 		case MVKDescriptorCPULayout::InlineData:
 			return 0;
+		default: assert(0); return 0;
 	}
 }
 

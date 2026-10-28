@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include <cstring>
 #include <new>
 #include <type_traits>
 
@@ -70,7 +71,7 @@ private:
 
   void set_num_elements_reserved( const size_t num_elements_reserved )
   {
-    *reinterpret_cast<size_t*>( &elements_stack[0] ) = num_elements_reserved;
+    memcpy( &elements_stack[0], &num_elements_reserved, sizeof( size_t ) );
   }
 
 public:
@@ -193,7 +194,10 @@ public:
 
   size_t get_capacity() const
   {
-    return get_data_on_stack() ? N : *reinterpret_cast<const size_t*>( &elements_stack[0] );
+    if( get_data_on_stack() ) return N;
+    size_t capacity;
+    memcpy( &capacity, &elements_stack[0], sizeof( size_t ) );
+    return capacity;
   }
 
   constexpr T *get_default_ptr() const

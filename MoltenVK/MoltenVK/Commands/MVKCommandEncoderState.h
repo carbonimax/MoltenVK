@@ -79,7 +79,7 @@ struct MVKResourceBinder {
 		Compute  = static_cast<uint32_t>(MVKMetalGraphicsStage::Count),
 		Count
 	};
-	static const MVKResourceBinder& Get(Stage stage) GCC_CONST;
+	static const MVKResourceBinder& Get(Stage stage);
 	static const MVKResourceBinder& Get(MVKMetalGraphicsStage stage) { return Get(static_cast<Stage>(stage)); }
 	static const MVKResourceBinder& Vertex()   { return Get(Stage::Vertex); }
 	static const MVKResourceBinder& Fragment() { return Get(Stage::Fragment); }
@@ -112,7 +112,7 @@ struct MVKVertexBufferBinder {
 		Compute,
 		Count
 	};
-	static const MVKVertexBufferBinder& Get(Stage stage) GCC_CONST;
+	static const MVKVertexBufferBinder& Get(Stage stage);
 	static const MVKVertexBufferBinder& Vertex()  { return Get(Stage::Vertex); }
 	static const MVKVertexBufferBinder& Compute() { return Get(Stage::Compute); }
 };
@@ -180,7 +180,7 @@ struct MVKUseResourceHelper {
  */
 struct MVKVulkanCommonEncoderState {
 	MVKPipelineLayout* _layout = nullptr;
-	MVKDescriptorSet* _descriptorSets[kMVKMaxDescriptorSetCount];
+	MVKDescriptorSet* _descriptorSets[kMVKMaxDescriptorSetCount] = {};
 	MVKDescriptorSet _pushDescriptor = {};
 	MVKSmallVector<uint8_t, 16> _pushDescData;
 	void ensurePushDescriptorSize(uint32_t size);
@@ -454,7 +454,7 @@ class MVKCommandEncoderState {
 		Compute
 	};
 	/** The type of Metal encoder, if any, that is currently active. */
-	CommandEncoderClass _mtlActiveEncoder;
+	CommandEncoderClass _mtlActiveEncoder = CommandEncoderClass::None;
 
 	/** Get the encoder state associated with the given bind point, or nullptr if the bindPoint isn't supported. */
 	MVKVulkanCommonEncoderState* getVkEncoderState(VkPipelineBindPoint bindPoint);

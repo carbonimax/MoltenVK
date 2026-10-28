@@ -189,6 +189,7 @@ static constexpr uint32_t descriptorCPUSize(MVKDescriptorCPULayout layout) {
 		case MVKDescriptorCPULayout::OneID2Meta: return sizeof(MVKCPUDescriptorOneID2Meta);
 		case MVKDescriptorCPULayout::TwoID2Meta: return sizeof(MVKCPUDescriptorTwoID2Meta);
 		case MVKDescriptorCPULayout::InlineData: return 1;
+		default: assert(0); return 0;
 	}
 }
 

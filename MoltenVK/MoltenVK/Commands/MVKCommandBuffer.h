@@ -572,10 +572,10 @@ public:
     MTLSize _mtlThreadgroupSize;
 
 	/** Indicates whether the current render subpass is able to render to an array (layered) framebuffer. */
-	bool _canUseLayeredRendering;
+	bool _canUseLayeredRendering = false;
 
 	/** Indicates whether the current draw is an indexed draw. */
-	bool _isIndexedDraw;
+	bool _isIndexedDraw = false;
 
 	/** Consume a preflight reservation and retain its resources until Metal completes. */
 	MVKPerVertexScratch* nextPerVertexScratch();
@@ -625,8 +625,8 @@ protected:
 		uint32_t query = 0;
 	} GPUCounterQuery;
 
-	VkRect2D _renderArea;
-	MVKCommand* _lastMultiviewPassCmd;
+	VkRect2D _renderArea = {};
+	MVKCommand* _lastMultiviewPassCmd = nullptr;
 	size_t _firstSubpassPerVertexScratch = 0;
     MVKActivatedQueries* _pActivatedQueries;
 	MVKSmallVector<GPUCounterQuery, 16> _timestampStageCounterQueries;
@@ -647,8 +647,8 @@ protected:
 	std::shared_ptr<MVKPerVertexScratch> _lastPerVertexScratch;
 	MVKSmallVector<std::pair<MVKCommand*, const MVKMTLBufferAllocation*>, 8> _perVertexPrepassMesh;
 	size_t _perVertexPrepassMeshNext = 0;
-	bool _isRenderingEntireAttachment;
-	bool _hasMTLRenderEncoderVisibilityResultBuffer;
+	bool _isRenderingEntireAttachment = false;
+	bool _hasMTLRenderEncoderVisibilityResultBuffer = false;
 	bool _isEncodingStopped = false;
 };
 
