@@ -656,6 +656,8 @@ namespace mvk {
 				const auto* type = &reflect.get_type(reflect.get_type_from_variable(varID).parent_type);
 				bool patch = reflect.has_decoration(varID, spv::DecorationPatch);
 				bool perPrimitive = reflect.has_decoration(varID, spv::DecorationPerPrimitiveEXT);
+				// Mesh outputs are arrays over the emitted vertices or primitives; peel that array once, before the
+				// Block check, so that inner arrays still count as varying locations.
 				if (model == spv::ExecutionModelMeshEXT && storage == spv::StorageClassOutput && !type->array.empty()) {
 					type = &reflect.get_type(type->parent_type);
 				}
@@ -689,7 +691,7 @@ namespace mvk {
 				// Only some builtins will be arrayed here.
 				if (((model == spv::ExecutionModelTessellationControl || (model == spv::ExecutionModelTessellationEvaluation && storage == spv::StorageClassInput)) && !patch &&
 					(biType == spv::BuiltInMax || biType == spv::BuiltInPosition || biType == spv::BuiltInPointSize ||
-					 biType == spv::BuiltInClipDistance || biType == spv::BuiltInCullDistance)) || (meshOutput && !type->array.empty())) {
+					 biType == spv::BuiltInClipDistance || biType == spv::BuiltInCullDistance))) {
 					type = &reflect.get_type(type->parent_type);
 				}
 
