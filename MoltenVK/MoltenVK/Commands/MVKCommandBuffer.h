@@ -284,8 +284,11 @@ protected:
 /*** Holds a collection of active queries for each query pool. */
 typedef std::unordered_map<MVKQueryPool*, MVKSmallVector<uint32_t, kMVKDefaultQueryCount>> MVKActivatedQueries;
 
-/** 
- * MVKCommandEncoder uses a visitor design pattern iterate the commands in a MVKCommandBuffer, 
+/** MVK_CONFIG_PERVERTEX_INDIRECT_GPU=1 (A208): indirect PerVertex draws encoded without waiting for their GPU plan. */
+bool mvkPerVertexIndirectNoWait();
+
+/**
+ * MVKCommandEncoder uses a visitor design pattern iterate the commands in a MVKCommandBuffer,
  * tracking and caching dynamic encoding state, and encoding the commands onto Metal MTLCommandBuffers.
  *
  * Much of the dynamic cached encoding state has public access and is accessed directly

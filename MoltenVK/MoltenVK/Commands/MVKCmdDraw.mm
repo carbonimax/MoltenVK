@@ -1175,6 +1175,12 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 		uint32_t(cmdEncoder->getVkGraphics().getProvokingVertexMode()), uint32_t(corners), uint32_t(countBuffer != nil), 0, uint32_t(width), uint32_t(width), uint32_t(captureWidth), 0, uint32_t(restart), planScanSteps, snapshotWords};
 	auto& computeState = cmdEncoder->getMtlCompute();
 	auto& metalState = cmdEncoder->getMtlGraphics();
+	// A208 (MVK_CONFIG_PERVERTEX_INDIRECT_GPU=1): once a requirement is known, reserve the replay for a record capacity
+	// the plan enforces (params[5], phase-0 status bit 1) instead of waiting for the plan (mvkPerVertexIndirectRecordHint).
+	MVKPerVertexScratchRequest replayRequest{};
+	uint32_t noWaitCapacity = mvkPerVertexIndirectNoWait() && drawCount == 1 && !restart ? mvkPerVertexIndirectNoWaitCapacity(mvkPerVertexIndirectRecordHint.load()) : 0;
+	bool noWait = mvkSizePerVertexIndirectReplayBound(noWaitCapacity, pipeline->getPerVertexCapturedLayout().stride, topology, indexBinding != nullptr, corners, cmdEncoder->getMetalFeatures().maxMTLBufferSize, replayRequest);
+	if (noWait) { params[5] = noWaitCapacity; }
 
 	// Phase 0 freezes every draw of the command, then the GPU plan must complete before the replay can be sized.
 	cmdEncoder->encodeStoreActions(true);
@@ -1189,25 +1195,48 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	computeState.bindBuffer(planEncoder, snapshot, 0, 9);
 	[planEncoder dispatchThreadgroups: MTLSizeMake(mvkCeilingDivide<NSUInteger>(drawCount, width), 1, 1) threadsPerThreadgroup: MTLSizeMake(width, 1, 1)];
 	computeState._exists.descriptorSetData.reset();
-	if (!cmdEncoder->awaitEncodedWork()) {
-		if (!cmdEncoder->getDevice()->isLosing()) { lose("its GPU plan did not complete"); }
-		return;
-	}
-	MVKPerVertexScratchRequest replayRequest{};
 	NSUInteger gatheredOffset = 0;
 	uint32_t scanSteps = 0;
-	// Sized with the captured record stride, not the stride of the indirect arguments.
-	NSUInteger snapshotOffset = NSUInteger(snapshotWords) * sizeof(uint32_t);
-	if (!mvkSizePerVertexIndirectReplay(plan.contents, plan.length, static_cast<const uint8_t*>(snapshot.contents) + snapshotOffset, snapshot.length - snapshotOffset, drawCount, viewCount, pipeline->getPerVertexCapturedLayout().stride, topology, indexBinding != nullptr, restart, corners,
-										cmdEncoder->getMetalFeatures().maxMTLBufferSize, replayRequest, gatheredOffset, scanSteps)) {
-		uint32_t status = *(volatile const uint32_t*)plan.contents;
-		lose((status & 1) ? "a draw needs more records than uint32 record IDs can represent" : (status & 2) ? "a draw reads indices beyond the bound index buffer" : "its replay scratch would exceed Metal buffer limits");
-		return;
+	if (noWait) {
+		// Phase 1 reads the status and Count phase 0 writes, on the same compute encoder.
+		[planEncoder memoryBarrierWithScope: MTLBarrierScopeBuffers];
+		mvkPerVertexIndirectNoWaitDraws++;
+	} else {
+		if (!cmdEncoder->awaitEncodedWork()) {
+			if (!cmdEncoder->getDevice()->isLosing()) { lose("its GPU plan did not complete"); }
+			return;
+		}
+		mvkPerVertexIndirectWaits++;
+		// Sized with the captured record stride, not the stride of the indirect arguments.
+		NSUInteger snapshotOffset = NSUInteger(snapshotWords) * sizeof(uint32_t);
+		if (!mvkSizePerVertexIndirectReplay(plan.contents, plan.length, static_cast<const uint8_t*>(snapshot.contents) + snapshotOffset, snapshot.length - snapshotOffset, drawCount, viewCount, pipeline->getPerVertexCapturedLayout().stride, topology, indexBinding != nullptr, restart, corners,
+											cmdEncoder->getMetalFeatures().maxMTLBufferSize, replayRequest, gatheredOffset, scanSteps)) {
+			uint32_t status = *(volatile const uint32_t*)plan.contents;
+			lose((status & 1) ? "a draw needs more records than uint32 record IDs can represent" : (status & 2) ? "a draw reads indices beyond the bound index buffer" : "its replay scratch would exceed Metal buffer limits");
+			return;
+		}
+		// No draw records a vertex: Count zero, or zero vertices or instances in every draw.
+		if (!replayRequest.captureSize) { return; }
+		mvkPerVertexIndirectLearn(replayRequest.captureSize / pipeline->getPerVertexCapturedLayout().stride);
 	}
-	// No draw records a vertex: Count zero, or zero vertices or instances in every draw.
-	if (!replayRequest.captureSize) { return; }
 	if (!scratch->reserveReplay(cmdEncoder->getMTLDevice(), replayRequest)) { lose("its replay scratch could not be allocated"); return; }
 	cmdEncoder->keepPerVertexScratchResident();
+	if (noWait) {
+		// Once this Metal command buffer completed: the requirement phase 0 saturated raises the hint, and a nonzero status
+		// means the draw executed nothing (capacity exceeded, or indices beyond the bound index buffer).
+		id<MTLBuffer> planBuffer = plan;	// Retained by the handler block the device copies.
+		MVKDevice* device = cmdEncoder->getDevice();
+		cmdEncoder->getDevice()->addMTLCommandBufferHandler(cmdEncoder->_mtlCmdBuffer, ^(id<MTLCommandBuffer>) {
+			const volatile uint32_t* w = static_cast<const volatile uint32_t*>(planBuffer.contents);
+			uint64_t required = uint64_t(w[53]) | uint64_t(w[54]) << 32;
+			mvkPerVertexIndirectLearn(required);
+			if (uint32_t status = w[0]) {
+				static std::atomic<uint32_t> logged{0};
+				mvkPerVertexIndirectDropped++;
+				if (logged++ < 16) { device->reportMessage(MVK_CONFIG_LOG_LEVEL_WARNING, "Portable PerVertexKHR indirect draw not executed (status %u): it requires %llu records, %u were reserved.", status, (unsigned long long)required, noWaitCapacity); }
+			}
+		});
+	}
 	params[17] = scanSteps;
 
 	id<MTLBuffer> captured = scratch->buffers[0];
@@ -1218,7 +1247,8 @@ static void encodePerVertexIndirect(MVKCommandEncoder* cmdEncoder, MVKGraphicsPi
 	const auto& replay = pipeline->getPerVertexReplayBinding();
 	const auto& fragment = pipeline->getPerVertexInputBinding();
 	// Only the draws the GPU froze (Count, clamped to maxDrawCount): mvkSizePerVertexIndirectReplay checked the word.
-	uint32_t frozenDraws = std::min(((const uint32_t*)plan.contents)[56], drawCount);
+	// Without waiting, phase 1 disables the draws beyond the frozen Count itself.
+	uint32_t frozenDraws = noWait ? drawCount : std::min(((const uint32_t*)plan.contents)[56], drawCount);
 	for (uint32_t draw = 0; draw < frozenDraws; ++draw) {
 		params[11] = draw;
 		// Plan this draw, build its replay tables and gather its indices from the frozen arguments.

@@ -88,6 +88,41 @@ static inline bool mvkSizePerVertexIndirectReplay(const void* plan, NSUInteger p
 // PERVERTEX stats counters (A199): Metal buffers created for PerVertex scratch, and pool buffers reused.
 inline std::atomic<uint64_t> mvkPerVertexScratchAllocations{0}, mvkPerVertexScratchPoolReuses{0};
 
+// MVK_CONFIG_PERVERTEX_INDIRECT_GPU=1 (A208): a single non-restart indirect draw is encoded without waiting for its GPU
+// plan. Its replay scratch is reserved for a record capacity chosen on the CPU, which the plan enforces: phase 0 sets
+// status bit 1 when n x instances > capacity / views, and phase 1 then encodes no work for the draw. The capacity follows
+// the largest physical record requirement seen (mvkPerVertexIndirectRecordHint), from waited plans and from the saturated
+// requirement phase 0 writes at plan words 53-54. Until one is known, the draw waits as before.
+// ponytail: one process-wide hint; per-pipeline hints if one large indirect draw inflates the scratch of the others.
+inline std::atomic<uint64_t> mvkPerVertexIndirectRecordHint{0};
+// PERVERTEX stats counters (A208): indirect draws encoded without waiting, waited, and not executed (nonzero plan status).
+inline std::atomic<uint64_t> mvkPerVertexIndirectNoWaitDraws{0}, mvkPerVertexIndirectWaits{0}, mvkPerVertexIndirectDropped{0};
+
+static inline void mvkPerVertexIndirectLearn(uint64_t records) {
+	uint64_t hint = mvkPerVertexIndirectRecordHint.load(std::memory_order_relaxed);
+	while (records > hint && !mvkPerVertexIndirectRecordHint.compare_exchange_weak(hint, records, std::memory_order_relaxed)) {}
+}
+
+// Twice the hint, as a power of two of at least 4096 records, at most UINT32_MAX; 0 while no requirement is known.
+static inline uint32_t mvkPerVertexIndirectNoWaitCapacity(uint64_t hint) {
+	if (!hint) { return 0; }
+	uint64_t wanted = 2 * std::min<uint64_t>(hint, UINT32_MAX), capacity = 4096;
+	while (capacity < wanted) { capacity <<= 1; }
+	return uint32_t(std::min<uint64_t>(capacity, UINT32_MAX));
+}
+
+// Replay scratch for every draw the plan admits under `capacity` records: n x instances x views <= capacity, and for every
+// replay topology primitiveCount(n) x k <= primitiveCount(n x k) and n <= capacity. Sized as one draw of `capacity` vertices
+// and one instance. False (keep waiting) when a length exceeds the Metal limit or the topology has no replay.
+static inline bool mvkSizePerVertexIndirectReplayBound(uint32_t capacity, uint32_t stride, VkPrimitiveTopology topology, bool indexed, bool corners, uint64_t maxMTLBufferSize, MVKPerVertexScratchRequest& request) {
+	uint32_t plan[57] = {};
+	plan[55] = 1; plan[56] = 1;
+	uint32_t snapshot[5] = {capacity, 1};
+	NSUInteger gatheredOffset = 0;
+	uint32_t scanSteps = 0;
+	return capacity && mvkSizePerVertexIndirectReplay(plan, sizeof(plan), snapshot, sizeof(snapshot), 1, 1, stride, topology, indexed, false, corners, maxMTLBufferSize, request, gatheredOffset, scanSteps);
+}
+
 static inline id<MTLBuffer> mvkNewPerVertexScratchBuffer(id<MTLDevice> device, NSUInteger length, bool shared) {
 	mvkPerVertexScratchAllocations++;
 	return [device newBufferWithLength:length options:shared ? MTLResourceStorageModeShared : MTLResourceStorageModePrivate];

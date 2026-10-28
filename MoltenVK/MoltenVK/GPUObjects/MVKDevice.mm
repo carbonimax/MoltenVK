@@ -4154,6 +4154,10 @@ void MVKDevice::addMTLCommandBufferResidency(id<MTLCommandBuffer> mtlCmdBuff, id
 	if ( !mtlCmdBuff ) { return; }
 	MVKMTLCommandBufferHandlers* handlers = mvkGetMTLCommandBufferHandlers(mtlCmdBuff);
 	if ( !handlers->_resident ) { handlers->_resident = [NSMutableArray new]; }		// retained
+	// A208: an indirect draw encoded without waiting keeps its plan resident twice on one command buffer; the removal
+	// at completion must not remove a buffer that is no longer in the set (not documented by MTLResidencySet.h).
+	// ponytail: linear scan; the list holds only scratch outside the pool (indirect and TES draws).
+	if ([handlers->_resident containsObject: allocation]) { return; }
 	[handlers->_resident addObject: allocation];
 }
 
