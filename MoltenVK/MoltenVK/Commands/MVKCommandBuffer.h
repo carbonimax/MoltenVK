@@ -583,6 +583,19 @@ public:
 	/** Keeps every buffer of the last reservation, including ones added since, resident and alive for the current Metal command buffer. */
 	void keepPerVertexScratchResident();
 
+	/** True while the PerVertex prepass encodes the captures of a subpass, before its render encoder opens. */
+	bool _isPerVertexPrepassing = false;
+
+	/** The PerVertex scratch slots below this index were captured by the prepass of the current subpass. */
+	size_t _perVertexPrepassEnd = 0;
+
+	/** Records a mesh capture of the prepass, then returns its output buffer when the subpass encodes that draw, or null. */
+	void addPerVertexPrepassMeshOutput(MVKCommand* draw, const MVKMTLBufferAllocation* output);
+	const MVKMTLBufferAllocation* takePerVertexPrepassMeshOutput(MVKCommand* draw);
+
+	/** Counts a capture encoded by the prepass, for the PERVERTEX stats line. */
+	void countPerVertexPrepassCapture();
+
 #pragma mark Construction
 
 	MVKCommandEncoder(MVKCommandBuffer* cmdBuffer,
@@ -598,6 +611,7 @@ protected:
 	bool hasMoreMultiviewPasses();
 	void beginNextMultiviewPass();
 	void encodeCommandsImpl(MVKCommand* command);
+	void encodePerVertexPrepass(MVKCommand* command);
 	void encodeGPUCounterSample(MVKGPUCounterQueryPool* mvkQryPool, uint32_t sampleIndex, MVKCounterSamplingFlags samplingPoints);
 	void encodeTimestampStageCounterSamples();
 	id<MTLFence> getStageCountersMTLFence();
@@ -631,6 +645,8 @@ protected:
 	MVKCommandUse _mtlBlitEncoderUse;
 	MVKSmallVector<NSString*, 4> _commandBufferDebugGroups;
 	std::shared_ptr<MVKPerVertexScratch> _lastPerVertexScratch;
+	MVKSmallVector<std::pair<MVKCommand*, const MVKMTLBufferAllocation*>, 8> _perVertexPrepassMesh;
+	size_t _perVertexPrepassMeshNext = 0;
 	bool _isRenderingEntireAttachment;
 	bool _hasMTLRenderEncoderVisibilityResultBuffer;
 	bool _isEncodingStopped = false;
