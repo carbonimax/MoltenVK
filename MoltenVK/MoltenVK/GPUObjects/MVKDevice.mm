@@ -3654,12 +3654,14 @@ void MVKPhysicalDevice::initExtensions() {
 	}
 	// Closed by default until Vulkan rendering qualifies them on devices: PerVertexKHR capture/replay still rejects
 	// valid shader forms, topologies and draw modes, Metal barycentric support alone is not the complete Vulkan
-	// feature contract, and the mesh path covers mesh and fragment stages only. MVK_CONFIG_PERVERTEX_EXPERIMENTAL=1
-	// opens them where Metal supports them, as the test device adapter does.
-	bool experimental = mvkGetEnvVarNumber("MVK_CONFIG_PERVERTEX_EXPERIMENTAL", 0) == 1;
-	pWritableExtns->vk_KHR_fragment_shader_barycentric.enabled &= experimental && _metalFeatures.shaderBarycentricCoordinates;
+	// feature contract, and the mesh path covers mesh and fragment stages only. Each opens where Metal supports it, as
+	// the test device adapter does: MVK_CONFIG_PERVERTEX_EXPERIMENTAL=1 the barycentric extension,
+	// MVK_CONFIG_MESH_SHADER_EXPERIMENTAL=1 the mesh extension. Either can be measured without the other.
+	bool perVertexExperimental = mvkGetEnvVarNumber("MVK_CONFIG_PERVERTEX_EXPERIMENTAL", 0) == 1;
+	bool meshExperimental = mvkGetEnvVarNumber("MVK_CONFIG_MESH_SHADER_EXPERIMENTAL", 0) == 1;
+	pWritableExtns->vk_KHR_fragment_shader_barycentric.enabled &= perVertexExperimental && _metalFeatures.shaderBarycentricCoordinates;
 	pWritableExtns->vk_NV_fragment_shader_barycentric.enabled = false;
-	pWritableExtns->vk_EXT_mesh_shader.enabled &= experimental && [_mtlDevice supportsFamily: MTLGPUFamilyMetal3];
+	pWritableExtns->vk_EXT_mesh_shader.enabled &= meshExperimental && [_mtlDevice supportsFamily: MTLGPUFamilyMetal3];
 	if (!_metalFeatures.arrayOfTextures || !_metalFeatures.arrayOfSamplers) {
 		pWritableExtns->vk_EXT_descriptor_indexing.enabled = false;
 	}
