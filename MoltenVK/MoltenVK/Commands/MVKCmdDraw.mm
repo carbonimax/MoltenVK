@@ -2320,7 +2320,7 @@ VkResult MVKCmdDrawMeshTasks::setContent(MVKCommandBuffer* cmdBuff, uint32_t gro
 	// 4,194,303 on Apple10, all below Vulkan's minimum maxMeshWorkGroupTotalCount of 2^22. On Apple9 the pipeline
 	// reports 1,048,576, and a grid of exactly that many threadgroups draws nothing: the reported value is exclusive.
 	uint64_t groups = uint64_t(groupCountX) * groupCountY * groupCountZ;
-	if (auto* mesh = cmdBuff->getRecordedMeshPipeline(); mesh && !mesh->usesRestoredMeshPipeline() && groups >= mesh->getMaxMeshThreadgroupsPerGrid()) {
+	if (auto* mesh = cmdBuff->getRecordedMeshPipeline(); mesh && !mesh->isMeshShaderEmulated() && groups >= mesh->getMaxMeshThreadgroupsPerGrid()) {
 		return cmdBuff->reportError(VK_ERROR_FEATURE_NOT_PRESENT, "vkCmdDrawMeshTasksEXT(): %llu workgroups reach the %lu this Metal mesh pipeline reports, beyond which it draws nothing.", (unsigned long long)groups, (unsigned long)mesh->getMaxMeshThreadgroupsPerGrid());
 	}
 	if (auto* mesh = cmdBuff->getRecordedMeshPipeline(); mesh && mesh->isMeshShaderEmulated() && groups) {
@@ -2440,6 +2440,19 @@ bool MVKCmdDrawMeshTasks::encodeMesh(MVKCommandEncoder* cmdEncoder, bool prepass
 	if (prepass) { return true; }
 	cmdEncoder->finalizeDrawState(kMVKGraphicsStageRasterization);
 	if (!pipeline->hasValidMTLPipelineStates()) { return true; }
+	const auto& taskImplicit = pipeline->getImplicitBuffers(kMVKShaderStageTask);
+	const auto& meshImplicit = pipeline->getImplicitBuffers(kMVKShaderStageMesh);
+	uint32_t drawId = 0;
+	if (taskImplicit.needed.has(MVKImplicitBuffer::DrawId)) {
+		[cmdEncoder->_mtlRenderEncoder setObjectBytes: &drawId
+		                                       length: sizeof(drawId)
+		                                      atIndex: taskImplicit.ids[MVKImplicitBuffer::DrawId]];
+	}
+	if (meshImplicit.needed.has(MVKImplicitBuffer::DrawId)) {
+		[cmdEncoder->_mtlRenderEncoder setMeshBytes: &drawId
+		                                     length: sizeof(drawId)
+		                                    atIndex: meshImplicit.ids[MVKImplicitBuffer::DrawId]];
+	}
 	[cmdEncoder->_mtlRenderEncoder drawMeshThreadgroups: MTLSizeMake(_groupCountX, _groupCountY, _groupCountZ)
 	                        threadsPerObjectThreadgroup: MTLSizeMake(1, 1, 1)
 	                          threadsPerMeshThreadgroup: pipeline->getMeshThreadgroupSize()];
@@ -2472,6 +2485,19 @@ void MVKCmdDrawMeshTasksIndirect::encode(MVKCommandEncoder* cmdEncoder) {
 		// Metal reads the same three words; beyond its grid limit it draws nothing and reports no error.
 		cmdEncoder->finalizeDrawState(kMVKGraphicsStageRasterization);
 		if (!pipeline->hasValidMTLPipelineStates()) { return; }
+		const auto& taskImplicit = pipeline->getImplicitBuffers(kMVKShaderStageTask);
+		const auto& meshImplicit = pipeline->getImplicitBuffers(kMVKShaderStageMesh);
+		uint32_t drawId = 0;
+		if (taskImplicit.needed.has(MVKImplicitBuffer::DrawId)) {
+			[cmdEncoder->_mtlRenderEncoder setObjectBytes: &drawId
+			                                       length: sizeof(drawId)
+			                                      atIndex: taskImplicit.ids[MVKImplicitBuffer::DrawId]];
+		}
+		if (meshImplicit.needed.has(MVKImplicitBuffer::DrawId)) {
+			[cmdEncoder->_mtlRenderEncoder setMeshBytes: &drawId
+			                                     length: sizeof(drawId)
+			                                    atIndex: meshImplicit.ids[MVKImplicitBuffer::DrawId]];
+		}
 		mvkMeshIndirectNative++;
 		[cmdEncoder->_mtlRenderEncoder drawMeshThreadgroupsWithIndirectBuffer: _mtlIndirectBuffer
 		                                                 indirectBufferOffset: _mtlIndirectBufferOffset

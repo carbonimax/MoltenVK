@@ -1780,6 +1780,9 @@ void MVKGraphicsPipeline::initMTLRenderPipelineState(const VkGraphicsPipelineCre
 		MTLMeshRenderPipelineDescriptor* plDesc = newMTLMeshRenderPipelineDescriptor(pCreateInfo, reflectData, pTaskSS, pTaskFB, pMeshSS, pMeshFB, pFragmentSS, pFragmentFB);
 		if (plDesc) {
 			getOrCompilePipeline(plDesc, _mtlPipelineState);
+			if (_mtlPipelineState) {
+				_maxMeshThreadgroupsPerGrid = _mtlPipelineState.maxTotalThreadgroupsPerMeshGrid;
+			}
 			if (_mtlNativeTasklessMeshBatchedFunction) {
 				if (_mtlPipelineState) {
 					MTLMeshRenderPipelineDescriptor* batchedDesc = [plDesc copy];

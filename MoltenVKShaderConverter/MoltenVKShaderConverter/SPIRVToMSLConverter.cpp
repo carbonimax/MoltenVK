@@ -608,7 +608,12 @@ void SPIRVToMSLConverter::logSource(string& log, string& src, const char* srcLan
 // Although LocalSizeId is the modern mechanism, the Builtin takes precedence if it is present.
 static void getWorkgroupSize(Compiler* pCompiler, SPIREntryPoint& spvEP, uint32_t& x, uint32_t& y, uint32_t& z) {
 	auto& wgSz = spvEP.workgroup_size;
-	if (spvEP.flags.get(ExecutionModeLocalSizeId) && !wgSz.constant) {
+	if (wgSz.constant) {
+		auto& c = pCompiler->get_constant(wgSz.constant);
+		x = c.scalar(0, 0);
+		y = c.scalar(0, 1);
+		z = c.scalar(0, 2);
+	} else if (spvEP.flags.get(ExecutionModeLocalSizeId)) {
 		x = wgSz.id_x ? pCompiler->get_constant(wgSz.id_x).scalar() : 0;
 		y = wgSz.id_y ? pCompiler->get_constant(wgSz.id_y).scalar() : 0;
 		z = wgSz.id_z ? pCompiler->get_constant(wgSz.id_z).scalar() : 0;

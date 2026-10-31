@@ -1530,7 +1530,7 @@ void MVKMetalGraphicsCommandEncoderState::prepareDraw(
 	// Resources
 	if (pipeline->usesPerVertexTessEval()) {
 		// Replay has its own buffers; TES resources were consumed by the compute stage.
-	} else if (pipeline->isMeshPipeline()) {
+	} else if (pipeline->isMeshPipeline() && !pipeline->usesRestoredMeshPipeline()) {
 		// Admitted mesh pipelines have neither vertex input nor mesh-stage resources.
 	} else if (pipeline->isTessellationPipeline()) {
 		bindVulkanGraphicsToMetalGraphics(encoder, mvkEncoder, vk, vkShared, *this, pipeline, kMVKShaderStageTessEval, MVKMetalGraphicsStage::Vertex);
